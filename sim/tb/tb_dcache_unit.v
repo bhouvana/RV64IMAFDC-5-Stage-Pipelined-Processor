@@ -138,6 +138,80 @@ module tb_dcache_unit;
         .s_data_i(m_data_i3), .s_ack(m_ack3)
     );
 
+    // docs/adr/0043-memory-controller-phase-d.md (Generation 4, Phase D). A
+    // 4th DUT, same 2-way/32B/8B-line sizing as `dut`, BURST_ENABLE(1) --
+    // proves DCache.v's own m_cti sequence during a real 2-word line fill.
+    reg rst4 = 0;
+    reg         req_read4 = 0;
+    reg         req_write4 = 0;
+    reg  [31:0] req_addr4 = 0;
+    reg  [31:0] req_wdata4 = 0;
+    reg  [2:0]  req_funct34 = 3'b010;
+    wire [31:0] resp_rdata4;
+    wire        resp_ready4;
+    reg         flush_all4 = 0;
+    wire        flush_busy4, flush_done4;
+    wire        m_cyc4, m_stb4, m_we4;
+    wire [31:0] m_addr4, m_data_o4;
+    wire [3:0]  m_sel4;
+    wire [2:0]  m_funct34;
+    wire [2:0]  m_cti4;
+    wire [31:0] m_data_i4;
+    wire        m_ack4;
+
+    DCache #(.XLEN(32), .WAYS(2), .CACHE_SIZE_BYTES(32), .LINE_BYTES(8),
+             .BURST_ENABLE(1)) dut4(
+        .clk(clk), .rst(rst4),
+        .req_read(req_read4), .req_write(req_write4), .req_addr(req_addr4),
+        .req_wdata(req_wdata4), .req_funct3(req_funct34),
+        .resp_rdata(resp_rdata4), .resp_ready(resp_ready4),
+        .flush_all(flush_all4), .flush_busy(flush_busy4), .flush_done(flush_done4),
+        .m_cyc(m_cyc4), .m_stb(m_stb4), .m_we(m_we4), .m_addr(m_addr4),
+        .m_data_o(m_data_o4), .m_sel(m_sel4), .m_funct3(m_funct34), .m_cti(m_cti4),
+        .m_data_i(m_data_i4), .m_ack(m_ack4)
+    );
+    RamWishboneAdapter #(.SIZE_BYTES(32), .XLEN(32)) m_ram_adapter4(
+        .clk(clk), .rst(rst4),
+        .s_cyc(m_cyc4), .s_stb(m_stb4), .s_we(m_we4), .s_addr(m_addr4),
+        .s_data_o(m_data_o4), .s_sel(m_sel4), .funct3(m_funct34),
+        .s_data_i(m_data_i4), .s_ack(m_ack4)
+    );
+
+    // docs/adr/0043. Mirrors do_write4's own proven @(posedge clk); #1;
+    // polling technique exactly (the same timing convention every other
+    // task in this file already uses successfully) rather than a separate
+    // always block sampling at a different point in the delta-cycle --
+    // captures m_cti4 at the fill's first active cycle (should be
+    // INCR_BURST, more beats coming) and at the exact #1-delayed instant
+    // resp_ready4 is confirmed true (must be END_OF_BURST, the last beat).
+    reg [2:0] cti_at_fill_start, cti_at_completion;
+    task do_write4_capture_cti;
+        input [31:0] addr;
+        input [31:0] wdata;
+        input [2:0] funct3;
+        reg ready_seen, seen_fill_start;
+        begin
+            @(negedge clk);
+            req_addr4 = addr; req_wdata4 = wdata; req_funct34 = funct3; req_write4 = 1; req_read4 = 0;
+            ready_seen = 0;
+            seen_fill_start = 0;
+            while (!ready_seen) begin
+                @(posedge clk);
+                #1;
+                if (m_cyc4 && !seen_fill_start) begin
+                    seen_fill_start = 1;
+                    cti_at_fill_start = m_cti4;
+                end
+                if (resp_ready4) begin
+                    ready_seen = 1;
+                    cti_at_completion = m_cti4;
+                end
+            end
+            @(negedge clk);
+            req_write4 = 0;
+        end
+    endtask
+
     always #5 clk = ~clk;
 
     integer fails = 0;
@@ -535,6 +609,16 @@ module tb_dcache_unit;
         check_word(last_rdata3, 32'hD1D2CDD4, "victim: addr48 (D word0) merged correctly -- only byte1 changed");
         do_read3(52, 3'b010);
         check_word(last_rdata3, 32'h00000000, "victim: addr52 (D word1) untouched by the promote-write -- true per-word merge, not a whole-line overwrite");
+
+        // docs/adr/0043-memory-controller-phase-d.md. Burst-CTI sub-test
+        // (dut4): a cold write-miss forces a plain 2-word S_FILL (the
+        // target way is invalid, so no S_WB precedes it) -- the real
+        // proof is the exact m_cti sequence, not just correct content.
+        @(posedge clk); rst4 <= 0;
+        @(posedge clk); rst4 <= 1;
+        do_write4_capture_cti(0, 32'h13571357, 3'b010);
+        check_bit(cti_at_fill_start == `CTI_INCR_BURST, 1'b1, "burst: fill's first active cycle is CTI_INCR_BURST (more beats coming)");
+        check_bit(cti_at_completion == `CTI_END_OF_BURST, 1'b1, "burst: the cycle resp_ready fires is CTI_END_OF_BURST (this was the last beat)");
 
         if (fails == 0)
             $display("PASS  dcache_unit (%0d checks)", checks);

@@ -1,4 +1,5 @@
 `include "riscvpipeline.v"
+`include "MemoryController.v"
 `include "CompressedExpander.v"
 `include "PC.v"
 `include "Adder.v"
@@ -90,7 +91,16 @@ module tb_perf_cache_j5;
     initial begin
         start = 0;
         #10 start = 1;
-        #300;
+        // docs/adr/0043-memory-controller-phase-d.md (Generation 4, Phase
+        // D). Widened from #300 -- a real, pre-existing RamWishboneAdapter.v
+        // ack bug (fixed this phase) made every multi-word D$ fill complete
+        // artificially fast (reusing one real round-trip's own latency
+        // across every remaining word instead of paying it per word); this
+        // program's own two full D$ line fills now correctly take more
+        // real cycles, so the old fixed budget cut off before the last
+        // instruction's own effects were fully counted (icache_miss/
+        // dcache_hit both landed one short). Generous margin, not tuned.
+        #600;
 
         check_val(dut.m_CSR.mhpmcounter_lo[2], 32'd6, "mhpmcounter5 (icache hit, default event): 6");
         check_val(dut.m_CSR.mhpmcounter_lo[3], 32'd3, "mhpmcounter6 (icache miss, default event): 3");
