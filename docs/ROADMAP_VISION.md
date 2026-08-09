@@ -285,7 +285,10 @@ honest stopping point for Generation 3 as currently scoped. See
   **Replacement policy DONE (Phase B, `docs/adr/0041`)**: `REPLACEMENT_POLICY`
   parameter (`POLICY_ROUND_ROBIN`=0/`POLICY_FIFO`=1/`POLICY_LRU`=2, `LRU`
   a true per-way age-tracking mechanism, not pseudo-LRU) live on both
-  caches. Victim cache and L2 remain real, unscoped backlog.
+  caches. **Victim cache DONE (Phase C, `docs/adr/0042`)**: new standalone
+  `design/VictimCache.v` (small fully-associative buffer, shared by both
+  I$/D$) live as a new `VICTIM_ENTRIES` parameter, resolving a promote-hit
+  in the same cycle as an ordinary hit. L2 remains real, unscoped backlog.
 - **Hardware prefetchers** — next-line, stride, stream.
 - **Non-blocking cache** — multiple outstanding misses, MSHRs.
 - **Memory controller** — burst transfers, improved arbitration.
