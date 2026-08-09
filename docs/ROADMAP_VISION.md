@@ -291,7 +291,16 @@ honest stopping point for Generation 3 as currently scoped. See
   in the same cycle as an ordinary hit. L2 remains real, unscoped backlog.
 - **Hardware prefetchers** — next-line, stride, stream.
 - **Non-blocking cache** — multiple outstanding misses, MSHRs.
-- **Memory controller** — burst transfers, improved arbitration.
+- **Memory controller** — burst transfers, improved arbitration. **DONE
+  (Phase D, `docs/adr/0043`)**: new standalone `design/MemoryController.v`
+  (extracts the existing multi-requester bus mux, no policy change — a real
+  arbiter isn't motivated by anything broken here, confirmed via research
+  before building), real Wishbone B3 CTI burst signaling on `DCache.v`'s own
+  fill/writeback (`BURST_ENABLE`), and a burst-continuation latency discount
+  (`MEM_LATENCY_D_BURST`) — a genuine, measured cycle-count win (-8.1%/
+  -18.3% on real kernels), not a capacity-dependent one. Found and fixed two
+  real, deep, previously-invisible pre-existing D$ fill-path bugs along the
+  way (a stuck read-ack level, and `resp_rdata` returning the wrong word).
 
 **Release:** Advanced Memory Architecture v4.0.
 
