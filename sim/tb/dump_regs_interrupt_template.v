@@ -63,6 +63,9 @@
 // either predictor setting, confirmed by the ADR's own research pass
 // (misprediction recovery injects no new control flow, so it can't
 // interact with interrupt-injection's own termination-safety machinery).
+// __REPLACEMENT_POLICY__ (docs/adr/0041-cache-replacement-policy-phase-b.md)
+// substituted the same way -- purely timing, no cache model in iss.py at
+// all, same category as CACHE_MODE/MEM_LATENCY_I/_D above.
 module dump_regs_interrupt;
     reg clk = 0;
     reg start = 0;
@@ -74,6 +77,7 @@ module dump_regs_interrupt;
     PIPELINED #(.INIT_FILE("__INIT_FILE__"), .HAZARD_STRATEGY(__HAZARD_STRATEGY__),
                 .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .MEM_SIZE_BYTES(__MEM_SIZE__),
                 .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__), .CACHE_MODE(__CACHE_MODE__),
+                .REPLACEMENT_POLICY(__REPLACEMENT_POLICY__),
                 .MEM_LATENCY_I(__MEM_LATENCY_I__), .MEM_LATENCY_D(__MEM_LATENCY_D__),
                 .UART_CLKS_PER_BIT(4), .XLEN(__XLEN__))
         dut(.clk(clk), .start(start), .uart_rx(uart_rx), .uart_tx(uart_tx));

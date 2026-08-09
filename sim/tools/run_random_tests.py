@@ -53,7 +53,7 @@ def load_words(mem_path):
 
 def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0, pipeline_profile=0,
             mem_size=128, interrupt=None, branch_predictor=0, mmu=False, cache_mode=0,
-            mem_latency_i=0, mem_latency_d=0, xlen=32):
+            replacement_policy=0, mem_latency_i=0, mem_latency_d=0, xlen=32):
     prog_s = os.path.join(work_dir, f"r{seed}.s")
     prog_mem = os.path.join(work_dir, f"r{seed}.mem")
     # Generation 2 (Phase M, docs/adr/0028-rv64-migration-phase-m.md): xlen
@@ -128,6 +128,7 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0,
               .replace("__DUMP_WINDOW__", str(dump_window))
               .replace("__BRANCH_PREDICTOR__", str(branch_predictor))
               .replace("__CACHE_MODE__", str(cache_mode))
+              .replace("__REPLACEMENT_POLICY__", str(replacement_policy))
               .replace("__MEM_LATENCY_I__", str(mem_latency_i))
               .replace("__MEM_LATENCY_D__", str(mem_latency_d))
               .replace("__XLEN__", str(xlen))
@@ -213,6 +214,11 @@ def main():
     ap.add_argument("--cache-mode", type=int, default=0, choices=[0, 1],
                      help="riscvpipeline.v's CACHE_MODE (docs/adr/0023-caches.md): "
                           "0=no cache (default, bit-exact), 1=4-way write-back I$/D$")
+    ap.add_argument("--replacement-policy", type=int, default=0, choices=[0, 1, 2],
+                     help="riscvpipeline.v's REPLACEMENT_POLICY (docs/adr/0041-cache-replacement-"
+                          "policy-phase-b.md): 0=round-robin (default, bit-exact), 1=FIFO "
+                          "(identical mechanism to round-robin), 2=LRU. Only meaningful under "
+                          "--cache-mode 1")
     ap.add_argument("--mem-latency-i", type=int, default=0,
                      help="riscvpipeline.v's MEM_LATENCY_I (docs/adr/0024-variable-latency-memory.md): "
                           "extra I-side wait-state cycles, 0=bit-exact default")
@@ -301,6 +307,7 @@ def main():
                               mem_size=mem_size, interrupt=args.interrupt,
                               branch_predictor=args.branch_predictor, mmu=args.mmu,
                               cache_mode=args.cache_mode,
+                              replacement_policy=args.replacement_policy,
                               mem_latency_i=args.mem_latency_i, mem_latency_d=args.mem_latency_d,
                               xlen=args.xlen)
             if ok:
