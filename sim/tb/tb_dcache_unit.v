@@ -53,6 +53,47 @@ module tb_dcache_unit;
         .s_data_i(m_data_i), .s_ack(m_ack)
     );
 
+    // docs/adr/0041-cache-replacement-policy-phase-b.md. A second, fully
+    // independent DUT: 4-way/2-set (64B cache, 8B lines -> 8 lines / 4 ways
+    // = 2 sets), REPLACEMENT_POLICY=2 (POLICY_LRU) -- same worked example
+    // tb_icache_unit.v's own dut3 proves, adapted for D-side read/write.
+    // Test addresses all share bit3=0 (set0), same routing-around of the
+    // pre-existing SET_BITS==0 part-select bug (docs/adr/0041) dut3 uses.
+    reg rst2 = 0;
+    reg         req_read2 = 0;
+    reg         req_write2 = 0;
+    reg  [31:0] req_addr2 = 0;
+    reg  [31:0] req_wdata2 = 0;
+    reg  [2:0]  req_funct32 = 3'b010;
+    wire [31:0] resp_rdata2;
+    wire        resp_ready2;
+    reg         flush_all2 = 0;
+    wire        flush_busy2, flush_done2;
+    wire        m_cyc2, m_stb2, m_we2;
+    wire [31:0] m_addr2, m_data_o2;
+    wire [3:0]  m_sel2;
+    wire [2:0]  m_funct32;
+    wire [31:0] m_data_i2;
+    wire        m_ack2;
+
+    DCache #(.XLEN(32), .WAYS(4), .CACHE_SIZE_BYTES(64), .LINE_BYTES(8),
+             .REPLACEMENT_POLICY(2)) dut2(
+        .clk(clk), .rst(rst2),
+        .req_read(req_read2), .req_write(req_write2), .req_addr(req_addr2),
+        .req_wdata(req_wdata2), .req_funct3(req_funct32),
+        .resp_rdata(resp_rdata2), .resp_ready(resp_ready2),
+        .flush_all(flush_all2), .flush_busy(flush_busy2), .flush_done(flush_done2),
+        .m_cyc(m_cyc2), .m_stb(m_stb2), .m_we(m_we2), .m_addr(m_addr2),
+        .m_data_o(m_data_o2), .m_sel(m_sel2), .m_funct3(m_funct32),
+        .m_data_i(m_data_i2), .m_ack(m_ack2)
+    );
+    RamWishboneAdapter #(.SIZE_BYTES(96), .XLEN(32)) m_ram_adapter2(
+        .clk(clk), .rst(rst2),
+        .s_cyc(m_cyc2), .s_stb(m_stb2), .s_we(m_we2), .s_addr(m_addr2),
+        .s_data_o(m_data_o2), .s_sel(m_sel2), .funct3(m_funct32),
+        .s_data_i(m_data_i2), .s_ack(m_ack2)
+    );
+
     always #5 clk = ~clk;
 
     integer fails = 0;
@@ -145,6 +186,80 @@ module tb_dcache_unit;
         end
     endtask
 
+    reg [31:0] last_rdata2;
+    // docs/adr/0041. Cycle-count-based hit/miss differentiator (mirrors
+    // tb_icache_unit.v's own MEM_LATENCY timing check) -- a genuine hit
+    // resolves in exactly 1 posedge (S_IDLE->S_HIT_RD, resp_ready fires);
+    // a genuine miss takes many more (S_WB and/or S_FILL's own multi-word
+    // transfer).
+    reg        last_was_miss2;
+    // docs/adr/0041. A read-hit's own access_hit clause (state==S_HIT_RD &&
+    // req_read && ...) is evaluated on the S_HIT_RD->S_IDLE registering
+    // edge itself -- req_read2 has to stay asserted THROUGH that edge, one
+    // full cycle later than resp_ready2 first goes high (which fires
+    // combinationally the SAME cycle S_HIT_RD is entered, not the cycle it
+    // exits). Dropping req_read2 right after seeing resp_ready2 (as the
+    // pre-existing do_read/do_write above do, harmless for THEIR own
+    // purposes since they only ever need resp_ready/resp_rdata's own
+    // single-instant value) silently starves lru_touch's own read-hit call
+    // of ever seeing req_read=1 at the edge that needs it -- a real bug in
+    // this NEW helper task, not in access_hit's own design (a real pipeline
+    // caller naturally holds req_read asserted until mem_stall lets it
+    // advance, which is always at least this long). Found and fixed while
+    // debugging this exact sub-test showing content correct but hit/miss
+    // wrong (round-robin's own eviction choice, not LRU's).
+    task do_read2;
+        input [31:0] addr;
+        input [2:0] funct3;
+        reg ready_seen;
+        integer cyc;
+        begin
+            @(negedge clk);
+            req_addr2 = addr; req_funct32 = funct3; req_read2 = 1; req_write2 = 0;
+            ready_seen = 0;
+            cyc = 0;
+            while (!ready_seen) begin
+                @(posedge clk);
+                cyc = cyc + 1;
+                #1;
+                if (resp_ready2) begin
+                    ready_seen = 1;
+                    last_rdata2 = resp_rdata2;
+                end
+            end
+            last_was_miss2 = (cyc > 1);   // a hit resolves in exactly 1 cycle
+            // Only a HIT needs the extra cycle (see this task's own header
+            // comment) -- a MISS's own touch already happened via the
+            // registered miss_set_r/miss_way_r path inside S_FILL, and
+            // state is back at S_IDLE THIS same cycle, so holding req_read2
+            // one cycle longer here would look like a brand-new request and
+            // spuriously double-access the line just filled.
+            if (!last_was_miss2)
+                @(posedge clk);
+            @(negedge clk);
+            req_read2 = 0;
+        end
+    endtask
+
+    task do_write2;
+        input [31:0] addr;
+        input [31:0] wdata;
+        input [2:0] funct3;
+        reg ready_seen;
+        begin
+            @(negedge clk);
+            req_addr2 = addr; req_wdata2 = wdata; req_funct32 = funct3; req_write2 = 1; req_read2 = 0;
+            ready_seen = 0;
+            while (!ready_seen) begin
+                @(posedge clk);
+                #1;
+                if (resp_ready2) ready_seen = 1;
+            end
+            @(negedge clk);
+            req_write2 = 0;
+        end
+    endtask
+
     initial begin
         @(posedge clk); rst <= 0;
         @(posedge clk); rst <= 1;
@@ -219,6 +334,51 @@ module tb_dcache_unit;
         // Cache still hits after flush (data stays cached, only becomes clean).
         do_read(40, 3'b010);
         check_word(last_rdata, 32'h5A5A5A5A, "addr40 still hits (cached, clean) after flush -- flush doesn't invalidate");
+
+        // -- POLICY_LRU sub-test (dut2): same worked example as
+        // tb_icache_unit.v's own dut3 -- fill A(0),B(16),C(32),D(48) (one
+        // per way, all sharing bit3=0/set0), re-touch A and B (hits), miss
+        // on E(64) forces eviction. Round-robin's blind pointer would evict
+        // A; true LRU evicts C. Uses do_read2's own cycle-count-based
+        // last_was_miss2 (not content comparison) for the differentiator
+        // checks: C's own dirty write gets correctly written back to
+        // backing RAM on eviction, so a post-eviction read-back would show
+        // the SAME content whether it hit or genuinely missed-then-refilled
+        // -- only real hit/miss timing disambiguates.
+        @(posedge clk); rst2 <= 0;
+        @(posedge clk); rst2 <= 1;
+
+        do_write2(0,  32'hAAAA0000, 3'b010);
+        do_write2(16, 32'hBBBB0000, 3'b010);
+        do_write2(32, 32'hCCCC0000, 3'b010);
+        do_write2(48, 32'hDDDD0000, 3'b010);   // all 4 ways of set0 now full
+
+        do_read2(0, 3'b010);
+        check_word(last_rdata2, 32'hAAAA0000, "LRU-D: addr0 (A) re-touch hit, correct data");
+        do_read2(16, 3'b010);
+        check_word(last_rdata2, 32'hBBBB0000, "LRU-D: addr16 (B) re-touch hit, correct data");
+
+        do_write2(64, 32'hEEEE0000, 3'b010);   // 5th distinct tag: forces eviction
+        do_read2(64, 3'b010);
+        check_word(last_rdata2, 32'hEEEE0000, "LRU-D: addr64 (E) fill/read-back correct");
+
+        // docs/adr/0041: check D and A (both still genuinely cached) BEFORE
+        // re-reading C -- C's own re-read is itself a fresh miss (its line
+        // was just evicted), which correctly forces ANOTHER real eviction
+        // (of whichever way is now LRU-tail) to make room for its refill.
+        // Checking C first would cascade into a second, unplanned eviction
+        // before D/A's own checks ran, corrupting the very thing they're
+        // meant to prove. Real LRU behavior, not a bug -- reordered instead
+        // of "fixing" the RTL to match a wrong test expectation.
+        do_read2(48, 3'b010);
+        check_bit(last_was_miss2, 1'b0, "LRU-D: addr48 (D) still HITS -- LRU correctly spared it over C");
+        check_word(last_rdata2, 32'hDDDD0000, "LRU-D: addr48 (D) content undisturbed");
+        do_read2(0, 3'b010);
+        check_bit(last_was_miss2, 1'b0, "LRU-D: addr0 (A) still HITS -- round-robin's blind choice (evict A) would have failed this");
+        check_word(last_rdata2, 32'hAAAA0000, "LRU-D: addr0 (A) content undisturbed");
+        do_read2(32, 3'b010);
+        check_bit(last_was_miss2, 1'b1, "LRU-D: addr32 (C) genuinely MISSES -- true LRU evicted the actual least-recently-used way");
+        check_word(last_rdata2, 32'hCCCC0000, "LRU-D: addr32 (C) refill content correct (its own dirty writeback landed before the new fill)");
 
         if (fails == 0)
             $display("PASS  dcache_unit (%0d checks)", checks);

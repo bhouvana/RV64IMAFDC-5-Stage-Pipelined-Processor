@@ -46,7 +46,13 @@ module DCache #(
     parameter XLEN = 32,
     parameter WAYS = 4,
     parameter CACHE_SIZE_BYTES = 4096,
-    parameter LINE_BYTES = 16
+    parameter LINE_BYTES = 16,
+    // docs/adr/0041-cache-replacement-policy-phase-b.md (Generation 4, Phase
+    // B). Same closed enum ICache.v's own REPLACEMENT_POLICY uses (see its
+    // header comment for the full POLICY_ROUND_ROBIN/FIFO/LRU rationale --
+    // not repeated here to avoid drift between two independently-maintained
+    // copies of the same explanation).
+    parameter REPLACEMENT_POLICY = 0
 )(
     input clk,
     input rst,
@@ -102,9 +108,24 @@ localparam TAG_BITS      = XLEN - SET_BITS - OFFSET_BITS;
 localparam WAY_BITS      = $clog2(WAYS);
 localparam LINE_IDX_BITS = SET_BITS + WAY_BITS;
 
+// REPLACEMENT_POLICY values (docs/adr/0041) -- same three values as
+// ICache.v's own copy.
+localparam POLICY_ROUND_ROBIN = 0;
+localparam POLICY_FIFO        = 1;
+localparam POLICY_LRU         = 2;
+
 wire [WORD_OFF_BITS-1:0] word_off = req_addr[OFFSET_BITS-1:2];
 wire [1:0]               byte_off = req_addr[1:0];
-wire [SET_BITS-1:0]      set_idx  = req_addr[OFFSET_BITS+SET_BITS-1:OFFSET_BITS];
+// docs/adr/0041. Same fix as ICache.v's own set_idx -- see its comment for
+// the full rationale.
+wire [SET_BITS-1:0]      set_idx;
+generate
+if (SET_BITS == 0) begin : gen_set_idx_fully_assoc
+    assign set_idx = {SET_BITS{1'b0}};
+end else begin : gen_set_idx_normal
+    assign set_idx = req_addr[OFFSET_BITS+SET_BITS-1:OFFSET_BITS];
+end
+endgenerate
 wire [TAG_BITS-1:0]      tag      = req_addr[XLEN-1:OFFSET_BITS+SET_BITS];
 
 reg                 valid   [0:NUM_LINES-1];
@@ -112,6 +133,11 @@ reg                 dirty   [0:NUM_LINES-1];
 reg [TAG_BITS-1:0]  tag_arr [0:NUM_LINES-1];
 reg [XLEN-1:0]      data_arr[0:NUM_LINES*LINE_WORDS-1];
 reg [WAY_BITS-1:0]  victim  [0:NUM_SETS-1];
+// docs/adr/0041. Same per-set/per-way access-recency rank ICache.v's own
+// age[] tracks -- see its header comment for the full rationale.
+// ponytail: always-maintained regardless of REPLACEMENT_POLICY, same
+// rationale as ICache.v's own copy.
+reg [WAY_BITS-1:0]  age     [0:NUM_SETS-1][0:WAYS-1];
 
 // N-way tag compare, same generate/assign shape ICache.v uses (avoids the
 // Icarus "always @* sensitive to all N words" warning a procedural for-loop
@@ -139,6 +165,22 @@ endgenerate
 wire hit = |way_hit;
 wire [XLEN-1:0]          hit_data     = hit_data_acc[WAYS];
 wire [LINE_IDX_BITS-1:0] hit_line_idx = hit_lineidx_acc[WAYS];
+
+// docs/adr/0041. POLICY_LRU's own victim choice -- same shape as
+// ICache.v's own gen_lru_victim block. (hit_line_idx already gives a
+// hit's own way via its low WAY_BITS bits -- line_idx = set*WAYS+way with
+// WAYS a power of 2, per this file's own header comment -- so no separate
+// hit-way accumulator is needed here the way ICache.v's is.)
+wire [WAYS-1:0]     is_lru_way;
+wire [WAY_BITS-1:0] lru_way_acc [0:WAYS];
+assign lru_way_acc[0] = {WAY_BITS{1'b0}};
+generate
+    for (gw = 0; gw < WAYS; gw = gw + 1) begin : gen_lru_victim
+        assign is_lru_way[gw]    = (age[set_idx][gw] == WAYS-1);
+        assign lru_way_acc[gw+1] = lru_way_acc[gw] | (is_lru_way[gw] ? gw[WAY_BITS-1:0] : {WAY_BITS{1'b0}});
+    end
+endgenerate
+wire [WAY_BITS-1:0] lru_way_idx = lru_way_acc[WAYS];
 
 // docs/adr/0025-hpc-performance-csrs.md (Phase J5). `access_miss` fires
 // exactly once at the S_IDLE cycle a miss is recognized (state leaves
@@ -297,13 +339,38 @@ reg [XLEN-1:0]     served_addr_r;   // latched at S_HIT_RD entry -- the address 
 
 wire [31:0] hit_rd_word = data_arr[hit_line_r*LINE_WORDS + hit_word_r];
 
+// docs/adr/0041. The way/set access_hit (declared above) touched: at
+// S_IDLE (the write-hit case, resp_ready fires the SAME cycle) it's
+// hit_line_idx, still live combinationally; at S_HIT_RD (the read-hit
+// case, completing one cycle later) it's hit_line_r, latched back at
+// S_IDLE detection time and still valid through S_HIT_RD.
+wire [WAY_BITS-1:0] access_hit_way = (state == S_IDLE) ? hit_line_idx[WAY_BITS-1:0]
+                                                        : hit_line_r[WAY_BITS-1:0];
+wire [SET_BITS-1:0] access_hit_set = (state == S_IDLE) ? hit_line_idx[LINE_IDX_BITS-1:WAY_BITS]
+                                                        : hit_line_r[LINE_IDX_BITS-1:WAY_BITS];
+
 wire fill_is_last_word = (fill_word_r == LINE_WORDS-1);
 wire fill_do_merge = miss_is_write_r && (fill_word_r == miss_word_off_r);
 wire [31:0] fill_value = fill_do_merge
     ? dcache_merge_write(m_data_i, miss_funct3_r[1:0], miss_byteoff_r, miss_wdata_r)
     : m_data_i;
 
-integer reset_i;
+// docs/adr/0041. Same LRU-stack update ICache.v's own lru_touch performs.
+task lru_touch;
+    input [SET_BITS-1:0] t_set;
+    input [WAY_BITS-1:0] t_way;
+    integer k;
+    begin
+        for (k = 0; k < WAYS; k = k + 1) begin
+            if (k[WAY_BITS-1:0] == t_way)
+                age[t_set][k] <= {WAY_BITS{1'b0}};
+            else if (age[t_set][k] < age[t_set][t_way])
+                age[t_set][k] <= age[t_set][k] + 1'b1;
+        end
+    end
+endtask
+
+integer reset_i, reset_j;
 always @(posedge clk) begin
     if (~rst) begin
         state <= S_IDLE;
@@ -313,11 +380,21 @@ always @(posedge clk) begin
             valid[reset_i] <= 1'b0;
             dirty[reset_i] <= 1'b0;
         end
-        for (reset_i = 0; reset_i < NUM_SETS; reset_i = reset_i + 1)
+        for (reset_i = 0; reset_i < NUM_SETS; reset_i = reset_i + 1) begin
             victim[reset_i] <= {WAY_BITS{1'b0}};
+            for (reset_j = 0; reset_j < WAYS; reset_j = reset_j + 1)
+                age[reset_i][reset_j] <= reset_j[WAY_BITS-1:0];
+        end
     end
     else begin
         flush_done_r <= 1'b0;   // default: one-cycle pulse, cleared unless set below
+
+        // docs/adr/0041. POLICY_LRU: touch on every real access-hit (reuses
+        // the existing J5 access_hit signal, already exactly-once-per-real-
+        // access -- see its own header comment) and on every fill
+        // completion (below, inside S_FILL).
+        if (REPLACEMENT_POLICY == POLICY_LRU && access_hit)
+            lru_touch(access_hit_set, access_hit_way);
 
         case (state)
             S_IDLE: begin
@@ -346,7 +423,7 @@ always @(posedge clk) begin
                     else begin
                         miss_set_r      <= set_idx;
                         miss_tag_r      <= tag;
-                        miss_way_r      <= victim[set_idx];
+                        miss_way_r      <= (REPLACEMENT_POLICY == POLICY_LRU) ? lru_way_idx : victim[set_idx];
                         miss_base_r     <= {req_addr[XLEN-1:OFFSET_BITS], {OFFSET_BITS{1'b0}}};
                         miss_word_off_r <= word_off;
                         miss_byteoff_r  <= byte_off;
@@ -407,6 +484,8 @@ always @(posedge clk) begin
                         tag_arr[miss_set_r*WAYS + miss_way_r] <= miss_tag_r;
                         dirty[miss_set_r*WAYS + miss_way_r]   <= miss_is_write_r;   // a read-miss fill is clean; a write-allocate fill is dirty
                         victim[miss_set_r] <= (miss_way_r == WAYS-1) ? {WAY_BITS{1'b0}} : miss_way_r + 1'b1;
+                        if (REPLACEMENT_POLICY == POLICY_LRU)
+                            lru_touch(miss_set_r, miss_way_r);
                         state <= S_IDLE;
                     end
                     else begin
