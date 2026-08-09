@@ -56,12 +56,21 @@ MEM_LATENCY_I=MEM_LATENCY_D=0 (the default, bit-exact) and whatever
 when --compare-latency is used and neither was set, since comparing 0
 against 0 would be a no-op), reporting the cycle-count delta.
 
+--compare-replacement does the same for cache replacement policy
+(docs/adr/0041-cache-replacement-policy-phase-b.md, Generation 4 Phase B):
+every benchmark under all 3 REPLACEMENT_POLICY values (forces --cache-mode 1,
+since the parameter is a no-op otherwise), reporting the cycle-count delta.
+POLICY_ROUND_ROBIN and POLICY_FIFO are the same underlying mechanism, so
+expect identical numbers between those two -- POLICY_LRU is the real
+comparison.
+
 Usage: python bench_runner.py --iverilog-dir /c/iverilog/bin
        python bench_runner.py --compare-strategies --iverilog-dir /c/iverilog/bin
        python bench_runner.py --compare-profiles --iverilog-dir /c/iverilog/bin
        python bench_runner.py --compare-predictors --iverilog-dir /c/iverilog/bin
        python bench_runner.py --compare-cache --iverilog-dir /c/iverilog/bin
        python bench_runner.py --compare-latency --iverilog-dir /c/iverilog/bin
+       python bench_runner.py --compare-replacement --iverilog-dir /c/iverilog/bin
 """
 import argparse
 import glob
@@ -110,7 +119,7 @@ def load_words(mem_path):
 
 
 def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_strategy=0, pipeline_profile=0,
-              branch_predictor=0, cache_mode=0, mem_latency_i=0, mem_latency_d=0, xlen=32):
+              branch_predictor=0, cache_mode=0, replacement_policy=0, mem_latency_i=0, mem_latency_d=0, xlen=32):
     here = os.path.dirname(os.path.abspath(__file__))
     prog_mem = os.path.join(work_dir, f"{name}.mem")
     asm_py = os.path.join(here, "asm.py")
@@ -152,7 +161,7 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
     # a flat per-instruction margin, not tuned per-kernel.
     max_time = (instrs * (60 + 2 * (mem_latency_i + mem_latency_d)) + 500) * 10 + (4000 if cache_mode else 0)
     tag = (f"{name}_hs{hazard_strategy}_p{pipeline_profile}_bp{branch_predictor}_cm{cache_mode}"
-           f"_li{mem_latency_i}_ld{mem_latency_d}")
+           f"_rp{replacement_policy}_li{mem_latency_i}_ld{mem_latency_d}")
     dump_v = os.path.join(work_dir, f"{tag}.v")
     out_path = os.path.join(work_dir, f"{tag}.out").replace("\\", "/")
     init_file_rel = os.path.relpath(prog_mem, start=os.getcwd()).replace("\\", "/")
@@ -166,6 +175,7 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
               .replace("__PIPELINE_PROFILE__", str(pipeline_profile))
               .replace("__BRANCH_PREDICTOR__", str(branch_predictor))
               .replace("__CACHE_MODE__", str(cache_mode))
+              .replace("__REPLACEMENT_POLICY__", str(replacement_policy))
               .replace("__XLEN__", str(xlen))
               .replace("__MEM_LATENCY_I__", str(mem_latency_i))
               .replace("__MEM_LATENCY_D__", str(mem_latency_d)))
@@ -213,6 +223,10 @@ def main():
     ap.add_argument("--cache-mode", type=int, default=0, choices=[0, 1],
                      help="riscvpipeline.v's CACHE_MODE (docs/adr/0023-caches.md): 0=CACHE_NONE (default), "
                           "1=CACHE_WRITEBACK_SETASSOC")
+    ap.add_argument("--replacement-policy", type=int, default=0, choices=[0, 1, 2],
+                     help="riscvpipeline.v's REPLACEMENT_POLICY (docs/adr/0041-cache-replacement-policy-"
+                          "phase-b.md): 0=POLICY_ROUND_ROBIN (default), 1=POLICY_FIFO, 2=POLICY_LRU. "
+                          "Only meaningful under --cache-mode 1")
     ap.add_argument("--mem-latency-i", type=int, default=0,
                      help="riscvpipeline.v's MEM_LATENCY_I (docs/adr/0024-variable-latency-memory.md): "
                           "extra I-side wait-state cycles, 0=bit-exact default")
@@ -237,10 +251,16 @@ def main():
                           help="run every benchmark under MEM_LATENCY_I=MEM_LATENCY_D=0 and whatever "
                                "--mem-latency-i/--mem-latency-d were passed (both default to 3 here if neither "
                                "was set) and report the cycle-count delta")
+    compare.add_argument("--compare-replacement", action="store_true",
+                          help="run every benchmark under all 3 REPLACEMENT_POLICY values "
+                               "(at --hazard-strategy/--pipeline-profile/--branch-predictor, forced "
+                               "--cache-mode 1 since the parameter is a no-op otherwise) and report the delta")
     args = ap.parse_args()
 
     if args.compare_latency and args.mem_latency_i == 0 and args.mem_latency_d == 0:
         args.mem_latency_i = args.mem_latency_d = 3
+    if args.compare_replacement:
+        args.cache_mode = 1
 
     here = os.path.dirname(os.path.abspath(__file__))
     template = os.path.join(here, "..", "tb", "bench_template.v")
@@ -251,44 +271,51 @@ def main():
         sys.exit(1)
 
     # pairs are always (hazard_strategy, pipeline_profile, branch_predictor,
-    # cache_mode, mem_latency_i, mem_latency_d) 6-tuples; a --compare-* flag
-    # varies exactly one axis while holding the rest at whatever
-    # --hazard-strategy/--pipeline-profile/--branch-predictor/--cache-mode/
-    # --mem-latency-i/--mem-latency-d were passed (defaulting to 0 each).
+    # cache_mode, replacement_policy, mem_latency_i, mem_latency_d) 7-tuples;
+    # a --compare-* flag varies exactly one axis while holding the rest at
+    # whatever --hazard-strategy/--pipeline-profile/--branch-predictor/
+    # --cache-mode/--replacement-policy/--mem-latency-i/--mem-latency-d were
+    # passed (defaulting to 0 each).
     if args.compare_strategies:
         axis, axis_label = "strategy", "HAZARD_STRATEGY"
         keys = (0, 1)
         pairs = [(s, args.pipeline_profile, args.branch_predictor, args.cache_mode,
-                  args.mem_latency_i, args.mem_latency_d) for s in keys]
+                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d) for s in keys]
     elif args.compare_profiles:
         axis, axis_label = "profile", "PIPELINE_PROFILE"
         keys = (0, 1)
         pairs = [(args.hazard_strategy, p, args.branch_predictor, args.cache_mode,
-                  args.mem_latency_i, args.mem_latency_d) for p in keys]
+                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d) for p in keys]
     elif args.compare_predictors:
         axis, axis_label = "predictor", "BRANCH_PREDICTOR"
         keys = (0, 1, 2, 3)   # Generation 4, Phase A (docs/adr/0040): GShare + tournament joined the axis
         pairs = [(args.hazard_strategy, args.pipeline_profile, bp, args.cache_mode,
-                  args.mem_latency_i, args.mem_latency_d) for bp in keys]
+                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d) for bp in keys]
     elif args.compare_cache:
         axis, axis_label = "cache", "CACHE_MODE"
         keys = (0, 1)
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, cm,
-                  args.mem_latency_i, args.mem_latency_d) for cm in keys]
+                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d) for cm in keys]
     elif args.compare_latency:
         axis, axis_label = "latency", "MEM_LATENCY_I/D"
         keys = (0, 1)
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
-                  li, ld) for li, ld in ((0, 0), (args.mem_latency_i, args.mem_latency_d))]
+                  args.replacement_policy, li, ld) for li, ld in ((0, 0), (args.mem_latency_i, args.mem_latency_d))]
+    elif args.compare_replacement:
+        axis, axis_label = "replacement", "REPLACEMENT_POLICY"
+        keys = (0, 1, 2)
+        pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
+                  rp, args.mem_latency_i, args.mem_latency_d) for rp in keys]
     else:
         axis, axis_label = None, None
         keys = (args.hazard_strategy,)  # single run, keyed arbitrarily by hazard_strategy
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
-                  args.mem_latency_i, args.mem_latency_d)]
+                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d)]
 
     all_results = {k: [] for k in keys}
     with tempfile.TemporaryDirectory() as work_dir:
-        for key, (strategy, profile, predictor, cache_mode, mem_latency_i, mem_latency_d) in zip(keys, pairs):
+        for key, (strategy, profile, predictor, cache_mode, replacement_policy, mem_latency_i, mem_latency_d) \
+                in zip(keys, pairs):
             if axis == "strategy":
                 print(f"--- HAZARD_STRATEGY={strategy} ({'forwarding' if strategy == 0 else 'stall-only'}) ---")
             elif axis == "profile":
@@ -303,11 +330,15 @@ def main():
                       f"({'CACHE_NONE' if cache_mode == 0 else 'CACHE_WRITEBACK_SETASSOC'}) ---")
             elif axis == "latency":
                 print(f"--- MEM_LATENCY_I={mem_latency_i} MEM_LATENCY_D={mem_latency_d} ---")
+            elif axis == "replacement":
+                policy_names = {0: "POLICY_ROUND_ROBIN", 1: "POLICY_FIFO", 2: "POLICY_LRU"}
+                print(f"--- REPLACEMENT_POLICY={replacement_policy} ({policy_names[replacement_policy]}) ---")
             for prog_s in progs:
                 name = os.path.splitext(os.path.basename(prog_s))[0]
                 mem_size = MEM_SIZE_OVERRIDES.get(name, 128)
                 result, err = run_bench(name, prog_s, work_dir, args.iverilog_dir, template, mem_size,
-                                         strategy, profile, predictor, cache_mode, mem_latency_i, mem_latency_d)
+                                         strategy, profile, predictor, cache_mode, replacement_policy,
+                                         mem_latency_i, mem_latency_d)
                 if err:
                     print(f"FAIL  {name}: {err}")
                     all_results[key].append((name, None))
@@ -338,6 +369,7 @@ def main():
             "cache": {0: "CACHE_NONE (CM=0)", 1: "CACHE_WRITEBACK_SETASSOC (CM=1)"},
             "latency": {0: "MEM_LATENCY_I=D=0", 1: f"MEM_LATENCY_I={args.mem_latency_i} "
                                                      f"MEM_LATENCY_D={args.mem_latency_d}"},
+            "replacement": {0: "POLICY_ROUND_ROBIN (RP=0)", 1: "POLICY_FIFO (RP=1)", 2: "POLICY_LRU (RP=2)"},
         }
         baseline_key = keys[0]
         by_name_baseline = dict(all_results[baseline_key])
