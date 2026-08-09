@@ -32,6 +32,14 @@ SCALEUP_WINDOW_BYTES = 65536
 
 
 def load_words(mem_path):
+    # Generation 4, Phase A (docs/adr/0040): byte order here was stale --
+    # design/InstructionMemory.v/DataMemoryBRAM.v have read LSB-first
+    # (`{mem[addr+3], mem[addr+2], mem[addr+1], mem[addr]}`) since Phase U
+    # (docs/adr/0037), but this helper still concatenated b[0..3] MSB-first,
+    # the pre-Phase-U convention -- silently decoding every word here as
+    # garbage (found because it broke ISS reference-model execution for
+    # every seed regardless of BRANCH_PREDICTOR value, not something this
+    # phase's own RTL work caused). Reversed to match.
     with open(mem_path) as f:
         lines = [l.strip() for l in f if l.strip()]
     words = []
@@ -39,7 +47,7 @@ def load_words(mem_path):
         b = lines[i:i + 4]
         if len(b) < 4:
             break
-        words.append(int(b[0] + b[1] + b[2] + b[3], 2))
+        words.append(int(b[3] + b[2] + b[1] + b[0], 2))
     return words
 
 
@@ -198,9 +206,10 @@ def main():
     ap.add_argument("--pipeline-profile", type=int, default=0, choices=[0, 1],
                      help="riscvpipeline.v's PIPELINE_PROFILE (docs/adr/0018): "
                           "0=5-stage (default), 1=6-stage split-fetch")
-    ap.add_argument("--branch-predictor", type=int, default=0, choices=[0, 1],
-                     help="riscvpipeline.v's BRANCH_PREDICTOR (docs/adr/0021): "
-                          "0=static not-taken (default), 1=dynamic BHT+BTB")
+    ap.add_argument("--branch-predictor", type=int, default=0, choices=[0, 1, 2, 3],
+                     help="riscvpipeline.v's BRANCH_PREDICTOR (docs/adr/0021, docs/adr/0040): "
+                          "0=static not-taken (default), 1=dynamic BHT+BTB, "
+                          "2=GShare, 3=tournament (BHT+GShare+chooser)")
     ap.add_argument("--cache-mode", type=int, default=0, choices=[0, 1],
                      help="riscvpipeline.v's CACHE_MODE (docs/adr/0023-caches.md): "
                           "0=no cache (default, bit-exact), 1=4-way write-back I$/D$")

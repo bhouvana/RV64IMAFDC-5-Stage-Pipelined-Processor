@@ -39,6 +39,8 @@
 `include "Ptw39.v"
 `include "Bht.v"
 `include "Btb.v"
+`include "Gshare.v"
+`include "Chooser.v"
 `include "ICache.v"
 `include "DCache.v"
 `include "MemoryLatencyModel.v"

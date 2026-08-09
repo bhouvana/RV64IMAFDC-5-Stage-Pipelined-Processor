@@ -32,6 +32,10 @@ CSR_BY_ADDR = {CSR_MSTATUS: "mstatus", CSR_MTVEC: "mtvec", CSR_MSCRATCH: "mscrat
 
 
 def load_words(mem_path):
+    # Generation 4, Phase A (docs/adr/0040): byte order here was stale --
+    # see run_random_tests.py's own copy of this same helper for the full
+    # story (Phase U, docs/adr/0037, flipped IMEM/DMEM to LSB-first; this
+    # copy was never updated). Reversed to match.
     with open(mem_path) as f:
         lines = [l.strip() for l in f if l.strip()]
     words = []
@@ -39,7 +43,7 @@ def load_words(mem_path):
         b = lines[i:i + 4]
         if len(b) < 4:
             break
-        words.append(int(b[0] + b[1] + b[2] + b[3], 2))
+        words.append(int(b[3] + b[2] + b[1] + b[0], 2))
     return words
 
 
