@@ -172,6 +172,12 @@ int main(int argc, char **argv) {
                     (unsigned long long)dut->debug_x2, (unsigned long long)dut->debug_x4,
                     (unsigned long long)dut->debug_x10, (unsigned long long)dut->debug_x11,
                     (unsigned long long)dut->debug_x12, (unsigned long long)dut->debug_x13);
+            fprintf(stderr, "    mtval=%#llx satp=%#llx translate_enable=%u itlb_hit=%u itlb_hit_fault=%u ptw_busy=%u ptw_done=%u ptw_fault=%u ptw_vaddr=%#llx ptw_m_addr=%#llx\n",
+                    (unsigned long long)dut->debug_mtval, (unsigned long long)dut->debug_satp,
+                    (unsigned)dut->debug_translate_enable, (unsigned)dut->debug_itlb_hit,
+                    (unsigned)dut->debug_itlb_hit_fault, (unsigned)dut->debug_ptw_busy,
+                    (unsigned)dut->debug_ptw_done, (unsigned)dut->debug_ptw_fault,
+                    (unsigned long long)dut->debug_ptw_vaddr, (unsigned long long)dut->debug_ptw_m_addr);
         }
 
         if (cycle % progress_every == 0) {

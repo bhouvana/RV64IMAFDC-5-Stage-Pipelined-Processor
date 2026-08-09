@@ -193,7 +193,20 @@ module PIPELINED #(
     output [XLEN-1:0] debug_x4,
     output [XLEN-1:0] debug_x11,
     output [XLEN-1:0] debug_x12,
-    output [XLEN-1:0] debug_x13
+    output [XLEN-1:0] debug_x13,
+    // Phase X (Sv39 instruction-page-fault investigation, the new frontier
+    // docs/adr/0039 found past the sp/tp fix): same "unconnected changes
+    // nothing" tap shape as debug_x10.
+    output [XLEN-1:0] debug_mtval,
+    output [XLEN-1:0] debug_satp,
+    output debug_translate_enable,
+    output debug_itlb_hit,
+    output debug_itlb_hit_fault,
+    output debug_ptw_busy,
+    output debug_ptw_done,
+    output debug_ptw_fault,
+    output [XLEN-1:0] debug_ptw_vaddr,
+    output [XLEN-1:0] debug_ptw_m_addr
 );
 // Register-address field width, derived once and reused on every
 // pipeline-register/Register.v/Forward.v/Hazard.v instantiation below.
@@ -3256,6 +3269,16 @@ wire isAmo_regwb;  // docs/adr/0038-a-extension-phase-v.md
     assign debug_x11 = m_Register.regs[11];
     assign debug_x12 = m_Register.regs[12];
     assign debug_x13 = m_Register.regs[13];
+    assign debug_mtval = m_CSR.mtval;
+    assign debug_satp = m_CSR.satp;
+    assign debug_translate_enable = translate_enable;
+    assign debug_itlb_hit = itlb_hit;
+    assign debug_itlb_hit_fault = itlb_hit_fault;
+    assign debug_ptw_busy = ptw_busy;
+    assign debug_ptw_done = ptw_done;
+    assign debug_ptw_fault = ptw_fault;
+    assign debug_ptw_vaddr = ptw_vaddr;
+    assign debug_ptw_m_addr = ptw_m_addr;
 
 endmodule
 
