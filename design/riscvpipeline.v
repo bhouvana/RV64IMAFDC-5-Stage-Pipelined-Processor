@@ -456,7 +456,7 @@ wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on
         wire icache_busy, icache_done;
         ICache #(.INIT_FILE(INIT_FILE), .IMEM_SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN),
                  .WAYS(ICACHE_WAYS), .CACHE_SIZE_BYTES(ICACHE_SIZE_BYTES), .LINE_BYTES(ICACHE_LINE_BYTES),
-                 .MEM_LATENCY(MEM_LATENCY_I)) m_ICache(
+                 .MEM_LATENCY(MEM_LATENCY_I), .REPLACEMENT_POLICY(REPLACEMENT_POLICY)) m_ICache(
             .clk(clk), .rst(start),
             .readAddr(imem_phys_addr),
             .inst(inst),
@@ -2952,7 +2952,7 @@ end
         assign dcache_access_miss = 1'b0;
     end else begin : gen_dcache_writeback
         DCache #(.XLEN(XLEN), .WAYS(DCACHE_WAYS), .CACHE_SIZE_BYTES(DCACHE_SIZE_BYTES),
-                 .LINE_BYTES(DCACHE_LINE_BYTES)) m_DCache(
+                 .LINE_BYTES(DCACHE_LINE_BYTES), .REPLACEMENT_POLICY(REPLACEMENT_POLICY)) m_DCache(
             .clk(clk), .rst(start),
             .req_read(memRead_regem && !ptw_busy),
             .req_write(memWrite_regem && !ptw_busy),
