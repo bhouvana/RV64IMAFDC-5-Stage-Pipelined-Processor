@@ -41,6 +41,7 @@
 `include "Btb.v"
 `include "ICache.v"
 `include "DCache.v"
+`include "VictimCache.v"
 
 // docs/adr/0023-caches.md (Phase G3). Directed regression for I$ wired
 // live: PIPELINED instantiated with CACHE_MODE=1 and a deliberately small

@@ -41,6 +41,7 @@
 `include "Btb.v"
 `include "ICache.v"
 `include "DCache.v"
+`include "VictimCache.v"
 
 // docs/adr/0041-cache-replacement-policy-phase-b.md. End-to-end directed
 // regression: REPLACEMENT_POLICY=2 (POLICY_LRU) wired live through the

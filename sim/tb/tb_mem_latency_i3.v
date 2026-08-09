@@ -41,6 +41,7 @@
 `include "Btb.v"
 `include "ICache.v"
 `include "DCache.v"
+`include "VictimCache.v"
 `include "MemoryLatencyModel.v"
 
 // docs/adr/0024-variable-latency-memory.md (Phase I3). Live-pipeline proof

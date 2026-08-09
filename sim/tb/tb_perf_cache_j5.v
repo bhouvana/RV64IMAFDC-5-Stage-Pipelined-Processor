@@ -41,6 +41,7 @@
 `include "Btb.v"
 `include "ICache.v"
 `include "DCache.v"
+`include "VictimCache.v"
 
 // docs/adr/0025-hpc-performance-csrs.md (Phase J5). CACHE_MODE=1 at
 // default sizing (generous enough that nothing in this small, straight-

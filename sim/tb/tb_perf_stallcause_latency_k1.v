@@ -41,6 +41,7 @@
 `include "Btb.v"
 `include "ICache.v"
 `include "DCache.v"
+`include "VictimCache.v"
 `include "MemoryLatencyModel.v"
 
 // docs/adr/0026-performance-profiler.md (Phase K1). Confirms event 18
