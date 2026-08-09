@@ -30,4 +30,17 @@
 
 `define WB_SEL_WIDTH 4  // one byte-enable bit per byte of a 32-bit data bus
 
+// docs/adr/0043-memory-controller-phase-d.md (Generation 4, Phase D). Real
+// Wishbone B3 cycle-type-identifier encoding (a 3-bit `cti` side-band,
+// same "not part of the original bare signal list, added because a real
+// consumer needs it" precedent `funct3` already established here). Only
+// DCache.v's own fill/writeback engine ever drives a non-classic value --
+// PTW/the raw LSU never burst, always CTI_CLASSIC. BTE (burst-type
+// extension) is NOT a runtime signal here -- only one burst mode (linear
+// incrementing) is ever used, so it's a fixed constant wherever consumed,
+// not a port.
+`define CTI_CLASSIC     3'b000  // single, non-burst cycle -- every requester's default
+`define CTI_INCR_BURST  3'b010  // incrementing-address burst, more beats coming
+`define CTI_END_OF_BURST 3'b111 // this is the burst's last beat
+
 `endif

@@ -57,7 +57,14 @@ module DCache #(
     // count for a small fully-associative victim buffer. 0 = disabled,
     // bit-exact with pre-Phase-C behavior. Not yet consumed anywhere as of
     // this commit.
-    parameter VICTIM_ENTRIES = 0
+    parameter VICTIM_ENTRIES = 0,
+    // Generation 4, Phase D (docs/adr/0043-memory-controller-phase-d.md):
+    // 0 = disabled (bit-exact, every beat of S_FILL/S_WB drives
+    // `CTI_CLASSIC, matching pre-Phase-D behavior). 1 = drive real
+    // Wishbone B3 CTI signaling (`CTI_INCR_BURST/`CTI_END_OF_BURST) across
+    // a line fill/writeback's own multi-word sequence. Not yet consumed
+    // anywhere as of this commit.
+    parameter BURST_ENABLE = 0
 )(
     input clk,
     input rst,
@@ -86,6 +93,7 @@ module DCache #(
     output     [XLEN-1:0]           m_data_o,
     output     [`WB_SEL_WIDTH-1:0]  m_sel,
     output     [2:0]                m_funct3,
+    output     [2:0]                m_cti,   // docs/adr/0043 (Phase D): real Wishbone B3 cycle-type, only meaningful when BURST_ENABLE=1
     input      [XLEN-1:0]           m_data_i,
     input                           m_ack,
 
@@ -732,12 +740,39 @@ assign resp_ready =
     (state == S_FILL && m_ack && fill_is_last_word
         && (req_read || req_write) && req_addr == miss_orig_addr_r);
 
+// docs/adr/0043-memory-controller-phase-d.md (Generation 4, Phase D). A
+// second, real, pre-existing bug found while chasing the RamWishboneAdapter.v
+// ack fix above -- previously masked BY that same bug, not caused by fixing
+// it. miss_base_r always aligns to word0 of the line (a fill always starts
+// there, regardless of which word within the line was actually requested),
+// so the LAST word fetched (fill_word_r==LINE_WORDS-1) is only the SAME
+// word as the one actually requested (miss_word_off_r) when a line happens
+// to be exactly 1 word, or the request happened to target the line's own
+// last word. Before this fix, resp_rdata's S_FILL arm always returned
+// fill_value -- correct only in that coincidental case. With
+// RamWishboneAdapter's ack bug fixed (each word's own raw_word_r now
+// genuinely reflects that word's real data instead of staying stuck on
+// word0's), this became visible: a miss requesting word0 of a >1-word line
+// returned the LAST word's own value instead. Fixed by reading the
+// SPECIFICALLY-requested word (miss_word_off_r) from data_arr instead of
+// trusting whichever word happened to be fetched last -- data_arr[...] for
+// any word OTHER than the one committing THIS cycle was already written on
+// an earlier cycle, safely readable now. The one exception: if the
+// REQUESTED word IS the one committing this exact cycle, data_arr's own
+// write for it is still in-flight (a non-blocking assignment scheduled for
+// this same edge) -- reading it combinationally right now would see the
+// stale pre-write value, so that specific case still uses fill_value
+// directly (the fresh, about-to-be-written value).
+wire [31:0] resp_fill_word = (miss_word_off_r == fill_word_r)
+    ? fill_value
+    : data_arr[(miss_set_r*WAYS + miss_way_r)*LINE_WORDS + miss_word_off_r];
+
 assign resp_rdata =
     (state == S_HIT_RD && req_read && req_addr == served_addr_r)
         ? dcache_extend_read(hit_rd_word, hit_funct3_r, hit_byteoff_r) :
     (state == S_FILL && m_ack && fill_is_last_word
         && (req_read || req_write) && req_addr == miss_orig_addr_r)
-        ? dcache_extend_read(fill_value, miss_funct3_r, miss_byteoff_r) :
+        ? dcache_extend_read(resp_fill_word, miss_funct3_r, miss_byteoff_r) :
                                                         {XLEN{1'b0}};
 
 assign flush_busy = flush_active_r;
@@ -756,6 +791,16 @@ assign m_data_o = (state == S_WB)
     : {XLEN{1'b0}};
 assign m_sel    = {`WB_SEL_WIDTH{1'b1}};
 assign m_funct3 = 3'b010;   // fill/writeback are always full-word transfers
+
+// docs/adr/0043-memory-controller-phase-d.md (Generation 4, Phase D).
+// BURST_ENABLE=0: always CTI_CLASSIC, bit-exact with pre-Phase-D behavior.
+// BURST_ENABLE=1: S_WB and S_FILL (and a chained vwb writeback, which
+// reuses fill_word_r the same way) are each their own independent burst --
+// fill_is_last_word already identifies "the last word of whichever
+// transfer is currently active" regardless of which state that is, so no
+// separate burst-boundary tracking is needed here.
+assign m_cti = (!BURST_ENABLE || !m_cyc) ? `CTI_CLASSIC
+             : (fill_is_last_word ? `CTI_END_OF_BURST : `CTI_INCR_BURST);
 
 endmodule
 

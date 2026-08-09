@@ -10,6 +10,17 @@
 // its own `start` on `!busy` (same convention Ptw.v/Divider.v already
 // require of their own callers) -- this module ignores a `start` pulse
 // that arrives while already busy, rather than restarting the count.
+// docs/adr/0043-memory-controller-phase-d.md (Generation 4, Phase D). This
+// module itself is unchanged -- LATENCY stays a plain elaboration-time
+// constant, one fixed wait-state count per instance. Modeling "a burst
+// continuation beat costs less than the first beat" (a genuinely
+// per-transaction, runtime-varying choice) is the CALLER's job: instantiate
+// this module TWICE (one at MEM_LATENCY_D, one at MEM_LATENCY_D_BURST) and
+// mux which instance's start/done to use based on the current beat's own
+// Wishbone CTI value -- see riscvpipeline.v's D-side latency wrapper. Kept
+// this way rather than adding a runtime latency-select input here, since
+// the existing start/busy/done contract (Divider.v/Ptw.v's own shape) is
+// already proven and this avoids touching a working primitive.
 module MemoryLatencyModel #(
     parameter LATENCY = 0   // additional wait-state cycles beyond the caller's own baseline
 )(

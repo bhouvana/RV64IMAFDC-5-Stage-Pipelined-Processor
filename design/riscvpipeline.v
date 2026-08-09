@@ -1,6 +1,7 @@
 `default_nettype none
 
 `include "riscv_defs.vh"
+`include "wb_defs.vh"
 
 // Top-level integration for the 5-stage (or, under PROFILE_6STAGE_SPLIT_FETCH,
 // 6-stage) RV32I+M pipeline: IF -> ID -> EX -> MEM -> WB, connected by
@@ -147,7 +148,20 @@ module PIPELINED #(
     // ICache.v/DCache.v, absorbing recently-evicted lines. 0 = disabled,
     // bit-exact with pre-Phase-C behavior. Not yet consumed anywhere as of
     // this commit.
-    parameter VICTIM_ENTRIES = 0
+    parameter VICTIM_ENTRIES = 0,
+    // Generation 4, Phase D (docs/adr/0043-memory-controller-phase-d.md):
+    // 0 = disabled (bit-exact). 1 = DCache.v's own fill/writeback engine
+    // drives real Wishbone B3 CTI burst signaling instead of always
+    // CTI_CLASSIC. Not yet consumed anywhere as of this commit.
+    parameter BURST_ENABLE = 0,
+    // Extra wait-state cycles for a burst-continuation beat (CTI indicates
+    // an ongoing burst), instead of the full MEM_LATENCY_D -- the real
+    // measurable win this phase delivers (amortizing fixed per-access
+    // latency across a whole line, modeling a real DRAM row-buffer-hit).
+    // Default 0 (no extra cost once a burst is already flowing); only
+    // consulted when BURST_ENABLE=1 and MEM_LATENCY_D>0. Not yet consumed
+    // anywhere as of this commit.
+    parameter MEM_LATENCY_D_BURST = 0
 )(
     input clk,
     input start,
@@ -2933,6 +2947,7 @@ end
     wire [XLEN-1:0] dcache_m_addr, dcache_m_data_o;
     wire [3:0] dcache_m_sel;
     wire [2:0] dcache_m_funct3;
+    wire [2:0] dcache_m_cti;   // docs/adr/0043 (Phase D)
     // docs/adr/0025-hpc-performance-csrs.md (Phase J5). access_hit/
     // access_miss are already exactly-once-per-real-access by
     // construction -- see DCache.v's own updated header comment on
@@ -2955,12 +2970,13 @@ end
         assign dcache_m_data_o = {XLEN{1'b0}};
         assign dcache_m_sel = 4'b0000;
         assign dcache_m_funct3 = 3'b000;
+        assign dcache_m_cti = `CTI_CLASSIC;
         assign dcache_access_hit = 1'b0;
         assign dcache_access_miss = 1'b0;
     end else begin : gen_dcache_writeback
         DCache #(.XLEN(XLEN), .WAYS(DCACHE_WAYS), .CACHE_SIZE_BYTES(DCACHE_SIZE_BYTES),
                  .LINE_BYTES(DCACHE_LINE_BYTES), .REPLACEMENT_POLICY(REPLACEMENT_POLICY),
-                 .VICTIM_ENTRIES(VICTIM_ENTRIES)) m_DCache(
+                 .VICTIM_ENTRIES(VICTIM_ENTRIES), .BURST_ENABLE(BURST_ENABLE)) m_DCache(
             .clk(clk), .rst(start),
             .req_read(memRead_regem && !ptw_busy),
             .req_write(memWrite_regem && !ptw_busy),
@@ -2970,7 +2986,7 @@ end
             .flush_busy(dcache_flush_busy), .flush_done(dcache_flush_done),
             .m_cyc(dcache_m_cyc), .m_stb(dcache_m_stb), .m_we(dcache_m_we),
             .m_addr(dcache_m_addr), .m_data_o(dcache_m_data_o), .m_sel(dcache_m_sel),
-            .m_funct3(dcache_m_funct3),
+            .m_funct3(dcache_m_funct3), .m_cti(dcache_m_cti),
             .m_data_i(readData), .m_ack(lsu_ack),
             .access_hit(dcache_access_hit), .access_miss(dcache_access_miss)
         );
@@ -3004,62 +3020,64 @@ end
     // raw LSU signals no longer touch the real bus AT ALL, every real
     // access is mediated by DCache.v; keeping a live-but-never-selected
     // lsu_* arm there would be misleading, not just redundant).
+    // docs/adr/0043-memory-controller-phase-d.md (Generation 4, Phase D).
+    // The inline mux that used to live here is now MemoryController.v -- a
+    // real module boundary around the EXACT same logic (dcache > ptw > lsu
+    // priority, ptw's own select condition is ptw_busy not ptw_m_cyc, etc),
+    // confirmed bit-identical by direct comparison against the code this
+    // replaces before writing the module, not a redesign. The tie-off
+    // wires below reproduce each pre-existing generate branch's own
+    // behavior: under CACHE_NONE, dcache_m_cyc is already tied 0 upstream
+    // (gen_dcache_none's own dead arm) so the module's dcache arm is
+    // naturally inert and the raw LSU's real signals feed through; under
+    // CACHE_WRITEBACK_SETASSOC, the raw LSU never touches the bus at all
+    // (DCache.v mediates every real access) -- tied off here, mirroring
+    // the old gen_bus_mux_cached's own "no lsu_* arm at all" shape exactly.
+    wire mc_lsu_cyc = (CACHE_MODE == CACHE_NONE) ? lsu_cyc : 1'b0;
+    wire mc_lsu_stb = (CACHE_MODE == CACHE_NONE) ? lsu_stb : 1'b0;
+    wire mc_lsu_we  = (CACHE_MODE == CACHE_NONE) ? lsu_we  : 1'b0;
+    // docs/adr/0038: an AMO's own write phase stores amo_combined (the
+    // funct5-combined result), not the raw rs2 -- ordinary stores
+    // (isAmo_regem=0) are bit-exact unaffected, and AMO's own read phase
+    // never asserts eff_memWrite in the first place (lsu_we=0 gates s_we,
+    // so this value is simply unused/don't-care then).
+    wire [XLEN-1:0] mc_lsu_addr   = (CACHE_MODE == CACHE_NONE) ? ALUOut_regem : {XLEN{1'b0}};
+    wire [XLEN-1:0] mc_lsu_data_o = (CACHE_MODE == CACHE_NONE) ? (amo_active ? amo_combined : readData2_regem) : {XLEN{1'b0}};
+    wire [3:0] mc_lsu_sel    = (CACHE_MODE == CACHE_NONE) ? lsu_sel : 4'b0000;
+    wire [2:0] mc_lsu_funct3 = (CACHE_MODE == CACHE_NONE) ? funct3_regem : 3'b000;
+
+    // A real bug found by running (pre-existing, preserved verbatim here):
+    // RamWishboneAdapter.v's `funct3` port is a side-band tag (docs/adr/
+    // 0020 D2), needed because DataMemoryBRAM.v bakes load width/
+    // signedness into funct3 rather than a pure byte-enable mask. Every
+    // PTE read is always a plain full-word-of-the-PTE-size read -- Sv32's
+    // Ptw.v reads a 4-byte PTE (funct3=3'b010, lw's own encoding); Sv39's
+    // Ptw39.v reads an 8-byte PTE (funct3=3'b011, `F3_LOAD_LD`, ld's own
+    // encoding). XLEN is an elaboration-time constant, so this
+    // constant-folds cleanly at either XLEN, same idiom DataMemoryBRAM.v's
+    // own `if (XLEN >= 64)` already uses. Computed here, not inside
+    // MemoryController.v, since the module itself shouldn't need to know
+    // anything about Ptw.v's own semantics -- it just muxes whatever
+    // funct3 each requester presents.
+    wire [2:0] mc_ptw_funct3 = (XLEN == 64) ? `F3_LOAD_LD : 3'b010;
+
     wire wb_m_cyc, wb_m_stb, wb_m_we;
     wire [XLEN-1:0] wb_m_addr, wb_m_data_o;
     wire [3:0] wb_m_sel;
     wire [2:0] wb_m_funct3;
-    generate
-    if (CACHE_MODE == CACHE_NONE) begin : gen_bus_mux_none
-        assign wb_m_cyc  = ptw_busy ? ptw_m_cyc  : lsu_cyc;
-        assign wb_m_stb  = ptw_busy ? ptw_m_stb  : lsu_stb;
-        assign wb_m_we   = ptw_busy ? ptw_m_we   : lsu_we;
-        assign wb_m_addr   = ptw_busy ? ptw_m_addr   : ALUOut_regem;
-        // docs/adr/0038: an AMO's own write phase stores amo_combined (the
-        // funct5-combined result), not the raw rs2 -- ordinary stores
-        // (isAmo_regem=0) are bit-exact unaffected, and AMO's own read
-        // phase never asserts eff_memWrite in the first place (lsu_we=0
-        // gates s_we, so this value is simply unused/don't-care then).
-        assign wb_m_data_o = ptw_busy ? ptw_m_data_o : (amo_active ? amo_combined : readData2_regem);
-        assign wb_m_sel = ptw_busy ? ptw_m_sel : lsu_sel;
-        // A real bug found by running: RamWishboneAdapter.v's `funct3` port
-        // is a side-band tag (docs/adr/0020 D2 -- not part of the standard
-        // Wishbone signal set, needed because DataMemoryBRAM.v bakes load
-        // width/signedness into funct3 rather than a pure byte-enable
-        // mask). Left wired to the real LSU's own funct3_regem
-        // unconditionally, a Ptw.v word read during a walk was silently
-        // reinterpreted as whatever width/signedness the real LSU's last
-        // (unrelated, possibly stale-reset-value) funct3 happened to be --
-        // observed directly: a real PTE word (0x401) came back as 0x1, its
-        // own low byte, sign-extension irrelevant since bit7 was already 0.
-        // Every PTE read is always a plain full-word-of-the-PTE-size read
-        // -- Sv32's Ptw.v reads a 4-byte PTE (funct3=3'b010, lw's own
-        // encoding); Sv39's Ptw39.v reads an 8-byte PTE (funct3=3'b011,
-        // `F3_LOAD_LD`, ld's own encoding -- docs/adr/00NN-sv39-mmu-phase-p.md
-        // Phase P3, the analogous fix for the wider PTE this walker reads).
-        // XLEN is an elaboration-time constant, so this constant-folds
-        // cleanly at either XLEN, same idiom DataMemoryBRAM.v's own
-        // `if (XLEN >= 64)` already uses.
-        assign wb_m_funct3 = ptw_busy ? ((XLEN == 64) ? `F3_LOAD_LD : 3'b010) : funct3_regem;
-    end else begin : gen_bus_mux_cached
-        // docs/adr/0023-caches.md (Phase G6). DCache.v's own fill/writeback
-        // traffic takes priority (it's the newest, most granular requester
-        // -- a single line-fill/writeback transaction, vs. Ptw.v's own
-        // multi-transaction walk); the two are mutually exclusive by
-        // construction (ptw_start's own !dcache_flush_busy/!lsu_cyc gates,
-        // and dcache_req_read/write's own !ptw_busy gate above, prevent
-        // either from starting while the other is genuinely using the
-        // bus). No raw lsu_* arm here at all -- see this block's own header
-        // comment for why keeping one would be misleading under this mode.
-        assign wb_m_cyc  = dcache_m_cyc ? 1'b1            : (ptw_busy ? ptw_m_cyc  : 1'b0);
-        assign wb_m_stb  = dcache_m_cyc ? dcache_m_stb    : (ptw_busy ? ptw_m_stb  : 1'b0);
-        assign wb_m_we   = dcache_m_cyc ? dcache_m_we     : (ptw_busy ? ptw_m_we   : 1'b0);
-        assign wb_m_addr   = dcache_m_cyc ? dcache_m_addr   : (ptw_busy ? ptw_m_addr   : {XLEN{1'b0}});
-        assign wb_m_data_o = dcache_m_cyc ? dcache_m_data_o : (ptw_busy ? ptw_m_data_o : {XLEN{1'b0}});
-        assign wb_m_sel = dcache_m_cyc ? dcache_m_sel : (ptw_busy ? ptw_m_sel : 4'b0000);
-        assign wb_m_funct3 = dcache_m_cyc ? dcache_m_funct3 :
-            (ptw_busy ? ((XLEN == 64) ? `F3_LOAD_LD : 3'b010) : 3'b000);
-    end
-    endgenerate
+    wire [2:0] wb_m_cti;
+
+    MemoryController #(.XLEN(XLEN)) m_MemoryController(
+        .lsu_cyc(mc_lsu_cyc), .lsu_stb(mc_lsu_stb), .lsu_we(mc_lsu_we),
+        .lsu_addr(mc_lsu_addr), .lsu_data_o(mc_lsu_data_o), .lsu_sel(mc_lsu_sel), .lsu_funct3(mc_lsu_funct3),
+        .ptw_busy(ptw_busy), .ptw_cyc(ptw_m_cyc), .ptw_stb(ptw_m_stb), .ptw_we(ptw_m_we),
+        .ptw_addr(ptw_m_addr), .ptw_data_o(ptw_m_data_o), .ptw_sel(ptw_m_sel), .ptw_funct3(mc_ptw_funct3),
+        .dcache_cyc(dcache_m_cyc), .dcache_stb(dcache_m_stb), .dcache_we(dcache_m_we),
+        .dcache_addr(dcache_m_addr), .dcache_data_o(dcache_m_data_o), .dcache_sel(dcache_m_sel),
+        .dcache_funct3(dcache_m_funct3), .dcache_cti(dcache_m_cti),
+        .m_cyc(wb_m_cyc), .m_stb(wb_m_stb), .m_we(wb_m_we), .m_addr(wb_m_addr), .m_data_o(wb_m_data_o),
+        .m_sel(wb_m_sel), .m_funct3(wb_m_funct3), .m_cti(wb_m_cti)
+    );
 
     // docs/adr/0020-soc-integration.md (Phase D8). NUM_SLAVES=3: slave 0
     // is RAM, slave 1 is Uart.v, slave 2 is Timer.v -- indices/BASE/SIZE
@@ -3181,13 +3199,44 @@ end
         wire is_new_request = wb_s_cyc[0] && wb_s_stb[0] &&
             (!req_active_r || wb_s_addr != req_addr_r || wb_s_we != req_we_r);
 
-        wire delay_busy, delay_done;
+        // docs/adr/0043-memory-controller-phase-d.md (Generation 4, Phase
+        // D). A burst-continuation beat (this cycle's own request
+        // continues an already-flowing burst, not its first beat) pays
+        // MEM_LATENCY_D_BURST instead of the full MEM_LATENCY_D -- the
+        // real measurable win this phase delivers, modeling a real DRAM
+        // row-buffer-hit (the fixed per-access latency is paid once per
+        // burst, not once per word). Two separate MemoryLatencyModel
+        // instances (one per latency value), not a runtime latency-select
+        // input to that module -- see its own header comment for why.
+        // burst_in_progress_r tracks whether the LAST-serviced beat's own
+        // CTI said "more beats coming" (CTI_INCR_BURST); if so, THIS beat
+        // is a genuine continuation. Always 0 (never a continuation) when
+        // BURST_ENABLE=0, since DCache.v then always drives CTI_CLASSIC --
+        // bit-exact with pre-Phase-D behavior at the default.
+        reg burst_in_progress_r;
+        wire is_continuation = burst_in_progress_r;
+
+        wire delay_busy_classic, delay_done_classic;
         MemoryLatencyModel #(.LATENCY(MEM_LATENCY_D)) m_DMemLatency(
             .clk(clk), .rst(start),
-            .start(is_new_request),
-            .busy(delay_busy),
-            .done(delay_done)
+            .start(is_new_request && !is_continuation),
+            .busy(delay_busy_classic),
+            .done(delay_done_classic)
         );
+        wire delay_busy_burst, delay_done_burst;
+        MemoryLatencyModel #(.LATENCY(MEM_LATENCY_D_BURST)) m_DMemLatencyBurst(
+            .clk(clk), .rst(start),
+            .start(is_new_request && is_continuation),
+            .busy(delay_busy_burst),
+            .done(delay_done_burst)
+        );
+        wire delay_busy = delay_busy_classic || delay_busy_burst;
+        wire delay_done = delay_done_classic || delay_done_burst;
+
+        always @(posedge clk) begin
+            if (~start) burst_in_progress_r <= 1'b0;
+            else if (is_new_request) burst_in_progress_r <= (wb_m_cti == `CTI_INCR_BURST);
+        end
 
         always @(posedge clk) begin
             if (~start) req_active_r <= 1'b0;

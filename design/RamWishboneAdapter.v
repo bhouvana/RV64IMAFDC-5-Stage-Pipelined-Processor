@@ -65,12 +65,74 @@ DataMemoryBRAM #(.SIZE_BYTES(SIZE_BYTES), .XLEN(XLEN), .DATA_INIT_FILE(DATA_INIT
 // itself (docs/adr/0013); mem_read_pending_r mirrors that exact same
 // one-cycle delay so s_ack lands on precisely the cycle s_data_i
 // (DataMemoryBRAM's own readData) actually becomes valid.
+//
+// docs/adr/0043-memory-controller-phase-d.md (Generation 4, Phase D). A
+// real, pre-existing bug found while building this phase's own burst-CTI
+// test, confirmed against the EXISTING unmodified DCache.v multi-word fill
+// path (nothing to do with burst/CTI itself): mem_read_pending_r used to
+// be a plain 1-cycle-delayed COPY of mem_read -- a LEVEL, not a
+// per-transaction pulse. DCache.v/Ptw.v hold cyc/stb continuously across a
+// multi-word sequence, changing only the ADDRESS between words, so
+// mem_read never actually dropped -- the old ack stayed stuck high from
+// the second word onward. DCache.v's own S_FILL loop (`if (m_ack) ...`, a
+// plain level check, no edge detection of its own) advanced fill_word_r
+// and committed data EVERY cycle once first asserted, reusing ONE real
+// round-trip's worth of latency across every remaining word -- silently
+// corrupting any word after the first with the PREVIOUS word's stale
+// raw_word_r content, whenever the backing memory genuinely holds
+// different values per word. Invisible in every existing test before this
+// phase, which only ever exercised fresh, zero-initialized lines where
+// every word already happened to be 0 -- confirmed by tracing dut2's own
+// pre-existing, unmodified LRU-D sub-test in tb_dcache_unit.v cycle-by-
+// cycle before touching anything here.
+//
+// Fixed with real per-request edge-detection: mirrors the EXACT
+// is_new_request idiom riscvpipeline.v's own MEM_LATENCY_D wrapper already
+// uses (docs/adr/0024-variable-latency-memory.md, Phase I2) -- tracking
+// the (address, we) actually being serviced and only pulsing a fresh ack
+// when that genuinely changes (or this is the very first request), rather
+// than trusting a bare level. This makes the correct behavior the DEFAULT
+// here, not something that only happens to hold when a latency wrapper is
+// layered on top.
+// req_active_r means "there is a request outstanding that has NOT yet
+// received its own ack" -- cleared the INSTANT that ack is delivered (not
+// only when the bus goes fully idle). This distinction matters: a genuinely
+// NEW, different instruction can legitimately target the exact same
+// address as the one immediately before it (e.g. `lb`/`lbu` reading the
+// same byte back-to-back) -- if req_active_r stayed set as long as the bus
+// merely kept presenting the same (addr, we), that second, real access
+// would be silently mistaken for "still the same outstanding repeat" and
+// never re-armed. Clearing it as soon as its own ack fires means the VERY
+// NEXT cycle's access -- same address or not -- is correctly treated as
+// fresh, while a request that's still genuinely WAITING (no ack yet)
+// continues to be correctly recognized as unchanged.
+reg [XLEN-1:0] req_addr_r;
+reg            req_we_r;
+reg            req_active_r;
+wire is_new_request = (mem_read || mem_write) &&
+    (!req_active_r || s_addr != req_addr_r || s_we != req_we_r);
+
 reg mem_read_pending_r;
 always @(posedge clk) begin
-    if (~rst)
+    if (~rst) begin
         mem_read_pending_r <= 1'b0;
-    else
+        req_active_r <= 1'b0;
+    end
+    else if (is_new_request) begin
+        req_active_r <= 1'b1;
+        req_addr_r   <= s_addr;
+        req_we_r     <= s_we;
         mem_read_pending_r <= mem_read;
+    end
+    else if (mem_read_pending_r) begin
+        // This exact request's own ack is being delivered THIS cycle --
+        // satisfied. Clear both so any later access (even to this same
+        // address) is treated as a fresh request, not a stale repeat.
+        mem_read_pending_r <= 1'b0;
+        req_active_r <= 1'b0;
+    end
+    // else: still holding the same, already-issued, not-yet-acked request
+    // -- nothing to do but keep waiting.
 end
 assign s_ack = mem_write || mem_read_pending_r;
 
