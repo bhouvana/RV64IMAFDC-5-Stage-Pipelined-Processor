@@ -223,6 +223,8 @@ localparam PROFILE_6STAGE_SPLIT_FETCH = 1;
 // this parameter; not yet consumed anywhere as of this commit.
 localparam PREDICTOR_STATIC = 0;
 localparam PREDICTOR_DYNAMIC_BHT_BTB = 1;
+localparam PREDICTOR_GSHARE = 2;       // Generation 4, Phase A (docs/adr/0040)
+localparam PREDICTOR_TOURNAMENT = 3;   // Generation 4, Phase A (docs/adr/0040)
 
 // CACHE_MODE values (docs/adr/0023-caches.md) -- named constants purely for
 // readability at the generate/if sites that consume this parameter; not yet
@@ -633,22 +635,76 @@ wire bp_update_valid;
 wire [XLEN-1:0] bp_update_pc;
 wire bp_update_taken;
 wire [XLEN-1:0] bp_update_target;
+// Generation 4, Phase A (docs/adr/0040): restructured to share Btb.v (pure
+// target prediction, identical regardless of which direction scheme is
+// active) across every dynamic scheme, and to nest direction-scheme
+// selection inside -- avoids duplicating the Btb.v instantiation three
+// times. predict_taken_if/predict_target_if stay the exact same two wires
+// every downstream consumer (reg1/reg1a/reg2 latching, the EX-stage
+// mispredict comparison) already expects -- zero changes needed anywhere
+// else in the pipeline beyond the branch_or_jump_redirect/target fix above.
 generate
-if (BRANCH_PREDICTOR == PREDICTOR_DYNAMIC_BHT_BTB) begin : gen_predictor
-    wire bht_predict_taken_q;
+if (BRANCH_PREDICTOR != PREDICTOR_STATIC) begin : gen_btb
     wire btb_hit_q;
     wire [XLEN-1:0] btb_target_q;
-    Bht #(.XLEN(XLEN), .NUM_ENTRIES(BHT_BTB_ENTRIES)) m_Bht(
-        .clk(clk), .rst(start),
-        .query_pc(pc_o), .predict_taken(bht_predict_taken_q),
-        .update_valid(bp_update_valid), .update_pc(bp_update_pc), .update_taken(bp_update_taken)
-    );
     Btb #(.XLEN(XLEN), .NUM_ENTRIES(BHT_BTB_ENTRIES)) m_Btb(
         .clk(clk), .rst(start),
         .query_pc(pc_o), .hit(btb_hit_q), .target(btb_target_q),
         .update_valid(bp_update_valid & bp_update_taken), .update_pc(bp_update_pc), .update_target(bp_update_target)
     );
-    assign predict_taken_if = bht_predict_taken_q & btb_hit_q;
+
+    wire direction_predict_taken_q;
+
+    if (BRANCH_PREDICTOR == PREDICTOR_DYNAMIC_BHT_BTB) begin : gen_direction_bht
+        Bht #(.XLEN(XLEN), .NUM_ENTRIES(BHT_BTB_ENTRIES)) m_Bht(
+            .clk(clk), .rst(start),
+            .query_pc(pc_o), .predict_taken(direction_predict_taken_q),
+            .train_pc({XLEN{1'b0}}), .train_predict_taken(),
+            .update_valid(bp_update_valid), .update_pc(bp_update_pc), .update_taken(bp_update_taken)
+        );
+    end else if (BRANCH_PREDICTOR == PREDICTOR_GSHARE) begin : gen_direction_gshare
+        Gshare #(.XLEN(XLEN), .NUM_ENTRIES(BHT_BTB_ENTRIES)) m_Gshare(
+            .clk(clk), .rst(start),
+            .query_pc(pc_o), .predict_taken(direction_predict_taken_q),
+            .train_pc({XLEN{1'b0}}), .train_predict_taken(),
+            .update_valid(bp_update_valid), .update_pc(bp_update_pc), .update_taken(bp_update_taken)
+        );
+    end else begin : gen_direction_tournament
+        wire bht_predict_taken_q, bht_train_predict_taken_q;
+        wire gshare_predict_taken_q, gshare_train_predict_taken_q;
+        wire chooser_prefer_gshare_q;
+        Bht #(.XLEN(XLEN), .NUM_ENTRIES(BHT_BTB_ENTRIES)) m_Bht(
+            .clk(clk), .rst(start),
+            .query_pc(pc_o), .predict_taken(bht_predict_taken_q),
+            .train_pc(bp_update_pc), .train_predict_taken(bht_train_predict_taken_q),
+            .update_valid(bp_update_valid), .update_pc(bp_update_pc), .update_taken(bp_update_taken)
+        );
+        Gshare #(.XLEN(XLEN), .NUM_ENTRIES(BHT_BTB_ENTRIES)) m_Gshare(
+            .clk(clk), .rst(start),
+            .query_pc(pc_o), .predict_taken(gshare_predict_taken_q),
+            .train_pc(bp_update_pc), .train_predict_taken(gshare_train_predict_taken_q),
+            .update_valid(bp_update_valid), .update_pc(bp_update_pc), .update_taken(bp_update_taken)
+        );
+        // a_correct/b_correct: re-query Bht's/Gshare's own opinion AT
+        // bp_update_pc (the PC actually being trained this cycle) via the
+        // second read port, compare each against the real resolved
+        // outcome -- this is what avoids needing either sub-predictor's
+        // original at-fetch-time guess threaded through the pipeline as a
+        // new latched signal (docs/adr/0040's Design section). A real,
+        // documented approximation for a re-trained (looping) PC between
+        // fetch and resolution, same class as Bht.v's own "no same-cycle
+        // bypass" aliasing note.
+        Chooser #(.XLEN(XLEN), .NUM_ENTRIES(BHT_BTB_ENTRIES)) m_Chooser(
+            .clk(clk), .rst(start),
+            .query_pc(pc_o), .prefer_b(chooser_prefer_gshare_q),
+            .update_valid(bp_update_valid), .update_pc(bp_update_pc),
+            .a_correct(bht_train_predict_taken_q == bp_update_taken),
+            .b_correct(gshare_train_predict_taken_q == bp_update_taken)
+        );
+        assign direction_predict_taken_q = chooser_prefer_gshare_q ? gshare_predict_taken_q : bht_predict_taken_q;
+    end
+
+    assign predict_taken_if = direction_predict_taken_q & btb_hit_q;
     assign predict_target_if = btb_target_q;
 end else begin : gen_no_predictor
     assign predict_taken_if = 1'b0;
@@ -1721,9 +1777,20 @@ endgenerate
     // PREDICTOR_STATIC.
     wire mispredict = (predict_taken_regde != desired_taken) |
                        (desired_taken & (predict_target_regde != desired_target));
-    wire branch_or_jump_redirect = (BRANCH_PREDICTOR == PREDICTOR_DYNAMIC_BHT_BTB) ? mispredict : desired_taken;
+    // Generation 4, Phase A (docs/adr/0040): was hardcoded to
+    // "== PREDICTOR_DYNAMIC_BHT_BTB" specifically -- silently correct for
+    // BRANCH_PREDICTOR in {0,1} (nothing else existed), but would have
+    // silently fallen through to PREDICTOR_STATIC's own "squash on every
+    // taken branch" behavior for GShare/Tournament (architecturally still
+    // safe, since squashing a correctly-predicted branch too is always
+    // safe -- just silently defeating the entire point of adding a new
+    // predictor scheme, with mispredict_pulse/branch_retired_pulse below
+    // still reporting misleading "always mispredicted" stats). Generalized
+    // to "any dynamic scheme" -- bit-exact for BRANCH_PREDICTOR in {0,1}
+    // (0 != 0 is false either way; 1 != 0 is true either way).
+    wire branch_or_jump_redirect = (BRANCH_PREDICTOR != PREDICTOR_STATIC) ? mispredict : desired_taken;
     wire [XLEN-1:0] branch_or_jump_target =
-        (BRANCH_PREDICTOR == PREDICTOR_DYNAMIC_BHT_BTB && !desired_taken) ? fallthrough_pc_regde : desired_target;
+        (BRANCH_PREDICTOR != PREDICTOR_STATIC && !desired_taken) ? fallthrough_pc_regde : desired_target;
 
     // Bht.v/Btb.v training, from this same ground truth -- gated !reg2_hold
     // for exactly the same reason csr_write_en/trap_taken/mret_taken/
