@@ -127,7 +127,21 @@ module PIPELINED #(
     // (bit-exact with every phase before this one, same convention every
     // other swappable axis in this file already follows).
     parameter MEM_LATENCY_I = 0,
-    parameter MEM_LATENCY_D = 0
+    parameter MEM_LATENCY_D = 0,
+    // docs/adr/0041-cache-replacement-policy-phase-b.md (Generation 4, Phase
+    // B). A closed, named enum (same honesty convention as HAZARD_STRATEGY/
+    // PIPELINE_PROFILE/BRANCH_PREDICTOR/CACHE_MODE above). POLICY_ROUND_ROBIN
+    // (0, default): today's exact per-set fill-order pointer, bit-exact,
+    // what every existing test/ADR/benchmark in this repo assumes.
+    // POLICY_FIFO (1): the SAME underlying mechanism as POLICY_ROUND_ROBIN --
+    // round-robin already IS fill-order/FIFO eviction at this associativity;
+    // a separately-implemented FIFO would be redundant RTL with zero
+    // behavioral difference, so both select the identical non-LRU branch in
+    // ICache.v/DCache.v. POLICY_LRU (2): true per-way access-recency
+    // tracking, updated on every real hit AND every fill completion, not
+    // just fills. Only meaningful under CACHE_WRITEBACK_SETASSOC. Not yet
+    // consumed anywhere as of this commit.
+    parameter REPLACEMENT_POLICY = 0
 )(
     input clk,
     input start,
@@ -231,6 +245,13 @@ localparam PREDICTOR_TOURNAMENT = 3;   // Generation 4, Phase A (docs/adr/0040)
 // consumed anywhere as of this commit.
 localparam CACHE_NONE = 0;
 localparam CACHE_WRITEBACK_SETASSOC = 1;
+
+// REPLACEMENT_POLICY values (docs/adr/0041-cache-replacement-policy-phase-b.md)
+// -- named constants purely for readability at the instantiation sites that
+// consume this parameter; not yet consumed anywhere as of this commit.
+localparam POLICY_ROUND_ROBIN = 0;
+localparam POLICY_FIFO        = 1;
+localparam POLICY_LRU         = 2;
 
 wire branch;
 wire memRead;
