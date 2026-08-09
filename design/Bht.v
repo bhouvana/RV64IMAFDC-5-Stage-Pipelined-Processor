@@ -46,6 +46,20 @@ module Bht #(
     input      [XLEN-1:0] query_pc,
     output                predict_taken,
 
+    // Second, independent combinational read port -- same array, a
+    // different index, purely additive (existing BRANCH_PREDICTOR=1
+    // wiring simply never connects it, zero behavior change there).
+    // Mirrors Tlb.v's own precedent (docs/adr/0022) for a small array with
+    // two independent read ports. Lets a tournament predictor's Chooser.v
+    // (Generation 4, Phase A, docs/adr/0040) query this table's own
+    // opinion for whichever PC is currently being trained, without
+    // threading a new per-instruction latched prediction bit through
+    // reg1/reg1a/reg2 -- a real, deliberate scope decision (see that
+    // ADR's Design section) that keeps this phase's pipeline-wiring risk
+    // to zero new latched signals.
+    input      [XLEN-1:0] train_pc,
+    output                 train_predict_taken,
+
     input                  update_valid,
     input      [XLEN-1:0]  update_pc,
     input                  update_taken
@@ -61,8 +75,10 @@ integer reset_i;
 // same convention riscv_defs.vh's own address-decode constants use.
 wire [INDEX_WIDTH-1:0] query_index  = query_pc[INDEX_WIDTH+1:2];
 wire [INDEX_WIDTH-1:0] update_index = update_pc[INDEX_WIDTH+1:2];
+wire [INDEX_WIDTH-1:0] train_index  = train_pc[INDEX_WIDTH+1:2];
 
 assign predict_taken = counters[query_index][1];
+assign train_predict_taken = counters[train_index][1];
 
 always @(posedge clk) begin
     if (~rst) begin

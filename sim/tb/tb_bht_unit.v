@@ -13,6 +13,8 @@ module tb_bht_unit;
     reg rst = 0;
     reg [31:0] query_pc = 0;
     wire predict_taken;
+    reg [31:0] train_pc = 0;
+    wire train_predict_taken;
     reg update_valid = 0;
     reg [31:0] update_pc = 0;
     reg update_taken = 0;
@@ -27,6 +29,7 @@ module tb_bht_unit;
     Bht #(.XLEN(32), .NUM_ENTRIES(4)) dut(
         .clk(clk), .rst(rst),
         .query_pc(query_pc), .predict_taken(predict_taken),
+        .train_pc(train_pc), .train_predict_taken(train_predict_taken),
         .update_valid(update_valid), .update_pc(update_pc), .update_taken(update_taken)
     );
 
@@ -111,6 +114,17 @@ module tb_bht_unit;
         #1 check_bit(predict_taken, 1'b1, "pc=0 reflects pc=16's training (shared index 0, untagged aliasing)");
         query_pc = 32'd16;
         #1 check_bit(predict_taken, 1'b1, "pc=16 itself also predicts taken (same shared entry)");
+
+        // Second read port: train_pc must read the exact same array as
+        // query_pc, independently -- query pc=0 (currently trained taken
+        // from the walk above) while train_pc probes pc=4 (trained taken
+        // earlier) and pc=8 (never trained, cold) simultaneously.
+        query_pc = 32'd0;
+        train_pc = 32'd4;
+        #1 check_bit(predict_taken, 1'b1, "second port: query_pc=0 still reads its own trained value");
+        #0 check_bit(train_predict_taken, 1'b1, "second port: train_pc=4 independently reads pc=4's trained value");
+        train_pc = 32'd8;
+        #1 check_bit(train_predict_taken, 1'b0, "second port: train_pc=8 (cold, never trained) predicts not-taken");
 
         if (fails == 0)
             $display("PASS  bht_unit (%0d checks)", checks);
