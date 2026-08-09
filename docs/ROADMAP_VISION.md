@@ -279,8 +279,13 @@ honest stopping point for Generation 3 as currently scoped. See
   (`design/Gshare.v`) and tournament (`design/Chooser.v` + `Bht.v`+`Gshare.v`)
   both live as `BRANCH_PREDICTOR=2`/`3`, real benchmarked cycle-count data
   via `bench_runner.py --compare-predictors`.
-- **Advanced cache hierarchy** — 2-way and 4-way set-associative, victim
-  cache, L2, replacement policies (LRU/FIFO).
+- **Advanced cache hierarchy** — 2-way and 4-way set-associative (**already
+  free**: `ICache.v`/`DCache.v`'s existing `WAYS` parameter works at any
+  power-of-2 value), victim cache, L2, replacement policies (LRU/FIFO).
+  **Replacement policy DONE (Phase B, `docs/adr/0041`)**: `REPLACEMENT_POLICY`
+  parameter (`POLICY_ROUND_ROBIN`=0/`POLICY_FIFO`=1/`POLICY_LRU`=2, `LRU`
+  a true per-way age-tracking mechanism, not pseudo-LRU) live on both
+  caches. Victim cache and L2 remain real, unscoped backlog.
 - **Hardware prefetchers** — next-line, stride, stream.
 - **Non-blocking cache** — multiple outstanding misses, MSHRs.
 - **Memory controller** — burst transfers, improved arbitration.

@@ -241,13 +241,11 @@ Directed tests only catch what you thought to test for. This core is also cross-
 constrained-random programs run on both, and any divergence is treated as a real bug. That process alone
 has found and fixed dozens of real RTL bugs no directed test caught (see `docs/adr/`).
 
-- **88/90 directed tests** — ISA coverage, forwarding, hazards, multi-cycle division, float
+- **95/95 directed tests** — ISA coverage, forwarding, hazards, multi-cycle division, float
   arithmetic/divide/sqrt/FMA, CSR/exception/privilege handling, Sv32/Sv39 MMU translation, branch/jump
   resolution, bus/UART/CLINT behavior, interrupt redirect correctness (timer/UART/software/supervisor),
-  and SBI firmware end-to-end (M→S mode switch, DTB read-back, ecall dispatch, real UART output). The
-  two non-passing tests are known, documented, unrelated to RTL correctness: one test's own comment
-  already calls out a documented `ctz` off-by-one; one standalone unit test's hardcoded expected values
-  went stale after a real byte-order fix elsewhere and were never updated (`docs/adr/0039`).
+  SBI firmware end-to-end (M→S mode switch, DTB read-back, ecall dispatch, real UART output), and cache
+  replacement policy (round-robin/FIFO/LRU, `docs/adr/0041`).
 - **1000+ constrained-random programs** matched bit-for-bit against the independent ISS reference model
   across this project's history (`make random-test`) — including an opt-in interrupt-injection mode
   (`--interrupt timer|uart|msi|both`) and full MMU-aware generation for both Sv32 and Sv39.
