@@ -141,7 +141,13 @@ module PIPELINED #(
     // tracking, updated on every real hit AND every fill completion, not
     // just fills. Only meaningful under CACHE_WRITEBACK_SETASSOC. Not yet
     // consumed anywhere as of this commit.
-    parameter REPLACEMENT_POLICY = 0
+    parameter REPLACEMENT_POLICY = 0,
+    // Generation 4, Phase C (docs/adr/0042-victim-cache-phase-c.md): entry
+    // count for a small fully-associative victim buffer sitting alongside
+    // ICache.v/DCache.v, absorbing recently-evicted lines. 0 = disabled,
+    // bit-exact with pre-Phase-C behavior. Not yet consumed anywhere as of
+    // this commit.
+    parameter VICTIM_ENTRIES = 0
 )(
     input clk,
     input start,
@@ -456,7 +462,8 @@ wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on
         wire icache_busy, icache_done;
         ICache #(.INIT_FILE(INIT_FILE), .IMEM_SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN),
                  .WAYS(ICACHE_WAYS), .CACHE_SIZE_BYTES(ICACHE_SIZE_BYTES), .LINE_BYTES(ICACHE_LINE_BYTES),
-                 .MEM_LATENCY(MEM_LATENCY_I), .REPLACEMENT_POLICY(REPLACEMENT_POLICY)) m_ICache(
+                 .MEM_LATENCY(MEM_LATENCY_I), .REPLACEMENT_POLICY(REPLACEMENT_POLICY),
+                 .VICTIM_ENTRIES(VICTIM_ENTRIES)) m_ICache(
             .clk(clk), .rst(start),
             .readAddr(imem_phys_addr),
             .inst(inst),
@@ -2952,7 +2959,8 @@ end
         assign dcache_access_miss = 1'b0;
     end else begin : gen_dcache_writeback
         DCache #(.XLEN(XLEN), .WAYS(DCACHE_WAYS), .CACHE_SIZE_BYTES(DCACHE_SIZE_BYTES),
-                 .LINE_BYTES(DCACHE_LINE_BYTES), .REPLACEMENT_POLICY(REPLACEMENT_POLICY)) m_DCache(
+                 .LINE_BYTES(DCACHE_LINE_BYTES), .REPLACEMENT_POLICY(REPLACEMENT_POLICY),
+                 .VICTIM_ENTRIES(VICTIM_ENTRIES)) m_DCache(
             .clk(clk), .rst(start),
             .req_read(memRead_regem && !ptw_busy),
             .req_write(memWrite_regem && !ptw_busy),

@@ -48,6 +48,11 @@ module ICache #(
     // at this associativity). POLICY_LRU (2): true per-way access-recency
     // tracking via the new age[] array below.
     parameter REPLACEMENT_POLICY = 0,
+    // Generation 4, Phase C (docs/adr/0042-victim-cache-phase-c.md): entry
+    // count for a small fully-associative victim buffer. 0 = disabled,
+    // bit-exact with pre-Phase-C behavior. Not yet consumed anywhere as of
+    // this commit.
+    parameter VICTIM_ENTRIES = 0,
     // docs/adr/0024-variable-latency-memory.md (Phase I4). Extra wait-state
     // cycles per fill word, 0 by default (bit-exact, one word per cycle,
     // matching every phase before this one). This module is the sole
@@ -146,9 +151,15 @@ generate
     end
 endgenerate
 
-assign hit  = |way_hit;
-assign inst = inst_acc[WAYS];
+wire hit_main = |way_hit;
 wire [WAY_BITS-1:0] hit_way_idx = hit_way_acc[WAYS];
+// docs/adr/0042. `hit` (the module's own external port) now also reflects
+// a victim-buffer promote hit -- see the victim-cache block below for
+// vc_lookup_hit. `hit_main` (main-array-only) stays the name every
+// pre-existing use in THIS file needs (lru_touch's own hit branch, the
+// S_IDLE miss/promote fork) -- only the external port broadens.
+assign hit  = hit_main | vc_lookup_hit;
+assign inst = hit_main ? inst_acc[WAYS] : vc_word_at_offset;
 
 // docs/adr/0041. POLICY_LRU's own victim choice: the way whose age[] entry
 // is genuinely WAYS-1 (least-recently-used) for the set a miss is about to
@@ -165,6 +176,73 @@ generate
     end
 endgenerate
 wire [WAY_BITS-1:0] lru_way_idx = lru_way_acc[WAYS];
+
+// docs/adr/0042-victim-cache-phase-c.md (Generation 4, Phase C). A small,
+// fully-associative buffer for lines just evicted from THIS cache -- see
+// VictimCache.v's own header for the full design rationale. Wired as a
+// same-cycle combinational extension of `hit`/`inst` (not a new FSM state):
+// a victim-buffer hit needs no backing-store access at all, so it resolves
+// exactly as fast as an ordinary hit (pc_stall's own icache_miss term in
+// riscvpipeline.v is purely `!icache_hit`, so this costs zero extra stall
+// cycles). Disabled (VICTIM_ENTRIES==0) ties vc_lookup_hit to 0, bit-exact
+// with pre-Phase-C behavior -- mirrors the SET_BITS==0 generate-if guard
+// above (an elaboration-time `generate if`, not a runtime ternary, since
+// ENTRIES==0 would otherwise still elaborate an invalid $clog2(0)-1 width).
+localparam VC_TAG_WIDTH = TAG_BITS + SET_BITS;
+wire [VC_TAG_WIDTH-1:0] vc_lookup_tag = {tag, set_idx};
+wire vc_lookup_hit;
+wire [XLEN*LINE_WORDS-1:0] vc_lookup_data;
+
+// The way about to be displaced by a miss OR a promote -- same choice
+// either way (round-robin/LRU doesn't distinguish "displaced by a real
+// fill" from "displaced by a victim-buffer promote", both are just "this
+// set's own next eviction target").
+wire [WAY_BITS-1:0] victim_target_way = (REPLACEMENT_POLICY == POLICY_LRU) ? lru_way_idx : victim[set_idx];
+
+// Whatever currently occupies (set_idx, victim_target_way) -- read
+// combinationally (data_arr/tag_arr are plain regs, same as way_data's own
+// combinational read above) regardless of whether it's actually valid.
+// Only ever pushed into the victim buffer when genuinely valid (see
+// vc_do_insert below) -- a promote's own vc_do_swap is unconditional
+// because a real invariant rules out the alternative: victim_target_way
+// can only ever point at a still-invalid (never-filled) way during a
+// set's own cold ramp-up, during which nothing could have been evicted
+// FROM that set into the victim buffer yet either (round-robin/LRU both
+// exhaust every way at least once before ever re-selecting one), so
+// vc_lookup_hit for that set is provably impossible while
+// victim_target_way is invalid. Full derivation in docs/adr/0042.
+wire [TAG_BITS-1:0]     vc_outgoing_tag_bits = tag_arr[set_idx*WAYS + victim_target_way];
+wire [VC_TAG_WIDTH-1:0] vc_outgoing_tag      = {vc_outgoing_tag_bits, set_idx};
+wire [XLEN*LINE_WORDS-1:0] vc_outgoing_data;
+generate
+    for (gw = 0; gw < LINE_WORDS; gw = gw + 1) begin : gen_vc_outgoing
+        assign vc_outgoing_data[gw*XLEN +: XLEN] = data_arr[(set_idx*WAYS + victim_target_way)*LINE_WORDS + gw];
+    end
+endgenerate
+
+wire vc_do_swap   = (state == S_IDLE) && !hit_main && vc_lookup_hit;
+wire vc_do_insert = (state == S_IDLE) && !hit_main && !vc_lookup_hit
+                     && valid[set_idx*WAYS + victim_target_way];
+
+generate
+if (VICTIM_ENTRIES == 0) begin : gen_victim_disabled
+    assign vc_lookup_hit  = 1'b0;
+    assign vc_lookup_data = {(XLEN*LINE_WORDS){1'b0}};
+end else begin : gen_victim_enabled
+    VictimCache #(.ENTRIES(VICTIM_ENTRIES), .WITH_DIRTY(0), .TAG_WIDTH(VC_TAG_WIDTH),
+                  .LINE_WORDS(LINE_WORDS), .XLEN(XLEN)) m_victim(
+        .clk(clk), .rst(rst),
+        .lookup_tag(vc_lookup_tag), .lookup_hit(vc_lookup_hit), .lookup_data(vc_lookup_data), .lookup_dirty(),
+        .do_swap(vc_do_swap), .swap_in_tag(vc_outgoing_tag), .swap_in_data(vc_outgoing_data), .swap_in_dirty(1'b0),
+        .do_insert(vc_do_insert), .insert_tag(vc_outgoing_tag), .insert_data(vc_outgoing_data), .insert_dirty(1'b0),
+        .evict_out_valid(), .evict_out_tag(), .evict_out_data(), .evict_out_dirty()
+        // I$ is read-only -- an evicted victim-buffer entry (buffer full)
+        // is just discarded, no dirty data ever exists to lose.
+    );
+end
+endgenerate
+
+wire [XLEN-1:0] vc_word_at_offset = vc_lookup_data[word_off*XLEN +: XLEN];
 
 // Fill engine.
 localparam S_IDLE = 1'b0;
@@ -231,7 +309,7 @@ task lru_touch;
     end
 endtask
 
-integer reset_i, reset_j;
+integer reset_i, reset_j, vcw;
 always @(posedge clk) begin
     if (~rst) begin
         state  <= S_IDLE;
@@ -258,19 +336,52 @@ always @(posedge clk) begin
         // evaluate every cycle regardless of FSM state, since `hit` is
         // combinational against `readAddr` independent of any in-progress
         // fill for a different line.
-        if (REPLACEMENT_POLICY == POLICY_LRU && hit)
-            lru_touch(set_idx, hit_way_idx);
+        // docs/adr/0042. Split into two arms: a real main-array hit touches
+        // hit_way_idx (the way way_hit[] actually matched, unchanged from
+        // before this phase); a victim-buffer promote hit touches
+        // victim_target_way instead -- hit_way_idx would be meaningless
+        // here (way_hit[] is all-zero for a main-array miss, so the old
+        // single-condition `hit` check would have silently touched way 0
+        // of every set on every victim-hit, corrupting LRU state for a way
+        // that was never actually accessed).
+        if (REPLACEMENT_POLICY == POLICY_LRU) begin
+            if (hit_main)
+                lru_touch(set_idx, hit_way_idx);
+            else if (vc_lookup_hit)
+                lru_touch(set_idx, victim_target_way);
+        end
 
         case (state)
             S_IDLE: begin
-                if (!hit) begin
-                    fill_set_r  <= set_idx;
-                    fill_tag_r  <= tag;
-                    fill_way_r  <= (REPLACEMENT_POLICY == POLICY_LRU) ? lru_way_idx : victim[set_idx];
-                    fill_base_r <= {readAddr[XLEN-1:OFFSET_BITS], {OFFSET_BITS{1'b0}}};
-                    fill_word_r <= {WORD_OFF_BITS{1'b0}};
-                    busy_r      <= 1'b1;
-                    state       <= S_FILL;
+                if (!hit_main) begin
+                    if (vc_lookup_hit) begin
+                        // docs/adr/0042. Promote: commit the victim
+                        // buffer's own line straight into the main array
+                        // THIS cycle -- no InstructionMemory access needed,
+                        // so this resolves exactly as fast as an ordinary
+                        // hit (state never leaves S_IDLE). vc_do_swap (a
+                        // plain combinational wire, not a registered pulse)
+                        // fires m_victim's own swap on this SAME edge.
+                        for (vcw = 0; vcw < LINE_WORDS; vcw = vcw + 1)
+                            data_arr[(set_idx*WAYS + victim_target_way)*LINE_WORDS + vcw] <= vc_lookup_data[vcw*XLEN +: XLEN];
+                        tag_arr[set_idx*WAYS + victim_target_way] <= tag;
+                        valid[set_idx*WAYS + victim_target_way]   <= 1'b1;
+                        victim[set_idx] <= (victim_target_way == WAYS-1) ? {WAY_BITS{1'b0}} : victim_target_way + 1'b1;
+                        done_r <= 1'b1;
+                    end
+                    else begin
+                        // Genuine backing-store miss -- unchanged from
+                        // pre-Phase-C behavior, except vc_do_insert (above)
+                        // now also feeds this same eviction into the victim
+                        // buffer whenever the outgoing line is real (valid).
+                        fill_set_r  <= set_idx;
+                        fill_tag_r  <= tag;
+                        fill_way_r  <= victim_target_way;
+                        fill_base_r <= {readAddr[XLEN-1:OFFSET_BITS], {OFFSET_BITS{1'b0}}};
+                        fill_word_r <= {WORD_OFF_BITS{1'b0}};
+                        busy_r      <= 1'b1;
+                        state       <= S_FILL;
+                    end
                 end
             end
 

@@ -52,7 +52,12 @@ module DCache #(
     // header comment for the full POLICY_ROUND_ROBIN/FIFO/LRU rationale --
     // not repeated here to avoid drift between two independently-maintained
     // copies of the same explanation).
-    parameter REPLACEMENT_POLICY = 0
+    parameter REPLACEMENT_POLICY = 0,
+    // Generation 4, Phase C (docs/adr/0042-victim-cache-phase-c.md): entry
+    // count for a small fully-associative victim buffer. 0 = disabled,
+    // bit-exact with pre-Phase-C behavior. Not yet consumed anywhere as of
+    // this commit.
+    parameter VICTIM_ENTRIES = 0
 )(
     input clk,
     input rst,
@@ -162,9 +167,18 @@ generate
         assign hit_lineidx_acc[gw+1] = hit_lineidx_acc[gw] | (way_hit[gw] ? way_lineidx[gw] : {LINE_IDX_BITS{1'b0}});
     end
 endgenerate
-wire hit = |way_hit;
 wire [XLEN-1:0]          hit_data     = hit_data_acc[WAYS];
 wire [LINE_IDX_BITS-1:0] hit_line_idx = hit_lineidx_acc[WAYS];
+// docs/adr/0042. `hit_main` is the pre-existing main-array-only signal
+// (renamed from the old bare `hit` -- still what hit_data/hit_line_idx are
+// built from, and what every pre-existing site that needs to distinguish
+// "a real main-array hit" from "a victim-buffer promote" now uses). `hit`
+// is broadened to also cover a victim-buffer hit -- every pre-existing
+// consumer of the bare `hit` identifier (the S_IDLE dispatch fork below,
+// access_hit/access_miss) already meant "resolvable without a bus access,"
+// which a victim-buffer promote genuinely is too, so broadening it here
+// fixes those three sites for free with no further edits needed there.
+wire hit_main = |way_hit;
 
 // docs/adr/0041. POLICY_LRU's own victim choice -- same shape as
 // ICache.v's own gen_lru_victim block. (hit_line_idx already gives a
@@ -181,6 +195,78 @@ generate
     end
 endgenerate
 wire [WAY_BITS-1:0] lru_way_idx = lru_way_acc[WAYS];
+
+// docs/adr/0042-victim-cache-phase-c.md (Generation 4, Phase C). A small,
+// fully-associative buffer for lines just evicted from THIS cache -- see
+// VictimCache.v's own header for the full design rationale, and ICache.v's
+// own copy of this same block for the "why same-cycle, not a new FSM
+// state" reasoning (identical here for a write-hit; a read-hit still goes
+// through the pre-existing S_HIT_RD staging either way, see the S_IDLE
+// case below). Disabled (VICTIM_ENTRIES==0) ties vc_lookup_hit to 0,
+// bit-exact with pre-Phase-C behavior.
+localparam VC_TAG_WIDTH = TAG_BITS + SET_BITS;
+wire [VC_TAG_WIDTH-1:0] vc_lookup_tag = {tag, set_idx};
+wire vc_lookup_hit;
+wire [XLEN*LINE_WORDS-1:0] vc_lookup_data;
+wire vc_lookup_dirty;
+
+// The way about to be displaced by a miss OR a promote -- same choice
+// either way, mirrors ICache.v's own victim_target_way exactly.
+wire [WAY_BITS-1:0] victim_target_way = (REPLACEMENT_POLICY == POLICY_LRU) ? lru_way_idx : victim[set_idx];
+
+// Whatever currently occupies (set_idx, victim_target_way) -- read
+// combinationally regardless of validity. do_swap is unconditional on
+// vc_lookup_hit (same provable "victim_target_way can't be invalid while
+// vc_lookup_hit is true for this set" invariant ICache.v's own copy of
+// this comment derives in full -- identical reasoning, round-robin/LRU
+// mechanics are shared). do_insert is explicitly gated on `valid` below,
+// since an ordinary cold-start miss (the common case) legitimately targets
+// a still-invalid way with nothing worth preserving.
+wire [TAG_BITS-1:0]     vc_outgoing_tag_bits = tag_arr[set_idx*WAYS + victim_target_way];
+wire [VC_TAG_WIDTH-1:0] vc_outgoing_tag      = {vc_outgoing_tag_bits, set_idx};
+wire                    vc_outgoing_dirty    = dirty[set_idx*WAYS + victim_target_way];
+wire [XLEN*LINE_WORDS-1:0] vc_outgoing_data;
+generate
+    for (gw = 0; gw < LINE_WORDS; gw = gw + 1) begin : gen_vc_outgoing
+        assign vc_outgoing_data[gw*XLEN +: XLEN] = data_arr[(set_idx*WAYS + victim_target_way)*LINE_WORDS + gw];
+    end
+endgenerate
+
+wire vc_do_swap   = (state == S_IDLE) && !hit_main && vc_lookup_hit;
+// Inserted regardless of dirty state -- a clean evicted line still gets a
+// real shot at fast recovery, same as a dirty one; insert_dirty (below)
+// carries the real bit through either way.
+wire vc_do_insert = (state == S_IDLE) && !hit_main && !vc_lookup_hit
+                     && valid[set_idx*WAYS + victim_target_way];
+
+wire                       evict_out_valid;
+wire [VC_TAG_WIDTH-1:0]    evict_out_tag;
+wire [XLEN*LINE_WORDS-1:0] evict_out_data;
+wire                       evict_out_dirty;
+
+generate
+if (VICTIM_ENTRIES == 0) begin : gen_victim_disabled
+    assign vc_lookup_hit   = 1'b0;
+    assign vc_lookup_data  = {(XLEN*LINE_WORDS){1'b0}};
+    assign vc_lookup_dirty = 1'b0;
+    assign evict_out_valid = 1'b0;
+    assign evict_out_tag   = {VC_TAG_WIDTH{1'b0}};
+    assign evict_out_data  = {(XLEN*LINE_WORDS){1'b0}};
+    assign evict_out_dirty = 1'b0;
+end else begin : gen_victim_enabled
+    VictimCache #(.ENTRIES(VICTIM_ENTRIES), .WITH_DIRTY(1), .TAG_WIDTH(VC_TAG_WIDTH),
+                  .LINE_WORDS(LINE_WORDS), .XLEN(XLEN)) m_victim(
+        .clk(clk), .rst(rst),
+        .lookup_tag(vc_lookup_tag), .lookup_hit(vc_lookup_hit), .lookup_data(vc_lookup_data), .lookup_dirty(vc_lookup_dirty),
+        .do_swap(vc_do_swap), .swap_in_tag(vc_outgoing_tag), .swap_in_data(vc_outgoing_data), .swap_in_dirty(vc_outgoing_dirty),
+        .do_insert(vc_do_insert), .insert_tag(vc_outgoing_tag), .insert_data(vc_outgoing_data), .insert_dirty(vc_outgoing_dirty),
+        .evict_out_valid(evict_out_valid), .evict_out_tag(evict_out_tag),
+        .evict_out_data(evict_out_data), .evict_out_dirty(evict_out_dirty)
+    );
+end
+endgenerate
+
+wire hit = hit_main | vc_lookup_hit;
 
 // docs/adr/0025-hpc-performance-csrs.md (Phase J5). `access_miss` fires
 // exactly once at the S_IDLE cycle a miss is recognized (state leaves
@@ -307,6 +393,20 @@ reg [LINE_IDX_BITS-1:0] wb_line_r;
 reg [XLEN-1:0]          wb_base_r;
 reg                     wb_return_to_flush_r;
 
+// docs/adr/0042-victim-cache-phase-c.md. The victim buffer's own FIFO
+// eviction (on a genuine miss's do_insert) needs writing back too, if it
+// was dirty -- or that data is silently lost. Latched in S_IDLE (the
+// combinational evict_out_* signals from m_victim are only valid the
+// exact cycle do_insert fires -- by the time S_WB could get around to
+// this, possibly after the PRIMARY line's own writeback, fifo_next_r has
+// already moved on). vwb_active_r tells S_WB's own completion logic (and
+// the m_data_o mux) which line -- the primary miss's own, or the victim
+// buffer's own -- the CURRENT S_WB pass is actually writing back.
+reg                        vwb_pending_r;
+reg                        vwb_active_r;
+reg [VC_TAG_WIDTH-1:0]     vwb_tag_r;
+reg [XLEN*LINE_WORDS-1:0]  vwb_data_r;
+
 reg [LINE_IDX_BITS-1:0] flush_scan_r;
 reg                     flush_active_r;
 reg                     flush_done_r;
@@ -344,10 +444,20 @@ wire [31:0] hit_rd_word = data_arr[hit_line_r*LINE_WORDS + hit_word_r];
 // hit_line_idx, still live combinationally; at S_HIT_RD (the read-hit
 // case, completing one cycle later) it's hit_line_r, latched back at
 // S_IDLE detection time and still valid through S_HIT_RD.
-wire [WAY_BITS-1:0] access_hit_way = (state == S_IDLE) ? hit_line_idx[WAY_BITS-1:0]
-                                                        : hit_line_r[WAY_BITS-1:0];
-wire [SET_BITS-1:0] access_hit_set = (state == S_IDLE) ? hit_line_idx[LINE_IDX_BITS-1:WAY_BITS]
-                                                        : hit_line_r[LINE_IDX_BITS-1:WAY_BITS];
+// docs/adr/0042. The S_IDLE arm now also covers a victim-buffer
+// write-promote (resolves same-cycle, exactly like a real write-hit) --
+// hit_line_idx is all-zero when hit_main is 0 (no way_hit bit set), so
+// without this split, a write-promote would have silently touched way 0
+// of every set's own LRU state instead of victim_target_way (the same bug
+// class ICache.v's own copy of this fix closes). The S_HIT_RD arm needs no
+// change: hit_line_r is already correctly latched to victim_target_way by
+// the read-promote branch below by the time S_HIT_RD evaluates this.
+wire [WAY_BITS-1:0] access_hit_way = (state == S_IDLE)
+    ? (hit_main ? hit_line_idx[WAY_BITS-1:0] : victim_target_way)
+    : hit_line_r[WAY_BITS-1:0];
+wire [SET_BITS-1:0] access_hit_set = (state == S_IDLE)
+    ? (hit_main ? hit_line_idx[LINE_IDX_BITS-1:WAY_BITS] : set_idx)
+    : hit_line_r[LINE_IDX_BITS-1:WAY_BITS];
 
 wire fill_is_last_word = (fill_word_r == LINE_WORDS-1);
 wire fill_do_merge = miss_is_write_r && (fill_word_r == miss_word_off_r);
@@ -370,12 +480,14 @@ task lru_touch;
     end
 endtask
 
-integer reset_i, reset_j;
+integer reset_i, reset_j, vcw;
 always @(posedge clk) begin
     if (~rst) begin
         state <= S_IDLE;
         flush_active_r <= 1'b0;
         flush_done_r   <= 1'b0;
+        vwb_pending_r  <= 1'b0;
+        vwb_active_r   <= 1'b0;
         for (reset_i = 0; reset_i < NUM_LINES; reset_i = reset_i + 1) begin
             valid[reset_i] <= 1'b0;
             dirty[reset_i] <= 1'b0;
@@ -405,25 +517,68 @@ always @(posedge clk) begin
                 end
                 else if (req_read || req_write) begin
                     if (hit) begin
-                        if (req_write) begin
-                            data_arr[hit_line_idx*LINE_WORDS + word_off] <=
-                                dcache_merge_write(hit_data, req_funct3[1:0], byte_off, req_wdata);
-                            dirty[hit_line_idx] <= 1'b1;
-                            // resp_ready combinational this cycle (see assign below), stays in S_IDLE
+                        if (hit_main) begin
+                            if (req_write) begin
+                                data_arr[hit_line_idx*LINE_WORDS + word_off] <=
+                                    dcache_merge_write(hit_data, req_funct3[1:0], byte_off, req_wdata);
+                                dirty[hit_line_idx] <= 1'b1;
+                                // resp_ready combinational this cycle (see assign below), stays in S_IDLE
+                            end
+                            else begin
+                                hit_line_r    <= hit_line_idx;
+                                hit_word_r    <= word_off;
+                                hit_funct3_r  <= req_funct3;
+                                hit_byteoff_r <= byte_off;
+                                state <= S_HIT_RD;
+                                served_addr_r <= req_addr;
+                            end
                         end
                         else begin
-                            hit_line_r    <= hit_line_idx;
-                            hit_word_r    <= word_off;
-                            hit_funct3_r  <= req_funct3;
-                            hit_byteoff_r <= byte_off;
-                            state <= S_HIT_RD;
-                            served_addr_r <= req_addr;
+                            // docs/adr/0042. Victim-buffer promote: commit
+                            // the buffer's own line into the main array
+                            // THIS cycle -- no bus access needed.
+                            if (req_write) begin
+                                // Same-cycle, mirrors the hit_main write
+                                // arm above exactly (resp_ready's own
+                                // existing S_IDLE&&hit&&req_write arm
+                                // already fires, `hit` having been
+                                // broadened to include vc_lookup_hit).
+                                for (vcw = 0; vcw < LINE_WORDS; vcw = vcw + 1)
+                                    data_arr[(set_idx*WAYS + victim_target_way)*LINE_WORDS + vcw] <=
+                                        (vcw == word_off)
+                                            ? dcache_merge_write(vc_lookup_data[vcw*XLEN +: XLEN], req_funct3[1:0], byte_off, req_wdata)
+                                            : vc_lookup_data[vcw*XLEN +: XLEN];
+                                tag_arr[set_idx*WAYS + victim_target_way] <= tag;
+                                valid[set_idx*WAYS + victim_target_way]   <= 1'b1;
+                                dirty[set_idx*WAYS + victim_target_way]   <= 1'b1; // a write always dirties it, regardless of the promoted line's own prior dirtiness
+                                victim[set_idx] <= (victim_target_way == WAYS-1) ? {WAY_BITS{1'b0}} : victim_target_way + 1'b1;
+                            end
+                            else begin
+                                // Read-promote: commit now, but the actual
+                                // read still goes through S_HIT_RD next
+                                // cycle -- same 1-cycle shape as a real
+                                // main-array read-hit (hit_rd_word reads
+                                // data_arr combinationally there, and by
+                                // then this commit has already landed).
+                                for (vcw = 0; vcw < LINE_WORDS; vcw = vcw + 1)
+                                    data_arr[(set_idx*WAYS + victim_target_way)*LINE_WORDS + vcw] <= vc_lookup_data[vcw*XLEN +: XLEN];
+                                tag_arr[set_idx*WAYS + victim_target_way] <= tag;
+                                valid[set_idx*WAYS + victim_target_way]   <= 1'b1;
+                                dirty[set_idx*WAYS + victim_target_way]   <= vc_lookup_dirty; // carried through, unchanged by a plain read
+                                victim[set_idx] <= (victim_target_way == WAYS-1) ? {WAY_BITS{1'b0}} : victim_target_way + 1'b1;
+                                hit_line_r    <= set_idx*WAYS + victim_target_way;
+                                hit_word_r    <= word_off;
+                                hit_funct3_r  <= req_funct3;
+                                hit_byteoff_r <= byte_off;
+                                state <= S_HIT_RD;
+                                served_addr_r <= req_addr;
+                            end
                         end
                     end
                     else begin
                         miss_set_r      <= set_idx;
                         miss_tag_r      <= tag;
-                        miss_way_r      <= (REPLACEMENT_POLICY == POLICY_LRU) ? lru_way_idx : victim[set_idx];
+                        miss_way_r      <= victim_target_way;
                         miss_base_r     <= {req_addr[XLEN-1:OFFSET_BITS], {OFFSET_BITS{1'b0}}};
                         miss_word_off_r <= word_off;
                         miss_byteoff_r  <= byte_off;
@@ -431,14 +586,35 @@ always @(posedge clk) begin
                         miss_is_write_r <= req_write;
                         miss_wdata_r    <= req_wdata;
                         miss_orig_addr_r <= req_addr;
-                        if (valid[set_idx*WAYS + victim[set_idx]] && dirty[set_idx*WAYS + victim[set_idx]]) begin
-                            wb_line_r <= set_idx*WAYS + victim[set_idx];
-                            wb_base_r <= {tag_arr[set_idx*WAYS + victim[set_idx]], set_idx, {OFFSET_BITS{1'b0}}};
+                        // docs/adr/0042. The victim buffer's own eviction
+                        // (if do_insert's target FIFO slot was valid+dirty)
+                        // needs writing back too -- latched here regardless
+                        // of which fork below is taken (see S_WB's own
+                        // completion logic for how it's chained in).
+                        vwb_pending_r <= evict_out_valid && evict_out_dirty;
+                        vwb_tag_r     <= evict_out_tag;
+                        vwb_data_r    <= evict_out_data;
+                        if (valid[set_idx*WAYS + victim_target_way] && dirty[set_idx*WAYS + victim_target_way]) begin
+                            wb_line_r <= set_idx*WAYS + victim_target_way;
+                            wb_base_r <= {tag_arr[set_idx*WAYS + victim_target_way], set_idx, {OFFSET_BITS{1'b0}}};
                             wb_return_to_flush_r <= 1'b0;
+                            vwb_active_r <= 1'b0;
+                            fill_word_r <= {WORD_OFF_BITS{1'b0}};
+                            state <= S_WB;
+                        end
+                        else if (evict_out_valid && evict_out_dirty) begin
+                            // The primary miss's own outgoing line is clean
+                            // (or invalid -- no S_WB needed for IT), but the
+                            // victim buffer's own FIFO eviction still needs
+                            // writing back -- go straight to S_WB configured
+                            // for THAT line instead.
+                            vwb_active_r <= 1'b1;
+                            wb_base_r <= {evict_out_tag, {OFFSET_BITS{1'b0}}};
                             fill_word_r <= {WORD_OFF_BITS{1'b0}};
                             state <= S_WB;
                         end
                         else begin
+                            vwb_active_r <= 1'b0;
                             fill_word_r <= {WORD_OFF_BITS{1'b0}};
                             state <= S_FILL;
                         end
@@ -453,21 +629,44 @@ always @(posedge clk) begin
             S_WB: begin
                 if (m_ack) begin
                     if (fill_is_last_word) begin
-                        dirty[wb_line_r] <= 1'b0;
-                        if (wb_return_to_flush_r) begin
-                            if (flush_scan_r == NUM_LINES-1) begin
-                                flush_active_r <= 1'b0;
-                                flush_done_r   <= 1'b1;
-                                state <= S_IDLE;
-                            end
-                            else begin
-                                flush_scan_r <= flush_scan_r + 1'b1;
-                                state <= S_FLUSH_SCAN;
-                            end
-                        end
-                        else begin
+                        // docs/adr/0042. If THIS pass was already the
+                        // victim buffer's own chained writeback, nothing
+                        // else pending -- fall through to the real fill.
+                        if (vwb_active_r) begin
+                            vwb_active_r  <= 1'b0;
+                            vwb_pending_r <= 1'b0;
                             fill_word_r <= {WORD_OFF_BITS{1'b0}};
                             state <= S_FILL;
+                        end
+                        else begin
+                            dirty[wb_line_r] <= 1'b0;
+                            if (wb_return_to_flush_r) begin
+                                if (flush_scan_r == NUM_LINES-1) begin
+                                    flush_active_r <= 1'b0;
+                                    flush_done_r   <= 1'b1;
+                                    state <= S_IDLE;
+                                end
+                                else begin
+                                    flush_scan_r <= flush_scan_r + 1'b1;
+                                    state <= S_FLUSH_SCAN;
+                                end
+                            end
+                            else if (vwb_pending_r) begin
+                                // The PRIMARY line's own writeback just
+                                // finished, and the victim buffer's own
+                                // eviction (latched back in S_IDLE) is
+                                // still pending -- chain a second S_WB pass
+                                // for it before falling into S_FILL
+                                // (implicitly stays in S_WB -- state isn't
+                                // reassigned this branch).
+                                vwb_active_r <= 1'b1;
+                                wb_base_r <= {vwb_tag_r, {OFFSET_BITS{1'b0}}};
+                                fill_word_r <= {WORD_OFF_BITS{1'b0}};
+                            end
+                            else begin
+                                fill_word_r <= {WORD_OFF_BITS{1'b0}};
+                                state <= S_FILL;
+                            end
                         end
                     end
                     else begin
@@ -549,7 +748,12 @@ assign m_stb    = m_cyc;
 assign m_we     = (state == S_WB);
 assign m_addr   = (state == S_WB) ? (wb_base_r + {{(XLEN-OFFSET_BITS){1'b0}}, fill_word_r, 2'b00})
                                    : (miss_base_r + {{(XLEN-OFFSET_BITS){1'b0}}, fill_word_r, 2'b00});
-assign m_data_o = (state == S_WB) ? data_arr[wb_line_r*LINE_WORDS + fill_word_r] : {XLEN{1'b0}};
+// docs/adr/0042. vwb_active_r selects the victim buffer's own latched
+// evicted line (vwb_data_r, a flat XLEN*LINE_WORDS-wide register, not a
+// data_arr index) instead of the primary miss's own real main-array line.
+assign m_data_o = (state == S_WB)
+    ? (vwb_active_r ? vwb_data_r[fill_word_r*XLEN +: XLEN] : data_arr[wb_line_r*LINE_WORDS + fill_word_r])
+    : {XLEN{1'b0}};
 assign m_sel    = {`WB_SEL_WIDTH{1'b1}};
 assign m_funct3 = 3'b010;   // fill/writeback are always full-word transfers
 
