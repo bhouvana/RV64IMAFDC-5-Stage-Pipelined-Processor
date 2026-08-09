@@ -131,7 +131,7 @@ def load_words(mem_path):
 
 def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_strategy=0, pipeline_profile=0,
               branch_predictor=0, cache_mode=0, replacement_policy=0, mem_latency_i=0, mem_latency_d=0,
-              victim_entries=0, xlen=32):
+              victim_entries=0, burst_enable=0, mem_latency_d_burst=0, xlen=32):
     here = os.path.dirname(os.path.abspath(__file__))
     prog_mem = os.path.join(work_dir, f"{name}.mem")
     asm_py = os.path.join(here, "asm.py")
@@ -173,7 +173,8 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
     # a flat per-instruction margin, not tuned per-kernel.
     max_time = (instrs * (60 + 2 * (mem_latency_i + mem_latency_d)) + 500) * 10 + (4000 if cache_mode else 0)
     tag = (f"{name}_hs{hazard_strategy}_p{pipeline_profile}_bp{branch_predictor}_cm{cache_mode}"
-           f"_rp{replacement_policy}_ve{victim_entries}_li{mem_latency_i}_ld{mem_latency_d}")
+           f"_rp{replacement_policy}_ve{victim_entries}_be{burst_enable}_ldb{mem_latency_d_burst}"
+           f"_li{mem_latency_i}_ld{mem_latency_d}")
     dump_v = os.path.join(work_dir, f"{tag}.v")
     out_path = os.path.join(work_dir, f"{tag}.out").replace("\\", "/")
     init_file_rel = os.path.relpath(prog_mem, start=os.getcwd()).replace("\\", "/")
@@ -189,6 +190,8 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
               .replace("__CACHE_MODE__", str(cache_mode))
               .replace("__REPLACEMENT_POLICY__", str(replacement_policy))
               .replace("__VICTIM_ENTRIES__", str(victim_entries))
+              .replace("__BURST_ENABLE__", str(burst_enable))
+              .replace("__MEM_LATENCY_D_BURST__", str(mem_latency_d_burst))
               .replace("__XLEN__", str(xlen))
               .replace("__MEM_LATENCY_I__", str(mem_latency_i))
               .replace("__MEM_LATENCY_D__", str(mem_latency_d)))
@@ -249,6 +252,13 @@ def main():
     ap.add_argument("--mem-latency-d", type=int, default=0,
                      help="riscvpipeline.v's MEM_LATENCY_D (docs/adr/0024-variable-latency-memory.md): "
                           "extra D-side wait-state cycles, 0=bit-exact default")
+    ap.add_argument("--burst-enable", type=int, default=0, choices=[0, 1],
+                     help="riscvpipeline.v's BURST_ENABLE (docs/adr/0043-memory-controller-phase-d.md): "
+                          "0=disabled (default). Only meaningful under --cache-mode 1")
+    ap.add_argument("--mem-latency-d-burst", type=int, default=0,
+                     help="riscvpipeline.v's MEM_LATENCY_D_BURST (docs/adr/0043-memory-controller-"
+                          "phase-d.md): extra wait-state cycles for a burst-continuation beat instead "
+                          "of the full --mem-latency-d. Only meaningful under --burst-enable 1")
     compare = ap.add_mutually_exclusive_group()
     compare.add_argument("--compare-strategies", action="store_true",
                           help="run every benchmark under both hazard strategies "
@@ -276,6 +286,12 @@ def main():
                                "(at --hazard-strategy/--pipeline-profile/--branch-predictor/"
                                "--replacement-policy, forced --cache-mode 1 since the parameter is a "
                                "no-op otherwise) and report the delta")
+    compare.add_argument("--compare-burst", action="store_true",
+                          help="run every benchmark under BURST_ENABLE=1 with MEM_LATENCY_D_BURST at "
+                               "no discount (equal to --mem-latency-d) vs. full discount (0) (forces "
+                               "--cache-mode 1 and --burst-enable 1, and a nonzero --mem-latency-d if "
+                               "neither was set, since the discount has nothing to amortize otherwise) "
+                               "and report the delta")
     args = ap.parse_args()
 
     if args.compare_latency and args.mem_latency_i == 0 and args.mem_latency_d == 0:
@@ -284,6 +300,11 @@ def main():
         args.cache_mode = 1
     if args.compare_victim_cache:
         args.cache_mode = 1
+    if args.compare_burst:
+        args.cache_mode = 1
+        args.burst_enable = 1
+        if args.mem_latency_d == 0:
+            args.mem_latency_d = 5
 
     here = os.path.dirname(os.path.abspath(__file__))
     template = os.path.join(here, "..", "tb", "bench_template.v")
@@ -295,57 +316,71 @@ def main():
 
     # pairs are always (hazard_strategy, pipeline_profile, branch_predictor,
     # cache_mode, replacement_policy, mem_latency_i, mem_latency_d,
-    # victim_entries) 8-tuples; a --compare-* flag varies exactly one axis
-    # while holding the rest at whatever --hazard-strategy/--pipeline-
-    # profile/--branch-predictor/--cache-mode/--replacement-policy/
-    # --mem-latency-i/--mem-latency-d/--victim-entries were passed
+    # victim_entries, burst_enable, mem_latency_d_burst) 10-tuples; a
+    # --compare-* flag varies exactly one axis while holding the rest at
+    # whatever --hazard-strategy/--pipeline-profile/--branch-predictor/
+    # --cache-mode/--replacement-policy/--mem-latency-i/--mem-latency-d/
+    # --victim-entries/--burst-enable/--mem-latency-d-burst were passed
     # (defaulting to 0 each).
     if args.compare_strategies:
         axis, axis_label = "strategy", "HAZARD_STRATEGY"
         keys = (0, 1)
         pairs = [(s, args.pipeline_profile, args.branch_predictor, args.cache_mode,
-                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries) for s in keys]
+                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
+                  args.burst_enable, args.mem_latency_d_burst) for s in keys]
     elif args.compare_profiles:
         axis, axis_label = "profile", "PIPELINE_PROFILE"
         keys = (0, 1)
         pairs = [(args.hazard_strategy, p, args.branch_predictor, args.cache_mode,
-                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries) for p in keys]
+                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
+                  args.burst_enable, args.mem_latency_d_burst) for p in keys]
     elif args.compare_predictors:
         axis, axis_label = "predictor", "BRANCH_PREDICTOR"
         keys = (0, 1, 2, 3)   # Generation 4, Phase A (docs/adr/0040): GShare + tournament joined the axis
         pairs = [(args.hazard_strategy, args.pipeline_profile, bp, args.cache_mode,
-                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries) for bp in keys]
+                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
+                  args.burst_enable, args.mem_latency_d_burst) for bp in keys]
     elif args.compare_cache:
         axis, axis_label = "cache", "CACHE_MODE"
         keys = (0, 1)
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, cm,
-                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries) for cm in keys]
+                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
+                  args.burst_enable, args.mem_latency_d_burst) for cm in keys]
     elif args.compare_latency:
         axis, axis_label = "latency", "MEM_LATENCY_I/D"
         keys = (0, 1)
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
-                  args.replacement_policy, li, ld, args.victim_entries)
+                  args.replacement_policy, li, ld, args.victim_entries, args.burst_enable, args.mem_latency_d_burst)
                  for li, ld in ((0, 0), (args.mem_latency_i, args.mem_latency_d))]
     elif args.compare_replacement:
         axis, axis_label = "replacement", "REPLACEMENT_POLICY"
         keys = (0, 1, 2)
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
-                  rp, args.mem_latency_i, args.mem_latency_d, args.victim_entries) for rp in keys]
+                  rp, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
+                  args.burst_enable, args.mem_latency_d_burst) for rp in keys]
     elif args.compare_victim_cache:
         axis, axis_label = "victim", "VICTIM_ENTRIES"
         keys = (0, 4)
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
-                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d, ve) for ve in keys]
+                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d, ve,
+                  args.burst_enable, args.mem_latency_d_burst) for ve in keys]
+    elif args.compare_burst:
+        axis, axis_label = "burst", "MEM_LATENCY_D_BURST"
+        keys = (0, 1)   # 0=no discount (MEM_LATENCY_D_BURST==MEM_LATENCY_D), 1=full discount (0)
+        pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
+                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
+                  args.burst_enable, ldb) for ldb in (args.mem_latency_d, 0)]
     else:
         axis, axis_label = None, None
         keys = (args.hazard_strategy,)  # single run, keyed arbitrarily by hazard_strategy
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
-                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries)]
+                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
+                  args.burst_enable, args.mem_latency_d_burst)]
 
     all_results = {k: [] for k in keys}
     with tempfile.TemporaryDirectory() as work_dir:
         for key, (strategy, profile, predictor, cache_mode, replacement_policy, mem_latency_i, mem_latency_d,
-                  victim_entries) in zip(keys, pairs):
+                  victim_entries, burst_enable, mem_latency_d_burst) in zip(keys, pairs):
             if axis == "strategy":
                 print(f"--- HAZARD_STRATEGY={strategy} ({'forwarding' if strategy == 0 else 'stall-only'}) ---")
             elif axis == "profile":
@@ -366,12 +401,17 @@ def main():
             elif axis == "victim":
                 print(f"--- VICTIM_ENTRIES={victim_entries} "
                       f"({'disabled' if victim_entries == 0 else f'{victim_entries} entries'}) ---")
+            elif axis == "burst":
+                print(f"--- MEM_LATENCY_D_BURST={mem_latency_d_burst} "
+                      f"({'no discount' if mem_latency_d_burst == mem_latency_d else 'full discount'}, "
+                      f"MEM_LATENCY_D={mem_latency_d}) ---")
             for prog_s in progs:
                 name = os.path.splitext(os.path.basename(prog_s))[0]
                 mem_size = MEM_SIZE_OVERRIDES.get(name, 128)
                 result, err = run_bench(name, prog_s, work_dir, args.iverilog_dir, template, mem_size,
                                          strategy, profile, predictor, cache_mode, replacement_policy,
-                                         mem_latency_i, mem_latency_d, victim_entries)
+                                         mem_latency_i, mem_latency_d, victim_entries,
+                                         burst_enable, mem_latency_d_burst)
                 if err:
                     print(f"FAIL  {name}: {err}")
                     all_results[key].append((name, None))
@@ -404,6 +444,7 @@ def main():
                                                      f"MEM_LATENCY_D={args.mem_latency_d}"},
             "replacement": {0: "POLICY_ROUND_ROBIN (RP=0)", 1: "POLICY_FIFO (RP=1)", 2: "POLICY_LRU (RP=2)"},
             "victim": {0: "VICTIM_ENTRIES=0 (disabled)", 4: "VICTIM_ENTRIES=4"},
+            "burst": {0: "no discount (MEM_LATENCY_D_BURST=MEM_LATENCY_D)", 1: "full discount (MEM_LATENCY_D_BURST=0)"},
         }
         baseline_key = keys[0]
         by_name_baseline = dict(all_results[baseline_key])

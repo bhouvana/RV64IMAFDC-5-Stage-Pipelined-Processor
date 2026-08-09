@@ -1,4 +1,5 @@
 `include "riscvpipeline.v"
+`include "MemoryController.v"
 `include "CompressedExpander.v"
 `include "PC.v"
 `include "Adder.v"
@@ -81,6 +82,7 @@ module dump_regs;
                 .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__),
                 .CACHE_MODE(__CACHE_MODE__), .REPLACEMENT_POLICY(__REPLACEMENT_POLICY__),
                 .VICTIM_ENTRIES(__VICTIM_ENTRIES__),
+                .BURST_ENABLE(__BURST_ENABLE__), .MEM_LATENCY_D_BURST(__MEM_LATENCY_D_BURST__),
                 .MEM_LATENCY_I(__MEM_LATENCY_I__), .MEM_LATENCY_D(__MEM_LATENCY_D__),
                 .XLEN(__XLEN__))
                 dut(.clk(clk), .start(start), .uart_rx(1'b1));
