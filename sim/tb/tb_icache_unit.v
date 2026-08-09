@@ -57,6 +57,32 @@ module tb_icache_unit;
         .inst(inst_o2), .hit(hit_o2), .busy(busy_o2), .done(done_o2)
     );
 
+    // docs/adr/0041-cache-replacement-policy-phase-b.md. A third instance,
+    // 4-way/2-set (64B cache, 8B lines -> 8 lines / 4 ways = 2 sets). All 5
+    // test addresses below deliberately share bit3=0 (set0), so every one
+    // of 4 fills lands in the SAME set and a 5th distinct address forces a
+    // real eviction choice -- the worked example REPLACEMENT_POLICY=2
+    // (POLICY_LRU) needs to prove it genuinely diverges from round-robin.
+    // NOT 1-set (WAYS==NUM_LINES): a real, PRE-EXISTING, unrelated bug found
+    // while designing this test -- set_idx's own part-select
+    // (readAddr[OFFSET_BITS+SET_BITS-1:OFFSET_BITS]) reverses to
+    // readAddr[OFFSET_BITS-1:OFFSET_BITS] when SET_BITS==0, an invalid
+    // (high<low) part-select, in BOTH ICache.v and DCache.v. Confirmed
+    // pre-existing (no existing test ever used a fully-direct-mapped/
+    // single-set sizing to hit it) and unrelated to REPLACEMENT_POLICY --
+    // routed around here via a 2-set sizing instead of fixed as a drive-by;
+    // flagged in docs/adr/0041's own findings section, real open backlog.
+    reg rst3 = 0;
+    reg [31:0] readAddr3 = 0;
+    wire [31:0] inst_o3;
+    wire hit_o3, busy_o3, done_o3;
+    ICache #(.INIT_FILE(""), .IMEM_SIZE_BYTES(96), .XLEN(32),
+             .WAYS(4), .CACHE_SIZE_BYTES(64), .LINE_BYTES(8),
+             .REPLACEMENT_POLICY(2)) dut3(
+        .clk(clk), .rst(rst3), .readAddr(readAddr3),
+        .inst(inst_o3), .hit(hit_o3), .busy(busy_o3), .done(done_o3)
+    );
+
     always #5 clk = ~clk;
 
     integer fails = 0;
@@ -90,14 +116,20 @@ module tb_icache_unit;
         end
     endtask
 
+    // docs/adr/0041. Fixed: was MSB-first (insts[addr]=val[31:24]), stale
+    // since Phase U's InstructionMemory.v byte-order fix (docs/adr/0037)
+    // flipped that module to LSB-first and this test's own poke helper was
+    // never updated -- one of the two documented pre-existing failures
+    // (docs/adr/0039/handoff.md). Now matches
+    // InstructionMemory.v's real `{insts[addr+3],...,insts[addr]}` read.
     task poke_word;
         input [31:0] addr;
         input [31:0] val;
         begin
-            dut.m_imem.insts[addr]   = val[31:24];
-            dut.m_imem.insts[addr+1] = val[23:16];
-            dut.m_imem.insts[addr+2] = val[15:8];
-            dut.m_imem.insts[addr+3] = val[7:0];
+            dut.m_imem.insts[addr]   = val[7:0];
+            dut.m_imem.insts[addr+1] = val[15:8];
+            dut.m_imem.insts[addr+2] = val[23:16];
+            dut.m_imem.insts[addr+3] = val[31:24];
         end
     endtask
 
@@ -132,6 +164,47 @@ module tb_icache_unit;
         begin
             @(negedge clk);
             readAddr = addr;
+            #1;
+        end
+    endtask
+
+    // docs/adr/0041. LSB-first (insts[addr]=val[7:0]...insts[addr+3]=
+    // val[31:24]), matching InstructionMemory.v's real current convention
+    // (`{insts[addr+3],...,insts[addr]}`, docs/adr/0037's byte-order fix) --
+    // deliberately NOT copied from poke_word above, which still writes the
+    // stale pre-Phase-U MSB-first order (a real, already-documented,
+    // pre-existing bug in THIS test file, unrelated to Phase B -- see
+    // docs/adr/0039/handoff.md's own note that tb_icache_unit is one of the
+    // two known pre-existing failing tests for exactly this reason. Not
+    // fixed here, out of scope for this phase -- only this NEW task avoids
+    // repeating it).
+    task poke_word_dut3;
+        input [31:0] addr;
+        input [31:0] val;
+        begin
+            dut3.m_imem.insts[addr]   = val[7:0];
+            dut3.m_imem.insts[addr+1] = val[15:8];
+            dut3.m_imem.insts[addr+2] = val[23:16];
+            dut3.m_imem.insts[addr+3] = val[31:24];
+        end
+    endtask
+
+    task wait_ready3;
+        integer i;
+        begin
+            i = 0;
+            while (!hit_o3 && i < 10) begin
+                @(posedge clk);
+                i = i + 1;
+            end
+        end
+    endtask
+
+    task set_addr3;
+        input [31:0] addr;
+        begin
+            @(negedge clk);
+            readAddr3 = addr;
             #1;
         end
     endtask
@@ -215,18 +288,18 @@ module tb_icache_unit;
         readAddr2 = 0;
         @(posedge clk); rst2 <= 0;
         @(posedge clk); rst2 <= 1;
-        begin : poke2_block
+        begin : poke2_block   // docs/adr/0041: same LSB-first fix as poke_word above
             reg [31:0] w0, w4;
             w0 = val_at(0);
             w4 = val_at(4);
-            dut2.m_imem.insts[0] = w0[31:24];
-            dut2.m_imem.insts[1] = w0[23:16];
-            dut2.m_imem.insts[2] = w0[15:8];
-            dut2.m_imem.insts[3] = w0[7:0];
-            dut2.m_imem.insts[4] = w4[31:24];
-            dut2.m_imem.insts[5] = w4[23:16];
-            dut2.m_imem.insts[6] = w4[15:8];
-            dut2.m_imem.insts[7] = w4[7:0];
+            dut2.m_imem.insts[0] = w0[7:0];
+            dut2.m_imem.insts[1] = w0[15:8];
+            dut2.m_imem.insts[2] = w0[23:16];
+            dut2.m_imem.insts[3] = w0[31:24];
+            dut2.m_imem.insts[4] = w4[7:0];
+            dut2.m_imem.insts[5] = w4[15:8];
+            dut2.m_imem.insts[6] = w4[23:16];
+            dut2.m_imem.insts[7] = w4[31:24];
         end
 
         check_bit(hit_o2, 1'b0, "MEM_LATENCY>0: addr0 cold-misses");
@@ -253,6 +326,52 @@ module tb_icache_unit;
         @(negedge clk); readAddr2 = 4; #1;
         check_bit(hit_o2, 1'b1, "MEM_LATENCY>0: addr4 (same line) hits with no extra fill");
         check_word(inst_o2, val_at(4), "MEM_LATENCY>0: addr4 content correct");
+
+        // -- POLICY_LRU sub-test (dut3): docs/adr/0041's own worked example.
+        // 2 sets, 4 ways/set, 5 distinct lines all sharing bit3=0 (set0):
+        // A=0,B=16,C=32,D=48,E=64. Fill A,B,C,D in order (fills way0..way3
+        // -- round-robin's pointer wraps back to way0 after). Then re-touch
+        // A and B (hits, not fills). Miss on E forces eviction: round-robin
+        // blindly evicts whatever the wrapped pointer already points at
+        // (way0/A), oblivious to the two intervening hits; true LRU's real
+        // order at that point is B,A,D,C (MRU->LRU), so it evicts C (way2),
+        // not A.
+        readAddr3 = 0;
+        @(posedge clk); rst3 <= 0;
+        @(posedge clk); rst3 <= 1;
+        poke_word_dut3(0,  val_at(0));
+        poke_word_dut3(16, val_at(16));
+        poke_word_dut3(32, val_at(32));
+        poke_word_dut3(48, val_at(48));
+        poke_word_dut3(64, val_at(64));
+
+        set_addr3(0);  wait_ready3;  check_bit(hit_o3, 1'b1, "LRU: addr0 (A) fills way0");
+        set_addr3(16); wait_ready3;  check_bit(hit_o3, 1'b1, "LRU: addr16 (B) fills way1");
+        set_addr3(32); wait_ready3;  check_bit(hit_o3, 1'b1, "LRU: addr32 (C) fills way2");
+        set_addr3(48); wait_ready3;  check_bit(hit_o3, 1'b1, "LRU: addr48 (D) fills way3 -- all 4 ways now full");
+
+        // Re-touch A then B (real hits, no fill -- moves them to MRU).
+        set_addr3(0);
+        check_bit(hit_o3, 1'b1, "LRU: addr0 (A) re-touch is a hit, not a fill");
+        set_addr3(16);
+        check_bit(hit_o3, 1'b1, "LRU: addr16 (B) re-touch is a hit, not a fill");
+
+        // Miss on E (addr64, a 5th distinct tag) forces an eviction.
+        set_addr3(64);
+        check_bit(hit_o3, 1'b0, "LRU: addr64 (E) cold-misses");
+        wait_ready3;
+        check_bit(hit_o3, 1'b1, "LRU: addr64 (E) hits after fill");
+        check_word(inst_o3, val_at(64), "LRU: addr64 content correct");
+
+        // The real differentiator: C (way2, least-recently-touched) must be
+        // gone; D (way3, never re-touched but still more-recent than C at
+        // fill time) must survive. Round-robin would instead have evicted A.
+        set_addr3(32);
+        check_bit(hit_o3, 1'b0, "LRU: addr32 (C) now MISSES -- true LRU evicted the actual least-recently-used way");
+        set_addr3(48);
+        check_bit(hit_o3, 1'b1, "LRU: addr48 (D) still hits -- LRU correctly spared it over C");
+        set_addr3(0);
+        check_bit(hit_o3, 1'b1, "LRU: addr0 (A) still hits -- round-robin's blind choice (evict A) would have failed this check");
 
         if (fails == 0)
             $display("PASS  icache_unit (%0d checks)", checks);
