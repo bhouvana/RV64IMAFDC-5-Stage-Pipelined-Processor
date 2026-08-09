@@ -43,6 +43,7 @@
 `include "Chooser.v"
 `include "ICache.v"
 `include "DCache.v"
+`include "VictimCache.v"
 `include "MemoryLatencyModel.v"
 
 // docs/adr/0020-soc-integration.md (Phase D10). Interrupt-mode sibling of
@@ -65,7 +66,8 @@
 // interact with interrupt-injection's own termination-safety machinery).
 // __REPLACEMENT_POLICY__ (docs/adr/0041-cache-replacement-policy-phase-b.md)
 // substituted the same way -- purely timing, no cache model in iss.py at
-// all, same category as CACHE_MODE/MEM_LATENCY_I/_D above.
+// all, same category as CACHE_MODE/MEM_LATENCY_I/_D above. __VICTIM_ENTRIES__
+// (docs/adr/0042-victim-cache-phase-c.md) joins the same category.
 module dump_regs_interrupt;
     reg clk = 0;
     reg start = 0;
@@ -77,7 +79,7 @@ module dump_regs_interrupt;
     PIPELINED #(.INIT_FILE("__INIT_FILE__"), .HAZARD_STRATEGY(__HAZARD_STRATEGY__),
                 .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .MEM_SIZE_BYTES(__MEM_SIZE__),
                 .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__), .CACHE_MODE(__CACHE_MODE__),
-                .REPLACEMENT_POLICY(__REPLACEMENT_POLICY__),
+                .REPLACEMENT_POLICY(__REPLACEMENT_POLICY__), .VICTIM_ENTRIES(__VICTIM_ENTRIES__),
                 .MEM_LATENCY_I(__MEM_LATENCY_I__), .MEM_LATENCY_D(__MEM_LATENCY_D__),
                 .UART_CLKS_PER_BIT(4), .XLEN(__XLEN__))
         dut(.clk(clk), .start(start), .uart_rx(uart_rx), .uart_tx(uart_tx));

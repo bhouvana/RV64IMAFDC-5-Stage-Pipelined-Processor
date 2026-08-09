@@ -43,6 +43,7 @@
 `include "Chooser.v"
 `include "ICache.v"
 `include "DCache.v"
+`include "VictimCache.v"
 `include "MemoryLatencyModel.v"
 
 // Template for sim/tools/random_gen.py's cross-check driver -- __INIT_FILE__,
@@ -55,9 +56,11 @@
 // 0 or 1, see riscvpipeline.v's CACHE_MODE parameter), and __MEM_LATENCY_I__/
 // __MEM_LATENCY_D__ (docs/adr/0024-variable-latency-memory.md; extra
 // wait-state cycles, 0 by default), and __XLEN__ (Generation 2, docs/adr/
-// 0028-rv64-migration-phase-m.md; 32 or 64), and __REPLACEMENT_POLICY__
+// 0028-rv64-migration-phase-m.md; 32 or 64), __REPLACEMENT_POLICY__
 // (docs/adr/0041-cache-replacement-policy-phase-b.md; 0/1/2, only
-// meaningful under CACHE_MODE=1) are substituted per
+// meaningful under CACHE_MODE=1), and __VICTIM_ENTRIES__ (docs/adr/0042-
+// victim-cache-phase-c.md; 0=disabled, only meaningful under CACHE_MODE=1)
+// are substituted per
 // run. Dumps final
 // architectural state as one decimal value per line, for comparison against
 // sim/tools/iss.py's own final state on the same program -- the ISS itself
@@ -77,6 +80,7 @@ module dump_regs;
     PIPELINED #(.INIT_FILE("__INIT_FILE__"), .HAZARD_STRATEGY(__HAZARD_STRATEGY__),
                 .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__),
                 .CACHE_MODE(__CACHE_MODE__), .REPLACEMENT_POLICY(__REPLACEMENT_POLICY__),
+                .VICTIM_ENTRIES(__VICTIM_ENTRIES__),
                 .MEM_LATENCY_I(__MEM_LATENCY_I__), .MEM_LATENCY_D(__MEM_LATENCY_D__),
                 .XLEN(__XLEN__))
                 dut(.clk(clk), .start(start), .uart_rx(1'b1));

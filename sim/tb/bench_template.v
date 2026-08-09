@@ -43,6 +43,7 @@
 `include "Chooser.v"
 `include "ICache.v"
 `include "DCache.v"
+`include "VictimCache.v"
 `include "MemoryLatencyModel.v"
 
 // Template for sim/tools/bench_runner.py (docs/ROADMAP.md Phase 10).
@@ -61,6 +62,8 @@
 // memory.md, Phase I6) does the same for "compare memory latencies";
 // __REPLACEMENT_POLICY__ (docs/adr/0041-cache-replacement-policy-phase-b.md,
 // Generation 4 Phase B) does the same for "compare replacement policies".
+// __VICTIM_ENTRIES__ (docs/adr/0042-victim-cache-phase-c.md, Generation 4
+// Phase C) does the same for "compare victim-cache sizes".
 //
 // Detects "program finished" generically, without needing to know any
 // program's specific halt-label address: every benchmark (like every other
@@ -78,7 +81,7 @@ module bench_run;
     integer cycle_count;
     reg done;
 
-    PIPELINED #(.INIT_FILE("__INIT_FILE__"), .MEM_SIZE_BYTES(__MEM_SIZE__), .HAZARD_STRATEGY(__HAZARD_STRATEGY__), .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__), .CACHE_MODE(__CACHE_MODE__), .REPLACEMENT_POLICY(__REPLACEMENT_POLICY__), .MEM_LATENCY_I(__MEM_LATENCY_I__), .MEM_LATENCY_D(__MEM_LATENCY_D__), .XLEN(__XLEN__)) dut(.clk(clk), .start(start), .uart_rx(1'b1));
+    PIPELINED #(.INIT_FILE("__INIT_FILE__"), .MEM_SIZE_BYTES(__MEM_SIZE__), .HAZARD_STRATEGY(__HAZARD_STRATEGY__), .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__), .CACHE_MODE(__CACHE_MODE__), .REPLACEMENT_POLICY(__REPLACEMENT_POLICY__), .VICTIM_ENTRIES(__VICTIM_ENTRIES__), .MEM_LATENCY_I(__MEM_LATENCY_I__), .MEM_LATENCY_D(__MEM_LATENCY_D__), .XLEN(__XLEN__)) dut(.clk(clk), .start(start), .uart_rx(1'b1));
 
     always #5 clk = ~clk;
 
