@@ -160,9 +160,15 @@ case(ALUCtl)
     `ALUCTL_CTZ:
         begin
 
+            // ponytail fix (was `i<XLEN-1`, a real off-by-one that only
+            // diverges from true ctz for A==0 exactly: any input with a set
+            // bit already reaches the correct count by the time the loop
+            // would have examined bit XLEN-1, so this only ever mattered
+            // for the all-zero case, where the correct answer is XLEN, not
+            // XLEN-1). See docs/adr/0041's own findings section.
             count = 0;
             done =0;
-            for(i =0 ; i<XLEN-1 ; i=i+1)
+            for(i =0 ; i<XLEN ; i=i+1)
             begin
                 if(A[i] == 0 && done ==0)
                     count = count + 1;

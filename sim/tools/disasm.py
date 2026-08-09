@@ -26,7 +26,7 @@ OPCODE_JAL = 0b1101111
 OPCODE_JALR = 0b1100111
 OPCODE_LUI = 0b0110111
 OPCODE_AUIPC = 0b0010111
-OPCODE_CUSTOM = 0b0101010
+OPCODE_CUSTOM = 0b0001011  # docs/adr/0041: was 0b0101010, RVC-collision bug, see asm.py's own comment
 OPCODE_SYSTEM = 0b1110011
 
 # Generation 2 (Phase M, docs/adr/0028-rv64-migration-phase-m.md).

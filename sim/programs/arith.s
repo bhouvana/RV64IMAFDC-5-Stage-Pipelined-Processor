@@ -27,9 +27,9 @@ sltiu x18, x1, 3       # 5<3u -> 0
 xori  x19, x1, 3       # 5^3=6
 ori   x20, x1, 3       # 5|3=7
 andi  x21, x1, 3       # 5&3=1
-ctz   x22, x23         # x23 was never written (=0): loop scans bits[0:30],
-                        # all zero, `done` never sets -> count=31 (documented
-                        # off-by-one in ALU.v; a true ctz(0) would be 32).
+ctz   x22, x23         # x23 was never written (=0): loop scans bits[0:31],
+                        # all zero, `done` never sets -> count=32 (real ctz(0),
+                        # docs/adr/0041 fixed ALU.v's prior XLEN-1 off-by-one).
 
 fence
 halt:

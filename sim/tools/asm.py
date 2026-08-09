@@ -66,7 +66,11 @@ OP_JAL = 0b1101111
 OP_JALR = 0b1100111
 OP_LUI = 0b0110111
 OP_AUIPC = 0b0010111
-OP_CUSTOM = 0b0101010
+# docs/adr/0041: was 0b0101010 (bits[1:0]=10) -- a real bug, dormant since
+# RVC support (docs/adr/0037) made is_compressed=(inst[1:0]!=2'b11) a live
+# fetch-path check; any opcode not ending in 11 gets misdecoded as a 2-byte
+# compressed instruction. Fixed to real spec custom-0 (bits[1:0]=11).
+OP_CUSTOM = 0b0001011
 OP_SYSTEM = 0b1110011
 OP_MISC_MEM = 0b0001111  # fence (docs/adr/0023-caches.md, Phase G1)
 
@@ -264,7 +268,7 @@ def jal(rd, offset_bytes):
 
 
 def ctz(rd, rs1):
-    # custom op: opcode 0101010, funct7=0100000 (FUNCT7_ALT), funct3=111 (see design/ALUCtrl.v ALUCtl=10101)
+    # custom op: opcode 0001011 (docs/adr/0041), funct7=0100000 (FUNCT7_ALT), funct3=111 (see design/ALUCtrl.v ALUCtl=10101)
     return (FUNCT7_ALT << 25) | (0 << 20) | (rs1 << 15) | (0b111 << 12) | (rd << 7) | OP_CUSTOM
 
 

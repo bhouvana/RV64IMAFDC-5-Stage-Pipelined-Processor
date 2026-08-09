@@ -71,7 +71,7 @@ module tb_arith;
         check_reg(19, 32'd6,          "xori x19,x1,3");
         check_reg(20, 32'd7,          "ori x20,x1,3");
         check_reg(21, 32'd1,          "andi x21,x1,3");
-        check_reg(22, 32'd31,         "ctz x22,x23 (x23=0, capped at 31 -- documented off-by-one)");
+        check_reg(22, 32'd32,         "ctz x22,x23 (x23=0 -> ctz=32, fixed off-by-one, docs/adr/0041)");
 
         report("arith");
 `ifdef COVERAGE

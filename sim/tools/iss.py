@@ -2,8 +2,10 @@
 """
 Minimal functional reference model (instruction set simulator) for this
 core's exact ISA -- RV32I + RV32M plus its specific deviations from
-standard RISC-V (the ble/bgt custom branches, the ctz custom op, the
-documented ctz(0)=31 off-by-one). Sequential, one instruction at a time --
+standard RISC-V (the ble/bgt custom branches, the ctz custom op --
+ctz(0)==XLEN, matching real ctz semantics, since docs/adr/0041 fixed the
+prior ctz(0)==XLEN-1 off-by-one in both ALU.v and here). Sequential, one
+instruction at a time --
 no pipeline, no hazards, because a sequential model has none by
 construction. Used by sim/tools/random_gen.py to compute expected final
 architectural state for constrained-random programs (docs/ROADMAP.md V-4),
@@ -1035,11 +1037,13 @@ class ISS:
                     res = A if B == 0 else (self.uxlen(A) % self.uxlen(B))
                 self.wr(rd, res)
             elif f7 == 0b0100000 and f3 == 0b111:  # custom ctz -- design/ALU.v's
-                # own CTZ case iterates `XLEN-1` cycles, not a fixed 31 --
-                # generalizes the same way here (docs/adr/0028).
+                # own CTZ case iterates `xl` cycles (docs/adr/0028's own
+                # XLEN-generalization). Was `xl - 1` (a real off-by-one only
+                # visible at A==0, giving xl-1 instead of the correct xl) --
+                # fixed in ALU.v, mirrored here (docs/adr/0041).
                 count = 0
                 done = False
-                for i in range(xl - 1):
+                for i in range(xl):
                     if (A >> i) & 1 == 0 and not done:
                         count += 1
                     else:
@@ -1124,10 +1128,12 @@ class ISS:
             self.wr(rd, s32(res32))
             self.pc = next_pc
 
-        elif op == 0b0101010:  # custom ctz (opcode 0101010, not 0110011 -- see design/riscv_defs.vh OPCODE_CUSTOM)
+        elif op == 0b0001011:  # custom ctz (opcode 0001011, docs/adr/0041 -- see design/riscv_defs.vh OPCODE_CUSTOM)
+            # docs/adr/0041: was `xl - 1` (same off-by-one as the other ctz
+            # dispatch site above), fixed to `xl`.
             count = 0
             done = False
-            for i in range(xl - 1):
+            for i in range(xl):
                 if (A >> i) & 1 == 0 and not done:
                     count += 1
                 else:

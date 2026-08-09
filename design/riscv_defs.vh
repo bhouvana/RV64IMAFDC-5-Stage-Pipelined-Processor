@@ -23,7 +23,18 @@
 `define OPCODE_JALR   7'b1100111
 `define OPCODE_LUI    7'b0110111
 `define OPCODE_AUIPC  7'b0010111
-`define OPCODE_CUSTOM 7'b0101010  // ctz (see design/ALUCtrl.v ALUCtl=10101)
+// docs/adr/0041-cache-replacement-policy-phase-b.md's own findings section:
+// was 7'b0101010 (bits[1:0]=10) -- a real, previously-undiscovered bug,
+// dormant since Phase U (docs/adr/0037) added RVC support:
+// `is_compressed = (inst[1:0] != 2'b11)` in riscvpipeline.v means ANY
+// opcode whose low 2 bits aren't 11 gets misdecoded as a 2-byte compressed
+// instruction, corrupting the ctz instruction itself and misaligning every
+// fetch after it -- ctz has silently never executed correctly since RVC
+// landed, masked by a directed test whose own hardcoded expected value was
+// already stale for an unrelated reason. Fixed to the real, spec-reserved
+// custom-0 opcode (7'b0001011, RISC-V ISA manual's own opcode map), which
+// has bits[1:0]=11 like every other real 32-bit opcode in this file.
+`define OPCODE_CUSTOM 7'b0001011  // ctz (see design/ALUCtrl.v ALUCtl=10101)
 `define OPCODE_SYSTEM 7'b1110011  // CSR instructions, ecall, ebreak, mret (docs/adr/0011-csr-and-exceptions.md)
 `define OPCODE_MISC_MEM 7'b0001111  // fence (docs/adr/0023-caches.md, Phase G) -- funct3=000 only;
                                       // other MISC-MEM encodings (fence.i/Zifencei) unimplemented, illegal
