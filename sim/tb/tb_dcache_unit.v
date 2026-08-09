@@ -1,6 +1,7 @@
 `include "DCache.v"
 `include "RamWishboneAdapter.v"
 `include "DataMemoryBRAM.v"
+`include "VictimCache.v"
 
 // docs/adr/0023-caches.md (Phase G4). Standalone unit test for DCache.v,
 // independent of the pipeline, against a REAL RamWishboneAdapter.v +
@@ -92,6 +93,49 @@ module tb_dcache_unit;
         .s_cyc(m_cyc2), .s_stb(m_stb2), .s_we(m_we2), .s_addr(m_addr2),
         .s_data_o(m_data_o2), .s_sel(m_sel2), .funct3(m_funct32),
         .s_data_i(m_data_i2), .s_ack(m_ack2)
+    );
+
+    // docs/adr/0042-victim-cache-phase-c.md (Generation 4, Phase C). A 3rd,
+    // fully independent DUT: same 2-way/32B/8B-line sizing as `dut` (2
+    // sets), VICTIM_ENTRIES(4), against a REAL backing store (mirrors
+    // `dut`'s own real-RAM setup, not dut2's -- fill/writeback timing
+    // needs the real slave's actual ack behavior for the cycle-count
+    // oracle below to mean anything). Sized 128B backing to hold 7 distinct
+    // set0 tags (addr0/16/32/48/64/80/96) -- enough real evictions to
+    // overflow the buffer's own ENTRIES(4) capacity by exactly one.
+    reg rst3 = 0;
+    reg         req_read3 = 0;
+    reg         req_write3 = 0;
+    reg  [31:0] req_addr3 = 0;
+    reg  [31:0] req_wdata3 = 0;
+    reg  [2:0]  req_funct33 = 3'b010;
+    wire [31:0] resp_rdata3;
+    wire        resp_ready3;
+    reg         flush_all3 = 0;
+    wire        flush_busy3, flush_done3;
+    wire        m_cyc3, m_stb3, m_we3;
+    wire [31:0] m_addr3, m_data_o3;
+    wire [3:0]  m_sel3;
+    wire [2:0]  m_funct33;
+    wire [31:0] m_data_i3;
+    wire        m_ack3;
+
+    DCache #(.XLEN(32), .WAYS(2), .CACHE_SIZE_BYTES(32), .LINE_BYTES(8),
+             .VICTIM_ENTRIES(4)) dut3(
+        .clk(clk), .rst(rst3),
+        .req_read(req_read3), .req_write(req_write3), .req_addr(req_addr3),
+        .req_wdata(req_wdata3), .req_funct3(req_funct33),
+        .resp_rdata(resp_rdata3), .resp_ready(resp_ready3),
+        .flush_all(flush_all3), .flush_busy(flush_busy3), .flush_done(flush_done3),
+        .m_cyc(m_cyc3), .m_stb(m_stb3), .m_we(m_we3), .m_addr(m_addr3),
+        .m_data_o(m_data_o3), .m_sel(m_sel3), .m_funct3(m_funct33),
+        .m_data_i(m_data_i3), .m_ack(m_ack3)
+    );
+    RamWishboneAdapter #(.SIZE_BYTES(128), .XLEN(32)) m_ram_adapter3(
+        .clk(clk), .rst(rst3),
+        .s_cyc(m_cyc3), .s_stb(m_stb3), .s_we(m_we3), .s_addr(m_addr3),
+        .s_data_o(m_data_o3), .s_sel(m_sel3), .funct3(m_funct33),
+        .s_data_i(m_data_i3), .s_ack(m_ack3)
     );
 
     always #5 clk = ~clk;
@@ -260,6 +304,57 @@ module tb_dcache_unit;
         end
     endtask
 
+    // docs/adr/0042. Same do_read2 shape (cycle-count-based hit/miss
+    // oracle) and same hold-req-through-the-registering-edge fix its own
+    // header comment documents -- reused verbatim for dut3.
+    reg [31:0] last_rdata3;
+    reg        last_was_miss3;
+    task do_read3;
+        input [31:0] addr;
+        input [2:0] funct3;
+        reg ready_seen;
+        integer cyc;
+        begin
+            @(negedge clk);
+            req_addr3 = addr; req_funct33 = funct3; req_read3 = 1; req_write3 = 0;
+            ready_seen = 0;
+            cyc = 0;
+            while (!ready_seen) begin
+                @(posedge clk);
+                cyc = cyc + 1;
+                #1;
+                if (resp_ready3) begin
+                    ready_seen = 1;
+                    last_rdata3 = resp_rdata3;
+                end
+            end
+            last_was_miss3 = (cyc > 1);
+            if (!last_was_miss3)
+                @(posedge clk);
+            @(negedge clk);
+            req_read3 = 0;
+        end
+    endtask
+
+    task do_write3;
+        input [31:0] addr;
+        input [31:0] wdata;
+        input [2:0] funct3;
+        reg ready_seen;
+        begin
+            @(negedge clk);
+            req_addr3 = addr; req_wdata3 = wdata; req_funct33 = funct3; req_write3 = 1; req_read3 = 0;
+            ready_seen = 0;
+            while (!ready_seen) begin
+                @(posedge clk);
+                #1;
+                if (resp_ready3) ready_seen = 1;
+            end
+            @(negedge clk);
+            req_write3 = 0;
+        end
+    endtask
+
     initial begin
         @(posedge clk); rst <= 0;
         @(posedge clk); rst <= 1;
@@ -379,6 +474,67 @@ module tb_dcache_unit;
         do_read2(32, 3'b010);
         check_bit(last_was_miss2, 1'b1, "LRU-D: addr32 (C) genuinely MISSES -- true LRU evicted the actual least-recently-used way");
         check_word(last_rdata2, 32'hCCCC0000, "LRU-D: addr32 (C) refill content correct (its own dirty writeback landed before the new fill)");
+
+        // docs/adr/0042-victim-cache-phase-c.md. Victim-cache sub-test
+        // (dut3). Hand-traced round-robin sequence, values chosen so every
+        // expected result is exactly computable, not guessed:
+        //   write 0=A,16=C (fills set0's 2 ways, no eviction yet)
+        //   write 32=E (evicts A into buffer slot0, fifo_next 0->1)
+        //   write 48=D (evicts C into buffer slot1, fifo_next 1->2)
+        //   write 64=F (evicts E into buffer slot2, fifo_next 2->3)
+        //   write 80=G (evicts D into buffer slot3, fifo_next 3->0 wrap)
+        //   write 96=H (evicts F -- buffer's OWN FIFO wraps to slot0,
+        //     which still holds A -- A(dirty) is kicked OUT of the buffer
+        //     entirely, needing a real writeback of its own)
+        // Final state: main array {way0=H, way1=G}, buffer {F,C,E,D}.
+        @(posedge clk); rst3 <= 0;
+        @(posedge clk); rst3 <= 1;
+
+        do_write3(0,  32'hA0A0A0A0, 3'b010);
+        do_write3(16, 32'hC0C0C0C0, 3'b010);
+        do_write3(32, 32'hE0E0E0E0, 3'b010);   // evicts A (dirty) -- primary writeback + buffer capture
+        do_write3(48, 32'hD1D2D3D4, 3'b010);   // evicts C (dirty)
+        do_write3(64, 32'hF0F0F0F0, 3'b010);   // evicts E (dirty)
+        do_write3(80, 32'h90909090, 3'b010);   // evicts D (dirty)
+        do_write3(96, 32'h80808080, 3'b010);   // evicts F -- buffer's OWN FIFO wraps, kicks A out for real
+
+        // The real proof: A's dirty data (0xA0A0A0A0), evicted from the
+        // VICTIM BUFFER's own FIFO (not the main array -- that writeback
+        // already happened earlier and is separately correct by
+        // construction), must have landed in real backing RAM before
+        // being discarded -- mirrors the pre-existing dirty-writeback-on-
+        // eviction check pattern above (m_ram_adapter.m_ram.data_memory).
+        checks = checks + 1;
+        if (m_ram_adapter3.m_ram.data_memory[0] !== 8'hA0 || m_ram_adapter3.m_ram.data_memory[1] !== 8'hA0
+            || m_ram_adapter3.m_ram.data_memory[2] !== 8'hA0 || m_ram_adapter3.m_ram.data_memory[3] !== 8'hA0) begin
+            fails = fails + 1;
+            $display("FAIL  victim buffer's own FIFO-overflow eviction (addr0/A, dirty) landed in backing RAM: got [%02h,%02h,%02h,%02h], expected [a0,a0,a0,a0]",
+                m_ram_adapter3.m_ram.data_memory[0], m_ram_adapter3.m_ram.data_memory[1],
+                m_ram_adapter3.m_ram.data_memory[2], m_ram_adapter3.m_ram.data_memory[3]);
+        end else $display("pass  victim buffer's own FIFO-overflow eviction (addr0/A, dirty) correctly written back before being discarded");
+
+        // Promote-READ: F (addr64) is resident in the buffer (slot0, just
+        // inserted), NOT the main array (which holds H/G) -- do_read3's
+        // cycle-count oracle must show a FAST (1-cycle) resolution, not a
+        // genuine multi-cycle miss.
+        do_read3(64, 3'b010);
+        check_bit(last_was_miss3, 1'b0, "victim: addr64 (F) resolves FAST via buffer promote, not a real miss");
+        check_word(last_rdata3, 32'hF0F0F0F0, "victim: addr64 (F) promoted content correct");
+
+        // Promote-WRITE + write-allocate merge: D (addr48/49) is still
+        // resident in the buffer (slot3, untouched by the read above). A
+        // sub-word store to byte-offset 1 of its FIRST word must promote D
+        // into the main array AND merge correctly -- word0 changes only
+        // the stored byte (0xD1D2D3D4 -> 0xD1D2CDD4), word1 (never
+        // originally written, so 0 from write-allocate's own fill-side
+        // merge) must stay untouched, proving this is a real per-word
+        // merge, not a blind whole-line overwrite.
+        do_write3(49, 32'h000000CD, 3'b000);   // sb
+        do_read3(48, 3'b010);
+        check_bit(last_was_miss3, 1'b0, "victim: addr48 (D word0) resolves FAST -- it was just promoted");
+        check_word(last_rdata3, 32'hD1D2CDD4, "victim: addr48 (D word0) merged correctly -- only byte1 changed");
+        do_read3(52, 3'b010);
+        check_word(last_rdata3, 32'h00000000, "victim: addr52 (D word1) untouched by the promote-write -- true per-word merge, not a whole-line overwrite");
 
         if (fails == 0)
             $display("PASS  dcache_unit (%0d checks)", checks);

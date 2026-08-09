@@ -1,6 +1,7 @@
 `include "ICache.v"
 `include "InstructionMemory.v"
 `include "MemoryLatencyModel.v"
+`include "VictimCache.v"
 
 // docs/adr/0023-caches.md (Phase G2). Standalone unit test for ICache.v,
 // independent of the pipeline. Deliberately instantiated SMALL (2-way,
@@ -81,6 +82,27 @@ module tb_icache_unit;
              .REPLACEMENT_POLICY(2)) dut3(
         .clk(clk), .rst(rst3), .readAddr(readAddr3),
         .inst(inst_o3), .hit(hit_o3), .busy(busy_o3), .done(done_o3)
+    );
+
+    // docs/adr/0042-victim-cache-phase-c.md (Generation 4, Phase C). A 4th
+    // instance, same 2-way/32B/8B-line sizing as `dut` (2 sets), with
+    // VICTIM_ENTRIES(2). Reuses `dut`'s own address layout (addr0/4=A
+    // set0/tag0, addr16/20=C set0/tag1, addr32/36=E set0/tag2) to force the
+    // same round-robin eviction `dut`'s own 3rd-distinct-tag test does --
+    // except here, the evicted line (A) lands in the victim buffer instead
+    // of being silently discarded, and a re-request for it should resolve
+    // in the SAME cycle (no wait_ready polling needed at all -- a
+    // victim-buffer promote costs zero extra stall cycles, since
+    // riscvpipeline.v's own icache_miss term is purely `!hit`).
+    reg rst4 = 0;
+    reg [31:0] readAddr4 = 0;
+    wire [31:0] inst_o4;
+    wire hit_o4, busy_o4, done_o4;
+    ICache #(.INIT_FILE(""), .IMEM_SIZE_BYTES(64), .XLEN(32),
+             .WAYS(2), .CACHE_SIZE_BYTES(32), .LINE_BYTES(8),
+             .VICTIM_ENTRIES(2)) dut4(
+        .clk(clk), .rst(rst4), .readAddr(readAddr4),
+        .inst(inst_o4), .hit(hit_o4), .busy(busy_o4), .done(done_o4)
     );
 
     always #5 clk = ~clk;
@@ -205,6 +227,38 @@ module tb_icache_unit;
         begin
             @(negedge clk);
             readAddr3 = addr;
+            #1;
+        end
+    endtask
+
+    // docs/adr/0042. Same LSB-first convention as poke_word_dut3.
+    task poke_word_dut4;
+        input [31:0] addr;
+        input [31:0] val;
+        begin
+            dut4.m_imem.insts[addr]   = val[7:0];
+            dut4.m_imem.insts[addr+1] = val[15:8];
+            dut4.m_imem.insts[addr+2] = val[23:16];
+            dut4.m_imem.insts[addr+3] = val[31:24];
+        end
+    endtask
+
+    task wait_ready4;
+        integer i;
+        begin
+            i = 0;
+            while (!hit_o4 && i < 10) begin
+                @(posedge clk);
+                i = i + 1;
+            end
+        end
+    endtask
+
+    task set_addr4;
+        input [31:0] addr;
+        begin
+            @(negedge clk);
+            readAddr4 = addr;
             #1;
         end
     endtask
@@ -372,6 +426,46 @@ module tb_icache_unit;
         check_bit(hit_o3, 1'b1, "LRU: addr48 (D) still hits -- LRU correctly spared it over C");
         set_addr3(0);
         check_bit(hit_o3, 1'b1, "LRU: addr0 (A) still hits -- round-robin's blind choice (evict A) would have failed this check");
+
+        // docs/adr/0042. Victim-cache sub-test (dut4): fill A(0), C(16),
+        // then E(32) -- E's fill forces the SAME round-robin eviction
+        // `dut`'s own 3rd-distinct-tag test above proves (evicts way0/A),
+        // except this time A lands in the victim buffer instead of being
+        // discarded.
+        readAddr4 = 0;
+        @(posedge clk); rst4 <= 0;
+        @(posedge clk); rst4 <= 1;
+        poke_word_dut4(0,  val_at(0));
+        poke_word_dut4(16, val_at(16));
+        poke_word_dut4(32, val_at(32));
+
+        set_addr4(0);  wait_ready4;  check_bit(hit_o4, 1'b1, "victim: addr0 (A) fills way0 (genuine miss, needed wait_ready)");
+        check_word(inst_o4, val_at(0), "victim: addr0 content correct");
+        set_addr4(16); wait_ready4;  check_bit(hit_o4, 1'b1, "victim: addr16 (C) fills way1 (genuine miss)");
+        check_word(inst_o4, val_at(16), "victim: addr16 content correct");
+        set_addr4(32); wait_ready4;  check_bit(hit_o4, 1'b1, "victim: addr32 (E) fills way0, evicting A into the victim buffer (genuine miss)");
+        check_word(inst_o4, val_at(32), "victim: addr32 content correct");
+
+        // Re-request A: main array missed it (E occupies way0 now), but the
+        // victim buffer holds it -- promote resolves THIS SAME cycle, no
+        // wait_ready needed at all (contrast this with every miss above,
+        // which all needed wait_ready's multi-cycle poll).
+        set_addr4(0);
+        check_bit(hit_o4, 1'b1, "victim: addr0 (A) hits IMMEDIATELY (same cycle, no wait_ready) via victim-buffer promote");
+        check_word(inst_o4, val_at(0), "victim: promoted addr0 content correct");
+
+        // The swap displaced E into the victim buffer's now-freed slot --
+        // re-requesting E should ALSO resolve same-cycle, proving genuine
+        // repeatable ping-pong recovery, not a one-shot fluke.
+        set_addr4(32);
+        check_bit(hit_o4, 1'b1, "victim: addr32 (E) ALSO hits immediately -- it was pushed into the victim buffer by A's own promote");
+        check_word(inst_o4, val_at(32), "victim: re-promoted addr32 content correct");
+
+        // And a third round, confirming the ping-pong keeps working, not
+        // just twice.
+        set_addr4(0);
+        check_bit(hit_o4, 1'b1, "victim: addr0 (A) hits immediately a second time -- repeatable, not a one-shot recovery");
+        check_word(inst_o4, val_at(0), "victim: second re-promotion of addr0 content correct");
 
         if (fails == 0)
             $display("PASS  icache_unit (%0d checks)", checks);
