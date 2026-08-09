@@ -206,9 +206,10 @@ def main():
     ap.add_argument("--pipeline-profile", type=int, default=0, choices=[0, 1],
                      help="riscvpipeline.v's PIPELINE_PROFILE (docs/adr/0018): 0=PROFILE_5STAGE (default), "
                           "1=PROFILE_6STAGE_SPLIT_FETCH")
-    ap.add_argument("--branch-predictor", type=int, default=0, choices=[0, 1],
-                     help="riscvpipeline.v's BRANCH_PREDICTOR (docs/adr/0021): 0=PREDICTOR_STATIC (default), "
-                          "1=PREDICTOR_DYNAMIC_BHT_BTB")
+    ap.add_argument("--branch-predictor", type=int, default=0, choices=[0, 1, 2, 3],
+                     help="riscvpipeline.v's BRANCH_PREDICTOR (docs/adr/0021, docs/adr/0040): "
+                          "0=PREDICTOR_STATIC (default), 1=PREDICTOR_DYNAMIC_BHT_BTB, "
+                          "2=PREDICTOR_GSHARE, 3=PREDICTOR_TOURNAMENT")
     ap.add_argument("--cache-mode", type=int, default=0, choices=[0, 1],
                      help="riscvpipeline.v's CACHE_MODE (docs/adr/0023-caches.md): 0=CACHE_NONE (default), "
                           "1=CACHE_WRITEBACK_SETASSOC")
@@ -266,7 +267,7 @@ def main():
                   args.mem_latency_i, args.mem_latency_d) for p in keys]
     elif args.compare_predictors:
         axis, axis_label = "predictor", "BRANCH_PREDICTOR"
-        keys = (0, 1)
+        keys = (0, 1, 2, 3)   # Generation 4, Phase A (docs/adr/0040): GShare + tournament joined the axis
         pairs = [(args.hazard_strategy, args.pipeline_profile, bp, args.cache_mode,
                   args.mem_latency_i, args.mem_latency_d) for bp in keys]
     elif args.compare_cache:
@@ -294,8 +295,9 @@ def main():
                 print(f"--- PIPELINE_PROFILE={profile} "
                       f"({'PROFILE_5STAGE' if profile == 0 else 'PROFILE_6STAGE_SPLIT_FETCH'}) ---")
             elif axis == "predictor":
-                print(f"--- BRANCH_PREDICTOR={predictor} "
-                      f"({'PREDICTOR_STATIC' if predictor == 0 else 'PREDICTOR_DYNAMIC_BHT_BTB'}) ---")
+                predictor_names = {0: "PREDICTOR_STATIC", 1: "PREDICTOR_DYNAMIC_BHT_BTB",
+                                    2: "PREDICTOR_GSHARE", 3: "PREDICTOR_TOURNAMENT"}
+                print(f"--- BRANCH_PREDICTOR={predictor} ({predictor_names[predictor]}) ---")
             elif axis == "cache":
                 print(f"--- CACHE_MODE={cache_mode} "
                       f"({'CACHE_NONE' if cache_mode == 0 else 'CACHE_WRITEBACK_SETASSOC'}) ---")
@@ -320,29 +322,42 @@ def main():
             print()
 
     if axis is not None:
-        labels0 = {"strategy": "forwarding (HS=0)", "profile": "PROFILE_5STAGE (PP=0)",
-                   "predictor": "PREDICTOR_STATIC (BP=0)", "cache": "CACHE_NONE (CM=0)",
-                   "latency": "MEM_LATENCY_I=D=0"}
-        labels1 = {"strategy": "stall-only (HS=1)", "profile": "PROFILE_6STAGE_SPLIT_FETCH (PP=1)",
-                   "predictor": "PREDICTOR_DYNAMIC_BHT_BTB (BP=1)", "cache": "CACHE_WRITEBACK_SETASSOC (CM=1)",
-                   "latency": f"MEM_LATENCY_I={args.mem_latency_i} MEM_LATENCY_D={args.mem_latency_d}"}
-        label0, label1 = labels0[axis], labels1[axis]
-        print(f"=== comparison: {label0} vs. {label1} ===")
-        by_name_0 = dict(all_results[0])
-        by_name_1 = dict(all_results[1])
-        for name, r0 in all_results[0]:
-            r1 = by_name_1.get(name)
-            if r0 is None or r1 is None:
-                print(f"{name:<20} (incomplete, see FAIL above)")
-                continue
-            delta = r1["cycles"] - r0["cycles"]
-            pct = 100.0 * delta / r0["cycles"]
-            cache_info = ""
-            if axis == "cache":
-                cache_info = (f"   I$miss={r1['icache_misses']}/{r1['icache_accesses']} "
-                              f"D$miss={r1['dcache_misses']}")
-            print(f"{name:<20} cycles: {r0['cycles']:<6} -> {r1['cycles']:<6}  "
-                  f"({delta:+d}, {pct:+.1f}%)   IPC: {r0['ipc']:.3f} -> {r1['ipc']:.3f}{cache_info}")
+        # labels[axis][key] -- a per-key name lookup, not just a 0/1 pair,
+        # so an axis with more than two keys (BRANCH_PREDICTOR now has
+        # four, Generation 4 Phase A / docs/adr/0040) works the same way
+        # every other axis already does. A strict generalization of the
+        # old hardcoded labels0/labels1 pair-diff below: for every
+        # existing 2-key axis (strategy/profile/cache/latency), a loop
+        # over one element (keys[1:]) produces byte-identical output to
+        # the old single comparison.
+        labels = {
+            "strategy": {0: "forwarding (HS=0)", 1: "stall-only (HS=1)"},
+            "profile": {0: "PROFILE_5STAGE (PP=0)", 1: "PROFILE_6STAGE_SPLIT_FETCH (PP=1)"},
+            "predictor": {0: "PREDICTOR_STATIC (BP=0)", 1: "PREDICTOR_DYNAMIC_BHT_BTB (BP=1)",
+                          2: "PREDICTOR_GSHARE (BP=2)", 3: "PREDICTOR_TOURNAMENT (BP=3)"},
+            "cache": {0: "CACHE_NONE (CM=0)", 1: "CACHE_WRITEBACK_SETASSOC (CM=1)"},
+            "latency": {0: "MEM_LATENCY_I=D=0", 1: f"MEM_LATENCY_I={args.mem_latency_i} "
+                                                     f"MEM_LATENCY_D={args.mem_latency_d}"},
+        }
+        baseline_key = keys[0]
+        by_name_baseline = dict(all_results[baseline_key])
+        for key in keys[1:]:
+            label0, label1 = labels[axis][baseline_key], labels[axis][key]
+            print(f"=== comparison: {label0} vs. {label1} ===")
+            by_name_key = dict(all_results[key])
+            for name, r0 in all_results[baseline_key]:
+                r1 = by_name_key.get(name)
+                if r0 is None or r1 is None:
+                    print(f"{name:<20} (incomplete, see FAIL above)")
+                    continue
+                delta = r1["cycles"] - r0["cycles"]
+                pct = 100.0 * delta / r0["cycles"]
+                cache_info = ""
+                if axis == "cache":
+                    cache_info = (f"   I$miss={r1['icache_misses']}/{r1['icache_accesses']} "
+                                  f"D$miss={r1['dcache_misses']}")
+                print(f"{name:<20} cycles: {r0['cycles']:<6} -> {r1['cycles']:<6}  "
+                      f"({delta:+d}, {pct:+.1f}%)   IPC: {r0['ipc']:.3f} -> {r1['ipc']:.3f}{cache_info}")
 
     failed = [n for results in all_results.values() for n, r in results if r is None]
     total = sum(len(results) for results in all_results.values())
