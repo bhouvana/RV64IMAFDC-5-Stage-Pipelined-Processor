@@ -275,7 +275,10 @@ honest stopping point for Generation 3 as currently scoped. See
 
 - **Advanced branch prediction** — static, 1-bit, 2-bit (already have this
   shape from Generation 1's own BHT/BTB, see above), GShare, tournament
-  predictor; benchmark all.
+  predictor; benchmark all. **DONE (Phase A, `docs/adr/0040`)**: GShare
+  (`design/Gshare.v`) and tournament (`design/Chooser.v` + `Bht.v`+`Gshare.v`)
+  both live as `BRANCH_PREDICTOR=2`/`3`, real benchmarked cycle-count data
+  via `bench_runner.py --compare-predictors`.
 - **Advanced cache hierarchy** — 2-way and 4-way set-associative, victim
   cache, L2, replacement policies (LRU/FIFO).
 - **Hardware prefetchers** — next-line, stride, stream.
