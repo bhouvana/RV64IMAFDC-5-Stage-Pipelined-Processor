@@ -64,6 +64,8 @@ module PhysicalRegisterFile #(
     input  wire [PREG_BITS-1:0] raddr6,
     input  wire [PREG_BITS-1:0] raddr7,
     input  wire [PREG_BITS-1:0] raddr8,
+    input  wire [PREG_BITS-1:0] raddr9,
+    input  wire [PREG_BITS-1:0] raddr10,
     output wire [XLEN-1:0]      rdata0,
     output wire [XLEN-1:0]      rdata1,
     output wire [XLEN-1:0]      rdata2,
@@ -73,6 +75,8 @@ module PhysicalRegisterFile #(
     output wire [XLEN-1:0]      rdata6,
     output wire [XLEN-1:0]      rdata7,
     output wire [XLEN-1:0]      rdata8,
+    output wire [XLEN-1:0]      rdata9,
+    output wire [XLEN-1:0]      rdata10,
     output wire                 rvalid0,
     output wire                 rvalid1,
     output wire                 rvalid2,
@@ -82,6 +86,8 @@ module PhysicalRegisterFile #(
     output wire                 rvalid6,
     output wire                 rvalid7,
     output wire                 rvalid8,
+    output wire                 rvalid9,
+    output wire                 rvalid10,
 
     // CDB writeback, up to 3/cycle (Gen6-F, up from 2) -- sets data AND
     // marks valid. Port2 is Divider.v's own multi-cycle DIV/REM
@@ -168,6 +174,16 @@ assign rdata8  = (HARDWIRE_PREG0 && raddr8 == 0) ? {XLEN{1'b0}} :
                   (wen1 && waddr1 == raddr8) ? wdata1 :
                   (wen2 && waddr2 == raddr8) ? wdata2 :
                   regs[raddr8];
+assign rdata9  = (HARDWIRE_PREG0 && raddr9 == 0) ? {XLEN{1'b0}} :
+                  (wen0 && waddr0 == raddr9) ? wdata0 :
+                  (wen1 && waddr1 == raddr9) ? wdata1 :
+                  (wen2 && waddr2 == raddr9) ? wdata2 :
+                  regs[raddr9];
+assign rdata10 = (HARDWIRE_PREG0 && raddr10 == 0) ? {XLEN{1'b0}} :
+                  (wen0 && waddr0 == raddr10) ? wdata0 :
+                  (wen1 && waddr1 == raddr10) ? wdata1 :
+                  (wen2 && waddr2 == raddr10) ? wdata2 :
+                  regs[raddr10];
 assign rvalid0 = (HARDWIRE_PREG0 && raddr0 == 0) || (wen0 && waddr0 == raddr0) || (wen1 && waddr1 == raddr0) || (wen2 && waddr2 == raddr0) || valid[raddr0];
 assign rvalid1 = (HARDWIRE_PREG0 && raddr1 == 0) || (wen0 && waddr0 == raddr1) || (wen1 && waddr1 == raddr1) || (wen2 && waddr2 == raddr1) || valid[raddr1];
 assign rvalid2 = (HARDWIRE_PREG0 && raddr2 == 0) || (wen0 && waddr0 == raddr2) || (wen1 && waddr1 == raddr2) || (wen2 && waddr2 == raddr2) || valid[raddr2];
@@ -177,6 +193,8 @@ assign rvalid5 = (HARDWIRE_PREG0 && raddr5 == 0) || (wen0 && waddr0 == raddr5) |
 assign rvalid6 = (HARDWIRE_PREG0 && raddr6 == 0) || (wen0 && waddr0 == raddr6) || (wen1 && waddr1 == raddr6) || (wen2 && waddr2 == raddr6) || valid[raddr6];
 assign rvalid7 = (HARDWIRE_PREG0 && raddr7 == 0) || (wen0 && waddr0 == raddr7) || (wen1 && waddr1 == raddr7) || (wen2 && waddr2 == raddr7) || valid[raddr7];
 assign rvalid8 = (HARDWIRE_PREG0 && raddr8 == 0) || (wen0 && waddr0 == raddr8) || (wen1 && waddr1 == raddr8) || (wen2 && waddr2 == raddr8) || valid[raddr8];
+assign rvalid9 = (HARDWIRE_PREG0 && raddr9 == 0) || (wen0 && waddr0 == raddr9) || (wen1 && waddr1 == raddr9) || (wen2 && waddr2 == raddr9) || valid[raddr9];
+assign rvalid10 = (HARDWIRE_PREG0 && raddr10 == 0) || (wen0 && waddr0 == raddr10) || (wen1 && waddr1 == raddr10) || (wen2 && waddr2 == raddr10) || valid[raddr10];
 
 integer reset_i;
 always @(posedge clk) begin

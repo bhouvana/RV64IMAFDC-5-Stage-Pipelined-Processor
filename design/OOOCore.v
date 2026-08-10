@@ -331,6 +331,96 @@ always @(posedge clk) begin
 end
 
 // ==========================================================================
+// Gen6-K: dual-issue widening. `# ponytail`-tagged scope cut, real and
+// bounded, found by SCOPING this (not discovered mid-RTL): dual-dispatch
+// only when BOTH slot0 AND slot1 are plain integer ALU ops (neither is
+// mem/div/fp/branch/trap-related/AMO) -- every other combination falls
+// back to single-issue (slot1's own instruction just gets re-fetched as
+// slot0 next cycle, identical to any other dispatch_stall). This keeps
+// branch/trap/mem/div/fp dispatch logic COMPLETELY untouched from every
+// earlier sub-phase (a branch, say, is by definition never
+// slot0_is_plain_alu, so try_dual_issue is false and it dispatches alone
+// exactly as Gen6-G already verified) -- the only genuinely new
+// correctness-critical piece is the same-fetch-bundle RAW bypass below.
+//
+// Slot1 gets its own full decode (mirrors slot0's Control.v/ALUCtrl.v/
+// ImmGen.v instantiation exactly) -- needed both to know whether it
+// QUALIFIES as plain-ALU and to actually dispatch it once it does.
+wire [XLEN-1:0] inst_full1;
+InstructionMemory #(.INIT_FILE(IMEM_INIT_FILE), .SIZE_BYTES(IMEM_SIZE_BYTES), .XLEN(XLEN)) m_IMem1(
+    .readAddr(pc_r + 4),
+    .inst(inst_full1)
+);
+wire [31:0] inst_word1 = inst_full1[31:0];
+
+wire [4:0] rs1_areg_1 = inst_word1[19:15];
+wire [4:0] rs2_areg_1 = inst_word1[24:20];
+wire [4:0] rd_areg_1  = inst_word1[11:7];
+
+wire branch_c_1, memRead_c_1, memtoReg_c_1, memWrite_c_1, ALUSrc_c_1, regWrite_c_1;
+wire [1:0] ALUOp_c_1;
+wire [2:0] funct3_c_1;
+wire [6:0] funct7_c_1;
+wire jump_c_1, jalr_c_1, lui_c_1, auipc_c_1, isCsr_c_1, isEcall_c_1, isEbreak_c_1, isMret_c_1, isSret_c_1, isSfenceVma_c_1, isFence_c_1, isAmo_c_1, illegalOpcode_c_1, fRegWrite_c_1;
+
+Control #(.XLEN(XLEN)) m_Control_1(
+    .opcode(inst_word1[6:0]),
+    .funt7(inst_word1[31:25]),
+    .funt3(inst_word1[14:12]),
+    .csr_imm12(inst_word1[31:20]),
+    .branch(branch_c_1), .memRead(memRead_c_1), .memtoReg(memtoReg_c_1),
+    .ALUOp(ALUOp_c_1), .memWrite(memWrite_c_1), .ALUSrc(ALUSrc_c_1), .regWrite(regWrite_c_1),
+    .funct3(funct3_c_1), .funct7(funct7_c_1),
+    .jump(jump_c_1), .jalr(jalr_c_1), .lui(lui_c_1), .auipc(auipc_c_1),
+    .isCsr(isCsr_c_1), .isEcall(isEcall_c_1), .isEbreak(isEbreak_c_1), .isMret(isMret_c_1),
+    .isSret(isSret_c_1), .isSfenceVma(isSfenceVma_c_1), .isFence(isFence_c_1), .isAmo(isAmo_c_1),
+    .illegalOpcode(illegalOpcode_c_1), .fRegWrite(fRegWrite_c_1)
+);
+
+wire [4:0] ALUCtl_d_1;
+ALUCtrl m_ALUCtrl_1(.ALUOp(ALUOp_c_1), .funct7_c(funct7_c_1), .funct3_c(funct3_c_1), .ALUCtl(ALUCtl_d_1));
+
+wire [XLEN-1:0] imm_d_1;
+ImmGen #(.Width(XLEN)) m_ImmGen_1(.inst(inst_full1), .imm(imm_d_1));
+
+wire needs_dest_1  = regWrite_c_1 && (rd_areg_1 != 5'd0);
+wire is_amo_lr_1   = isAmo_c_1 && (funct7_c_1[6:2] == `AMO_F5_LR);
+wire is_mem_op_1   = memRead_c_1 || memWrite_c_1 || is_amo_lr_1;
+wire is_div_op_1   = (ALUCtl_d_1 == `ALUCTL_DIV) || (ALUCtl_d_1 == `ALUCTL_DIVU) ||
+                     (ALUCtl_d_1 == `ALUCTL_REM) || (ALUCtl_d_1 == `ALUCTL_REMU);
+wire is_branch_1   = branch_c_1;
+wire has_exception_1 = illegalOpcode_c_1 || isEcall_c_1;
+wire is_trap_related_1 = has_exception_1 || isMret_c_1;
+wire [4:0] fp_funct5_1 = funct7_c_1[6:2];
+wire is_fp_op_1 = fRegWrite_c_1 && (
+    fp_funct5_1 == `FUNCT5_FADD || fp_funct5_1 == `FUNCT5_FSUB || fp_funct5_1 == `FUNCT5_FMUL ||
+    fp_funct5_1 == `FUNCT5_FSGNJ || fp_funct5_1 == `FUNCT5_FMINMAX || fp_funct5_1 == `FUNCT5_FMV_W_X
+);
+
+// Both slots must be plain ALU (regWrite integer OP/OP-IMM, no other
+// side effects) for dual-issue to even be considered this cycle.
+wire slot0_is_plain_alu = !is_mem_op && !is_div_op && !is_fp_op && !is_branch && !is_trap_related;
+wire slot1_is_plain_alu = !is_mem_op_1 && !is_div_op_1 && !is_fp_op_1 && !is_branch_1 && !is_trap_related_1;
+wire try_dual_issue = slot0_is_plain_alu && slot1_is_plain_alu;
+
+// Same-fetch-bundle RAW bypass -- the one genuinely new correctness-
+// critical piece (found while SCOPING this phase, not mid-RTL): if
+// slot1 reads a register slot0 is ITSELF renaming this exact cycle,
+// RegisterAliasTable.v's own stored spec_map is still the OLD mapping
+// (the write hasn't happened yet) -- slot1 must instead use slot0's own
+// freshly-granted physical register directly, and treat it as
+// unconditionally NOT READY (slot0 hasn't executed yet, so there's no
+// value to read regardless of what PhysicalRegisterFile.v's own rvalid
+// for that fresh, not-yet-written preg would report).
+wire slot1_src1_from_slot0 = try_dual_issue && needs_dest && (rs1_areg_1 == rd_areg) && (rd_areg != 5'd0);
+wire slot1_src2_from_slot0 = try_dual_issue && needs_dest && (rs2_areg_1 == rd_areg) && (rd_areg != 5'd0);
+// Same-fetch-bundle WAW between two INTEGER destinations needs NO new
+// logic at all: RegisterAliasTable.v's own wen0/wen1 same-target
+// handling (old_preg1 bypasses slot0's own fresh write, slot1 -- the
+// program-order-later instruction -- wins the final mapping) already
+// covers it exactly, built in Gen6-A for precisely this shape.
+
+// ==========================================================================
 // Rename: RegisterAliasTable.v (operand tags) + FreeList.v (fresh
 // physical register for the destination, if any) + PhysicalRegisterFile.v
 // (operand READINESS at dispatch time, via its own rvalid* ports -- the
@@ -410,8 +500,9 @@ wire [FPREG_BITS-1:0]    fl_f_alloc_preg0;
 wire [FPREG_BITS-1:0]    rat_f_rpreg0, rat_f_rpreg1;
 wire [FPREG_BITS-1:0]    rat_f_old_preg0;
 
-wire [PREG_BITS-1:0] fl_alloc_preg0;
-wire                 fl_alloc_ok0;
+wire [PREG_BITS-1:0] fl_alloc_preg0, fl_alloc_preg1;
+wire                 fl_alloc_ok0, fl_alloc_ok1;
+wire [PREG_BITS-1:0] rat_rpreg2, rat_rpreg3, rat_old_preg1;   // Gen6-K: slot1's own RAT read/write ports
 wire [$clog2(NUM_PREGS - NUM_AREGS):0] fl_free_count;   // unused beyond
     // debug visibility -- dispatch_stall below gates on fl_alloc_ok0
     // directly, not this raw count. Width matches FreeList.v's own
@@ -430,15 +521,28 @@ wire dispatch_stall = rob_full
                                                   // for exceptions/mret
 wire do_dispatch     = !dispatch_stall;
 
+// Gen6-K: room for a SECOND dispatch this cycle, checked independently
+// of slot0's own room check above (dispatch_stall already guarantees
+// room for slot0 alone; this asks "is there room for one MORE").
+wire dual_dispatch_room = (rob_count <= (ROB_ENTRIES - 2))
+                          && (rs_alu_count <= (RS_ALU_ENTRIES - 2))
+                          && (!needs_dest_1 || fl_alloc_ok1);
+wire do_dispatch_slot1 = do_dispatch && try_dual_issue && dual_dispatch_room;
+
 // FreeList only needs to actually GRANT when this cycle's instruction
-// really needs a destination -- fl_alloc_ok0 is combinational regardless
-// (queried before deciding do_dispatch, see dispatch_stall above), and
-// only actually consumed (alloc_en0 asserted) once do_dispatch is known.
+// really needs a destination -- fl_alloc_ok0/1 are combinational
+// regardless (queried before deciding do_dispatch*, see above), and
+// only actually consumed (alloc_en asserted) once each slot's own
+// do_dispatch* is known. alloc_en1 is unconditional on needs_dest_1 alone
+// (not do_dispatch_slot1) -- same benign "wastes a preg on a cycle that
+// doesn't end up using it" pattern slot0's own alloc_en0 already has,
+// harmless since the RAT/ROB writes that would reference it stay
+// correctly gated by do_dispatch_slot1 itself.
 FreeList #(.NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS)) m_FreeList(
     .clk(clk), .rst(rst),
-    .alloc_en0(needs_dest), .alloc_en1(1'b0),
-    .alloc_preg0(fl_alloc_preg0), .alloc_preg1(),
-    .alloc_ok0(fl_alloc_ok0), .alloc_ok1(),
+    .alloc_en0(needs_dest), .alloc_en1(needs_dest_1),
+    .alloc_preg0(fl_alloc_preg0), .alloc_preg1(fl_alloc_preg1),
+    .alloc_ok0(fl_alloc_ok0), .alloc_ok1(fl_alloc_ok1),
     // Gen6-H: gated !is_fp_dest -- a float-destination entry's own
     // old_preg lives in the FLOAT preg space, and must be reclaimed by
     // FreeList_Float below instead, never this (integer) FreeList.
@@ -449,10 +553,10 @@ FreeList #(.NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS)) m_FreeList(
 
 RegisterAliasTable #(.NUM_AREGS(NUM_AREGS), .NUM_PREGS(NUM_PREGS)) m_RAT(
     .clk(clk), .rst(rst),
-    .raddr0(rs1_areg), .raddr1(rs2_areg), .raddr2({AREG_BITS{1'b0}}), .raddr3({AREG_BITS{1'b0}}),
-    .rpreg0(rat_rpreg0), .rpreg1(rat_rpreg1), .rpreg2(), .rpreg3(),
+    .raddr0(rs1_areg), .raddr1(rs2_areg), .raddr2(rs1_areg_1), .raddr3(rs2_areg_1),
+    .rpreg0(rat_rpreg0), .rpreg1(rat_rpreg1), .rpreg2(rat_rpreg2), .rpreg3(rat_rpreg3),
     .wen0(do_dispatch && needs_dest), .waddr0(rd_areg), .wpreg0(fl_alloc_preg0), .old_preg0(rat_old_preg0),
-    .wen1(1'b0), .waddr1({AREG_BITS{1'b0}}), .wpreg1({PREG_BITS{1'b0}}), .old_preg1(),
+    .wen1(do_dispatch_slot1 && needs_dest_1), .waddr1(rd_areg_1), .wpreg1(fl_alloc_preg1), .old_preg1(rat_old_preg1),
     .cwen0(rob_retire_valid0 && rob_retire_has_dest0 && !rob_retire_is_fp_dest0), .cwaddr0(rob_retire_areg0), .cwpreg0(rob_retire_preg0),
     .cwen1(rob_retire_valid1 && rob_retire_has_dest1 && !rob_retire_is_fp_dest1), .cwaddr1(rob_retire_areg1), .cwpreg1(rob_retire_preg1),
     .restore_en(1'b0)   // Gen6-G adds real speculation/squash; nothing to
@@ -512,7 +616,7 @@ wire            prf_rvalid0, prf_rvalid1, prf_rvalid2, prf_rvalid3;
 // ReservationStation.v (one instance, the INT-ALU class -- Gen6-D's only
 // functional-unit class).
 // ==========================================================================
-wire [ROB_IDX_BITS-1:0] rob_alloc_tag0;
+wire [ROB_IDX_BITS-1:0] rob_alloc_tag0, rob_alloc_tag1;
 wire rob_full, rob_empty;
 wire [$clog2(ROB_ENTRIES+1)-1:0] rob_count;
 
@@ -521,9 +625,13 @@ ReorderBuffer #(.ROB_ENTRIES(ROB_ENTRIES), .AREG_BITS(AREG_BITS), .PREG_BITS(PRE
     .alloc_en0(do_dispatch), .alloc_has_dest0(needs_dest || is_fp_op), .alloc_is_fp_dest0(is_fp_op),
     .alloc_areg0(rd_areg), .alloc_preg0(is_fp_op ? fl_f_alloc_preg0 : (needs_dest ? fl_alloc_preg0 : {PREG_BITS{1'b0}})),
     .alloc_old_preg0(is_fp_op ? rat_f_old_preg0 : rat_old_preg0), .alloc_tag0(rob_alloc_tag0),
-    .alloc_en1(1'b0), .alloc_has_dest1(1'b0), .alloc_is_fp_dest1(1'b0),
-    .alloc_areg1({AREG_BITS{1'b0}}), .alloc_preg1({PREG_BITS{1'b0}}),
-    .alloc_old_preg1({PREG_BITS{1'b0}}), .alloc_tag1(),
+    // Gen6-K: slot1 is always a plain ALU op (try_dual_issue's own
+    // definition) -- never FP, never a real dest-less op class, so
+    // alloc_is_fp_dest1 stays hardwired 0 (Gen6-K's scope never dual-
+    // issues FP; see slot1_is_plain_alu above).
+    .alloc_en1(do_dispatch_slot1), .alloc_has_dest1(needs_dest_1), .alloc_is_fp_dest1(1'b0),
+    .alloc_areg1(rd_areg_1), .alloc_preg1(needs_dest_1 ? fl_alloc_preg1 : {PREG_BITS{1'b0}}),
+    .alloc_old_preg1(rat_old_preg1), .alloc_tag1(rob_alloc_tag1),
     .complete_en0(issue_valid), .complete_tag0(issue_rob_tag),
     .complete_en1(lsq_complete_valid), .complete_tag1(lsq_complete_rob_tag),
     .complete_en2(div_complete_valid), .complete_tag2(div_complete_rob_tag),
@@ -619,6 +727,20 @@ wire [PAYLOAD_BITS-1:0] issue_payload;
 wire rs_alu_full;
 wire [$clog2(RS_ALU_ENTRIES+1)-1:0] rs_alu_count;
 
+// Gen6-K: slot1's own dispatch-time operand readiness. The same-bundle
+// RAW bypass (slot1_src1_from_slot0/slot1_src2_from_slot0, computed in
+// the decode block above) overrides BOTH the tag (use slot0's own
+// fl_alloc_preg0 directly, since RAT's stored spec_map won't reflect
+// slot0's write until next cycle) AND the ready bit (forced 0 -- slot0
+// hasn't executed yet this cycle, so its result cannot possibly be
+// ready no matter what PRF says about that (still-unallocated-at-decode-
+// time) preg).
+wire [PREG_BITS-1:0] rs_alu_disp1_src1_preg = slot1_src1_from_slot0 ? fl_alloc_preg0 : rat_rpreg2;
+wire                 rs_alu_disp1_src1_ready = slot1_src1_from_slot0 ? 1'b0 : prf_rvalid9;
+wire [PREG_BITS-1:0] rs_alu_disp1_src2_preg = slot1_src2_from_slot0 ? fl_alloc_preg0 : rat_rpreg3;
+wire                 rs_alu_disp1_src2_ready = slot1_src2_from_slot0 ? 1'b0 : prf_rvalid10;
+wire [PAYLOAD_BITS-1:0] rs_disp_payload1 = {ALUSrc_c_1, ALUCtl_d_1, imm_d_1};
+
 ReservationStation #(.RS_ENTRIES(RS_ALU_ENTRIES), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(PAYLOAD_BITS)) m_RS_ALU(
     .clk(clk), .rst(rst),
     .disp_en0(do_dispatch && !is_mem_op && !is_div_op && !is_fp_op),
@@ -626,10 +748,11 @@ ReservationStation #(.RS_ENTRIES(RS_ALU_ENTRIES), .PREG_BITS(PREG_BITS), .ROB_ID
     .disp_src2_preg0(rat_rpreg1), .disp_src2_ready0(prf_rvalid1),
     .disp_dest_preg0(needs_dest ? fl_alloc_preg0 : {PREG_BITS{1'b0}}),
     .disp_rob_tag0(rob_alloc_tag0), .disp_payload0(rs_disp_payload0),
-    .disp_en1(1'b0),
-    .disp_src1_preg1({PREG_BITS{1'b0}}), .disp_src1_ready1(1'b0),
-    .disp_src2_preg1({PREG_BITS{1'b0}}), .disp_src2_ready1(1'b0),
-    .disp_dest_preg1({PREG_BITS{1'b0}}), .disp_rob_tag1({ROB_IDX_BITS{1'b0}}), .disp_payload1({PAYLOAD_BITS{1'b0}}),
+    .disp_en1(do_dispatch_slot1),
+    .disp_src1_preg1(rs_alu_disp1_src1_preg), .disp_src1_ready1(rs_alu_disp1_src1_ready),
+    .disp_src2_preg1(rs_alu_disp1_src2_preg), .disp_src2_ready1(rs_alu_disp1_src2_ready),
+    .disp_dest_preg1(needs_dest_1 ? fl_alloc_preg1 : {PREG_BITS{1'b0}}),
+    .disp_rob_tag1(rob_alloc_tag1), .disp_payload1(rs_disp_payload1),
     // CDB snoop: port0 is self (ALU results waking OTHER ALU-RS entries,
     // same as Gen6-D); port1 is Gen6-E's own addition -- a load's result
     // (lsq_complete_valid && is_load) can be exactly the operand an
@@ -911,9 +1034,12 @@ PhysicalRegisterFile #(.XLEN(FLEN), .NUM_PREGS(NUM_FPREGS), .NUM_AREGS(NUM_FREGS
     .raddr0(rat_f_rpreg0), .raddr1(rat_f_rpreg1),
     .raddr2(issue_src1_preg_falu[FPREG_BITS-1:0]), .raddr3(issue_src2_preg_falu[FPREG_BITS-1:0]),
     .raddr4({FPREG_BITS{1'b0}}), .raddr5({FPREG_BITS{1'b0}}), .raddr6({FPREG_BITS{1'b0}}), .raddr7({FPREG_BITS{1'b0}}), .raddr8({FPREG_BITS{1'b0}}),
+    // Gen6-K never dual-issues FP (slot1_is_plain_alu excludes is_fp_op_1
+    // by construction) -- ports 9/10 are simply tied off here.
+    .raddr9({FPREG_BITS{1'b0}}), .raddr10({FPREG_BITS{1'b0}}),
     .rdata0(prf_f_rdata0), .rdata1(prf_f_rdata1), .rdata2(prf_f_rdata2), .rdata3(prf_f_rdata3),
-    .rdata4(), .rdata5(), .rdata6(), .rdata7(), .rdata8(),
-    .rvalid0(prf_f_rvalid0), .rvalid1(prf_f_rvalid1), .rvalid2(), .rvalid3(), .rvalid4(), .rvalid5(), .rvalid6(), .rvalid7(), .rvalid8(),
+    .rdata4(), .rdata5(), .rdata6(), .rdata7(), .rdata8(), .rdata9(), .rdata10(),
+    .rvalid0(prf_f_rvalid0), .rvalid1(prf_f_rvalid1), .rvalid2(), .rvalid3(), .rvalid4(), .rvalid5(), .rvalid6(), .rvalid7(), .rvalid8(), .rvalid9(), .rvalid10(),
     // CDB writeback -- FALU's own instant result is the ONLY completion
     // source for the float PRF this phase (no FDIV/FSQRT/FMADD/FLW yet).
     .wen0(falu_complete_valid), .waddr0(falu_complete_dest_preg), .wdata0(falu_complete_data),
@@ -924,6 +1050,7 @@ PhysicalRegisterFile #(.XLEN(FLEN), .NUM_PREGS(NUM_FPREGS), .NUM_AREGS(NUM_FREGS
 );
 
 wire [XLEN-1:0] prf_rdata4, prf_rdata5;
+wire            prf_rvalid9, prf_rvalid10;
 
 PhysicalRegisterFile #(.XLEN(XLEN), .NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS), .SP_INIT(SP_INIT)) m_PRF(
     .clk(clk), .rst(rst),
@@ -934,15 +1061,22 @@ PhysicalRegisterFile #(.XLEN(XLEN), .NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS)
     // (Gen6-F): Divider.v's own dividend/divisor fetch for whichever
     // entry RS_DIV just selected. Port 8 (Gen6-H): FMV.W.X's own
     // integer source, issue-time, for whichever entry RS_FALU selected.
+    // Port 9/10 (Gen6-K): dispatch-time readiness query for slot1's own
+    // rs1/rs2 -- only the READY bit is used (rs_alu_disp1_src1/2_ready
+    // above); the VALUE isn't needed at dispatch time, only later at
+    // issue via the existing port 2/3 (whichever entry RS_ALU selects,
+    // regardless of which slot originally dispatched it).
     .raddr0(rat_rpreg0), .raddr1(rat_rpreg1),
     .raddr2(issue_src1_preg), .raddr3(issue_src2_preg),
     .raddr4(lsq_head_base_preg), .raddr5(lsq_head_store_data_preg),
     .raddr6(issue_src1_preg_div), .raddr7(issue_src2_preg_div),
     .raddr8(issue_src1_preg_falu),
+    .raddr9(rat_rpreg2), .raddr10(rat_rpreg3),
     .rdata0(prf_rdata0), .rdata1(prf_rdata1), .rdata2(prf_rdata2), .rdata3(prf_rdata3),
     .rdata4(prf_rdata4), .rdata5(prf_rdata5), .rdata6(prf_rdata6), .rdata7(prf_rdata7),
-    .rdata8(prf_rdata8),
+    .rdata8(prf_rdata8), .rdata9(), .rdata10(),
     .rvalid0(prf_rvalid0), .rvalid1(prf_rvalid1), .rvalid2(), .rvalid3(), .rvalid4(), .rvalid5(), .rvalid6(), .rvalid7(), .rvalid8(),
+    .rvalid9(prf_rvalid9), .rvalid10(prf_rvalid10),
     // CDB writeback -- port0 the ALU's own result (single-cycle execute,
     // no latency); port1 (Gen6-E) a completed LOAD's result (a store has
     // no destination register, so lsq_complete_is_load gates this);
@@ -951,10 +1085,12 @@ PhysicalRegisterFile #(.XLEN(XLEN), .NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS)
     .wen0(issue_valid), .waddr0(issue_dest_preg), .wdata0(alu_out),
     .wen1(lsq_complete_valid && lsq_complete_is_load), .waddr1(lsq_complete_dest_preg), .wdata1(lsq_complete_data),
     .wen2(div_complete_valid), .waddr2(div_complete_dest_preg), .wdata2(div_complete_data),
-    // Rename allocation -- clears valid for the fresh preg THIS cycle's
-    // dispatching instruction claims (if any).
+    // Rename allocation -- clears valid for the fresh preg(s) THIS
+    // cycle's dispatching instruction(s) claim (if any). Gen6-K wires
+    // alloc_en1/alloc_preg1 (already present on this module, previously
+    // tied off) to slot1's own allocation.
     .alloc_en0(do_dispatch && needs_dest), .alloc_preg0(fl_alloc_preg0),
-    .alloc_en1(1'b0), .alloc_preg1({PREG_BITS{1'b0}})
+    .alloc_en1(do_dispatch_slot1 && needs_dest_1), .alloc_preg1(fl_alloc_preg1)
 );
 
 // ==========================================================================
@@ -985,7 +1121,11 @@ always @(posedge clk) begin
     else if (br_resolve && br_mispredict)
         pc_r <= br_correct_target;
     else if (do_dispatch)
-        pc_r <= (is_branch && predicted_taken) ? predicted_target : (pc_r + 4);
+        // Gen6-K: do_dispatch_slot1 only ever fires alongside try_dual_issue,
+        // which by construction excludes is_branch (slot0_is_plain_alu) --
+        // so the two arms below never actually compete for the same cycle.
+        pc_r <= (is_branch && predicted_taken) ? predicted_target :
+                (do_dispatch_slot1 ? (pc_r + 8) : (pc_r + 4));
 end
 
 endmodule
