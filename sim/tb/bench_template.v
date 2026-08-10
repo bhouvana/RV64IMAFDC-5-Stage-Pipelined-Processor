@@ -44,6 +44,7 @@
 `include "Gshare.v"
 `include "Chooser.v"
 `include "ICache.v"
+`include "Prefetcher.v"
 `include "DCache.v"
 `include "L2Cache.v"
 `include "InstructionMemoryWishboneAdapter.v"

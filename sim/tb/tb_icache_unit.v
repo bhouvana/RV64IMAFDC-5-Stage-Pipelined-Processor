@@ -1,4 +1,5 @@
 `include "ICache.v"
+`include "Prefetcher.v"
 `include "InstructionMemory.v"
 `include "MemoryLatencyModel.v"
 `include "VictimCache.v"

@@ -42,6 +42,7 @@
 `include "Bht.v"
 `include "Btb.v"
 `include "ICache.v"
+`include "Prefetcher.v"
 `include "DCache.v"
 `include "VictimCache.v"
 `include "L2Cache.v"

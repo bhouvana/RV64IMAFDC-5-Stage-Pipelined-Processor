@@ -1,4 +1,5 @@
 `include "DCache.v"
+`include "Prefetcher.v"
 `include "L2Cache.v"
 `include "InstructionMemory.v"
 `include "InstructionMemoryWishboneAdapter.v"
