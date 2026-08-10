@@ -71,7 +71,7 @@ module tb_ooocore_alu_d1;
         // "not enough words" runtime warning otherwise).
         .IMEM_SIZE_BYTES(128), .IMEM_INIT_FILE("sim/programs/ooocore_alu_d1.mem"),
         .DMEM_SIZE_BYTES(256)
-    ) dut (.clk(clk), .rst(rst));
+    ) dut (.clk(clk), .rst(rst), .mailbox_readData(64'b0));
 
     integer i;
     initial begin

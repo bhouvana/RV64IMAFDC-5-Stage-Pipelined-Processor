@@ -80,8 +80,20 @@ module OOOCore #(
     parameter PAYLOAD_BITS = 1 + 5 + XLEN
 )(
     input wire clk,
-    input wire rst    // active-low, same convention as every other
+    input wire rst,   // active-low, same convention as every other
                         // module in this project (Register.v, DCache.v, ...)
+
+    // Gen6-N (docs/adr/0050): the mailbox side of a heterogeneous
+    // PIPELINED+OOOCore.v SoC (design/HeteroSoC.v) -- design/Mailbox.v's
+    // own "port B" simple direct interface (matching DataMemoryBRAM.v's
+    // own memRead/memWrite/address/writeData/readData shape, word-only).
+    // Unconnected in any standalone OOOCore.v instantiation (every
+    // existing directed/random/formal test) -- changes nothing there.
+    output wire              mailbox_memWrite,
+    output wire              mailbox_memRead,
+    output wire [XLEN-1:0]   mailbox_address,
+    output wire [XLEN-1:0]   mailbox_writeData,
+    input  wire [XLEN-1:0]   mailbox_readData
 );
 
 // ==========================================================================
@@ -824,11 +836,42 @@ LoadStoreQueue #(.XLEN(XLEN), .LSQ_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_B
     .lsq_count(lsq_count), .lsq_full(lsq_full)
 );
 
+// Gen6-N (docs/adr/0050): address-range split -- an access inside
+// MAILBOX_BASE/MAILBOX_SIZE routes to the external mailbox port instead
+// of this core's own private m_DMem, mirroring WbDecoder.v's own
+// BASE/SIZE hit-test idiom (a single fixed range, so a plain compare is
+// simpler than pulling in the general N-slave module for one slave).
+// Word-only (Mailbox.v's own scope) -- lsq_mem_funct3 is NOT checked
+// here, matching Mailbox.v's own "no sub-word access" scope; a real
+// caller only ever uses lw/sw against this range (same discipline the
+// mailbox protocol itself already requires).
+wire mailbox_hit = (lsq_mem_address >= `MAILBOX_BASE) && (lsq_mem_address < `MAILBOX_BASE + `MAILBOX_SIZE);
+assign mailbox_memWrite = lsq_mem_memWrite && mailbox_hit;
+assign mailbox_memRead  = lsq_mem_memRead && mailbox_hit;
+assign mailbox_address  = lsq_mem_address;
+assign mailbox_writeData = lsq_mem_writeData;
+
+wire [XLEN-1:0] dmem_readData;
+reg             mailbox_hit_r;
+always @(posedge clk) begin
+    if (~rst)
+        mailbox_hit_r <= 1'b0;
+    else if (lsq_mem_memRead || lsq_mem_memWrite)
+        mailbox_hit_r <= mailbox_hit;
+end
+// Registered select, matching DataMemoryBRAM.v's/Mailbox.v's own
+// (port B) 1-cycle registered-read latency exactly -- the request that
+// determines mailbox_hit lands this cycle, but the DATA it produces
+// (from whichever memory actually served it) isn't valid until next
+// cycle, so the MUX select must be captured on the same edge, not read
+// combinationally off this cycle's (already-advanced) mailbox_hit.
+assign lsq_mem_readData = mailbox_hit_r ? mailbox_readData : dmem_readData;
+
 DataMemoryBRAM #(.SIZE_BYTES(DMEM_SIZE_BYTES), .XLEN(XLEN)) m_DMem(
     .clk(clk), .rst(rst),
-    .memWrite(lsq_mem_memWrite), .memRead(lsq_mem_memRead),
+    .memWrite(lsq_mem_memWrite && !mailbox_hit), .memRead(lsq_mem_memRead && !mailbox_hit),
     .address(lsq_mem_address), .writeData(lsq_mem_writeData), .funct3(lsq_mem_funct3),
-    .readData(lsq_mem_readData)
+    .readData(dmem_readData)
 );
 
 // ==========================================================================

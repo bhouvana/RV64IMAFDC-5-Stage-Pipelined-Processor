@@ -428,8 +428,24 @@ ALU op in a sustained loop) no longer hangs; OOOCore is now measurably
 *faster* than PIPELINED on both benchmark kernels (`bench_runner.py
 --compare-ooo`). Constrained-random cross-check (`run_random_tests.py
 --ooo`) and formal ROB properties (`sim/formal/rob_formal.sv`, bounded
-proof) also new this generation. 123/123 directed suite, zero-warning
-compile.
+proof) also new this generation.
+
+**Gen6-N (`docs/adr/0050`): a real heterogeneous dual-core SoC.**
+`design/HeteroSoC.v` runs PIPELINED and OOOCore.v *simultaneously*,
+sharing a new `design/Mailbox.v` handoff surface (a small dual-port
+memory, Wishbone slot 3 on PIPELINED's side via a real, additive,
+backward-compatible `WbDecoder.v` extension — confirmed acceptable via
+`AskUserQuestion` given the "never modify PIPELINED" rule this whole
+generation held; OOOCore.v's own simple direct-memory port on the other
+side, its own module, freely editable). Proven end-to-end
+(`tb_hetero_soc_n1.v`, 11/11): PIPELINED writes an array into the
+mailbox and signals go; OOOCore.v (running its own independent
+instruction stream) sums it and signals done; PIPELINED reads the
+result back. OOOCore.v's own real ISA limits (no jal/jalr/lui/auipc/
+csrrX) force the worker program to build constants via chunked
+addi/slli and use `beq x0,x0,label` (always-taken) for loops/halt
+instead of jal — real, documented, working within OOOCore.v's own
+current scope. 125/125 directed suite, zero-warning compile.
 
 ---
 

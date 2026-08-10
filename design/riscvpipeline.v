@@ -267,7 +267,28 @@ module PIPELINED #(
     output debug_ptw_done,
     output debug_ptw_fault,
     output [XLEN-1:0] debug_ptw_vaddr,
-    output [XLEN-1:0] debug_ptw_m_addr
+    output [XLEN-1:0] debug_ptw_m_addr,
+
+    // Gen6-N (docs/adr/0050): a real classic Wishbone MASTER port to an
+    // external Mailbox.v -- the real inter-core handoff surface for a
+    // heterogeneous PIPELINED+OOOCore.v SoC (design/HeteroSoC.v). A new,
+    // additive 4th WbDecoder.v slave slot at MAILBOX_BASE (riscv_defs.vh),
+    // touching zero existing execution/decode logic -- same discipline
+    // this project has held since Gen6 started ("coexists with PIPELINED,
+    // never modifies it") extended to mean "never modifies its own
+    // EXECUTION SEMANTICS," not "never gains a new external port" (every
+    // existing instantiation leaves these simply unconnected, same
+    // "unconnected changes nothing" shape as every debug_* tap above --
+    // no -Wall dangling-input warning breaks sim/run_tests.sh's own
+    // actual compile flags, which don't use -Wall).
+    output              mailbox_m_cyc,
+    output              mailbox_m_stb,
+    output              mailbox_m_we,
+    output [XLEN-1:0]   mailbox_m_addr,
+    output [XLEN-1:0]   mailbox_m_data_o,
+    output [3:0]        mailbox_m_sel,
+    input  [XLEN-1:0]   mailbox_s_data_i,
+    input               mailbox_s_ack
 );
 // Register-address field width, derived once and reused on every
 // pipeline-register/Register.v/Forward.v/Hazard.v instantiation below.
@@ -3420,15 +3441,21 @@ end
         .m_sel(wb_m_sel), .m_funct3(wb_m_funct3), .m_cti(wb_m_cti)
     );
 
-    // docs/adr/0020-soc-integration.md (Phase D8). NUM_SLAVES=3: slave 0
-    // is RAM, slave 1 is Uart.v, slave 2 is Timer.v -- indices/BASE/SIZE
-    // must stay in lockstep across the three flattened buses below (the
-    // same convention WbDecoder.v's own header comment documents).
-    wire [2:0] wb_s_cyc, wb_s_stb, wb_s_ack;
+    // docs/adr/0020-soc-integration.md (Phase D8). NUM_SLAVES=4 (Gen6-N,
+    // docs/adr/0050, widened from 3): slave 0 is RAM, slave 1 is Uart.v,
+    // slave 2 is Timer.v, slave 3 is the new external Mailbox.v port --
+    // indices/BASE/SIZE must stay in lockstep across the four flattened
+    // buses below (the same convention WbDecoder.v's own header comment
+    // documents). Slave 3 was APPENDED (the new highest slot, first item
+    // in the BASE/SIZE concatenation below) specifically so slots 0/1/2's
+    // own indices stay exactly what every other hardcoded `wb_s_cyc[N]`
+    // reference in this file already assumes -- zero renumbering risk to
+    // RAM/UART/TIMER's own existing wiring.
+    wire [3:0] wb_s_cyc, wb_s_stb, wb_s_ack;
     wire wb_s_we;
     wire [XLEN-1:0] wb_s_addr, wb_s_data_o;
     wire [3:0] wb_s_sel;
-    wire [3*XLEN-1:0] wb_s_data_i;
+    wire [4*XLEN-1:0] wb_s_data_i;
 
     // Generation 2 (Phase M, docs/adr/0028-rv64-migration-phase-m.md): a
     // real bug found by running, not anticipated in the plan -- WbDecoder's
@@ -3446,11 +3473,13 @@ end
     // field is explicitly zero-extended to a full XLEN-wide slot here;
     // reduces to exactly the original concatenation at XLEN=32 (the
     // padding replication count is 0 there).
-    WbDecoder #(.XLEN(XLEN), .NUM_SLAVES(3),
-                .BASE({ {(XLEN-32){1'b0}}, `TIMER_BASE,
+    WbDecoder #(.XLEN(XLEN), .NUM_SLAVES(4),
+                .BASE({ {(XLEN-32){1'b0}}, `MAILBOX_BASE,
+                        {(XLEN-32){1'b0}}, `TIMER_BASE,
                         {(XLEN-32){1'b0}}, `UART_BASE,
                         {XLEN{1'b0}} }),
-                .SIZE({ {(XLEN-32){1'b0}}, `TIMER_SIZE,
+                .SIZE({ {(XLEN-32){1'b0}}, `MAILBOX_SIZE,
+                        {(XLEN-32){1'b0}}, `TIMER_SIZE,
                         {(XLEN-32){1'b0}}, `UART_SIZE,
                         {(XLEN-32){1'b0}}, MEM_SIZE_BYTES[31:0] })) m_WbDecoder(
         // docs/adr/00NN-mmu-sv32.md (Phase F5): wb_m_* mux Ptw.v's own bus
@@ -3463,6 +3492,20 @@ end
         .s_addr(wb_s_addr), .s_data_o(wb_s_data_o), .s_sel(wb_s_sel),
         .s_data_i(wb_s_data_i), .s_ack(wb_s_ack)
     );
+
+    // Gen6-N (docs/adr/0050): slave 3 -- straight passthrough to the new
+    // external mailbox port (this module's own top-level ports above).
+    // we/addr/data_o/sel are shared across every slave already
+    // (WbDecoder.v's own header comment) -- only cyc/stb/ack/data_i are
+    // per-slave.
+    assign mailbox_m_cyc    = wb_s_cyc[3];
+    assign mailbox_m_stb    = wb_s_stb[3];
+    assign mailbox_m_we     = wb_s_we;
+    assign mailbox_m_addr   = wb_s_addr;
+    assign mailbox_m_data_o = wb_s_data_o;
+    assign mailbox_m_sel    = wb_s_sel;
+    assign wb_s_data_i[3*XLEN +: XLEN] = mailbox_s_data_i;
+    assign wb_s_ack[3] = mailbox_s_ack;
 
     // docs/adr/0024-variable-latency-memory.md (Phase I2). The request
     // reaches RamWishboneAdapter UNDELAYED -- its own already-correct ack

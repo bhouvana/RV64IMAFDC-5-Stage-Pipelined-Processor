@@ -319,6 +319,16 @@
 `define CLINT_OFF_MTIMECMP  16'h4000  // + 4 = mtimecmph, XLEN=32 only
 `define CLINT_OFF_MTIME     16'hBFF8  // + 4 = mtimeh, XLEN=32 only
 
+// docs/adr/0050-heterogeneous-dual-core-soc-gen6-n.md (Gen6-N). Mailbox.v's
+// own address window -- the real inter-core handoff surface for
+// design/HeteroSoC.v (PIPELINED + OOOCore.v). Fresh 0x10000-aligned base
+// off TIMER_BASE, same precedent TIMER_BASE itself already used off
+// UART_BASE. 256 bytes (64 words) -- generous for a real mailbox
+// protocol (go/done flags, a handful of args, a small result area) well
+// beyond what any current directed test needs.
+`define MAILBOX_BASE (`MMIO_BASE + 32'h0020_0000)  // 0x1020_0000
+`define MAILBOX_SIZE 32'd256
+
 // ---- Sv32 MMU / M-S-U privilege modes (Phase F of the redesign) ----
 // This core was M-mode only through Phase E (docs/adr/0011 explicitly drew
 // that boundary; docs/adr/0020's Future Improvements explicitly deferred

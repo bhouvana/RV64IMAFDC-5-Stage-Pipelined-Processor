@@ -59,7 +59,7 @@ module tb_ooocore_branch_g1;
         .ROB_ENTRIES(16), .RS_ALU_ENTRIES(8),
         .IMEM_SIZE_BYTES(128), .IMEM_INIT_FILE("sim/programs/ooocore_branch_g1.mem"),
         .DMEM_SIZE_BYTES(256)
-    ) dut (.clk(clk), .rst(rst));
+    ) dut (.clk(clk), .rst(rst), .mailbox_readData(64'b0));
 
     integer i;
     initial begin
