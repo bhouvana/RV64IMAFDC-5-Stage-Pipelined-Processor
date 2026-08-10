@@ -282,7 +282,15 @@ generate
 endgenerate
 wire [WAY_BITS-1:0] pf_victim_way = (REPLACEMENT_POLICY == POLICY_LRU) ? pf_lru_way_acc[WAYS] : victim[pf_set_idx];
 
-wire prefetch_fire = (PREFETCH_MODE != PF_OFF) && L2_ENABLE && pf_valid_w && !pf_found;
+// docs/adr/0046-hardware-prefetchers-phase-g.md (Generation 4, Phase G). The
+// IMEM_SIZE_BYTES bound (`pf_addr_w <= IMEM_SIZE_BYTES-LINE_BYTES`) reuses
+// this module's OWN existing IMEM_SIZE_BYTES parameter -- already the real
+// backing-memory size, no new parameter needed here. See DCache.v's own
+// identical MEM_SIZE_BYTES bound for the real deadlock this prevents (a
+// predicted line past the end of real memory gets no bus ack at all,
+// hanging the whole pipeline forever -- found by running, not anticipated).
+wire prefetch_fire = (PREFETCH_MODE != PF_OFF) && L2_ENABLE && pf_valid_w && !pf_found
+    && (pf_addr_w <= (IMEM_SIZE_BYTES - LINE_BYTES));
 
 // docs/adr/0042. `hit` (the module's own external port) now also reflects
 // a victim-buffer promote hit -- see the victim-cache block below for

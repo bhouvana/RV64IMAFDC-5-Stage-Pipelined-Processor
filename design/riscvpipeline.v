@@ -3229,7 +3229,8 @@ end
         DCache #(.XLEN(XLEN), .WAYS(DCACHE_WAYS), .CACHE_SIZE_BYTES(DCACHE_SIZE_BYTES),
                  .LINE_BYTES(DCACHE_LINE_BYTES), .REPLACEMENT_POLICY(REPLACEMENT_POLICY),
                  .VICTIM_ENTRIES(VICTIM_ENTRIES), .BURST_ENABLE(BURST_ENABLE),
-                 .MSHR_ENTRIES(MSHR_ENTRIES), .PREFETCH_MODE(PREFETCH_MODE)) m_DCache(
+                 .MSHR_ENTRIES(MSHR_ENTRIES), .PREFETCH_MODE(PREFETCH_MODE),
+                 .MEM_SIZE_BYTES(MEM_SIZE_BYTES)) m_DCache(
             .clk(clk), .rst(start),
             .req_read(memRead_regem && !ptw_busy),
             .req_write(memWrite_regem && !ptw_busy),

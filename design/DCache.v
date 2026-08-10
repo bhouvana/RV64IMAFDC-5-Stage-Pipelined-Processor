@@ -84,7 +84,23 @@ module DCache #(
     // any effect (a solo prefetch at MSHR_ENTRIES==1 would block a real
     // access with no way to overlap it -- documented no-op otherwise,
     // mirroring VICTIM_ENTRIES/L2_SIZE_BYTES's own "no-op unless X" family).
-    parameter PREFETCH_MODE = 0
+    parameter PREFETCH_MODE = 0,
+    // Generation 4, Phase G. Real backing-memory size, in bytes -- gates
+    // prefetch_fire so a predicted line never runs past the end of real
+    // memory. A real, severe bug found by running the constrained-random
+    // harness (not anticipated in the original design, which assumed an
+    // out-of-range address was harmless "same masking any address gets" --
+    // WRONG for this project's own bus decode): a predicted address past
+    // the end of backing memory has NO slave select it at all
+    // (WbDecoder.v's own "gap" behavior, already proven by
+    // tb_wbdecoder_unit.v), so m_ack never arrives and the whole pipeline
+    // hangs PERMANENTLY waiting for a prefetch fill that can never
+    // complete -- a full deadlock, not a performance-only cost. Defaults
+    // to an enormous sentinel (effectively unbounded) so every existing
+    // standalone testbench that never wires this parameter is unaffected;
+    // riscvpipeline.v passes the real MEM_SIZE_BYTES whenever it wires
+    // PREFETCH_MODE live.
+    parameter MEM_SIZE_BYTES = 32'hFFFFFFFF
 )(
     input clk,
     input rst,
@@ -522,7 +538,11 @@ wire pf_victim_is_dirty = valid[pf_set_idx*WAYS + pf_victim_way] && dirty[pf_set
 // already-in-flight line.
 wire prefetch_fire = (PREFETCH_MODE != PF_OFF) && (MSHR_ENTRIES > 1)
     && pf_valid_w && !pf_found && !pf_mshr_conflict && !pf_victim_is_dirty
-    && (mshr_count_r < MSHR_ENTRIES);
+    && (mshr_count_r < MSHR_ENTRIES)
+    // Never fetch a line running past the end of real backing memory --
+    // see MEM_SIZE_BYTES's own header comment for the real hang this
+    // prevents.
+    && (pf_addr_w <= (MEM_SIZE_BYTES - LINE_BYTES));
 
 // Width/sign extension for a load, mirroring DataMemoryBRAM.v's own
 // funct3-keyed case exactly, generalized with a byte_off since this
