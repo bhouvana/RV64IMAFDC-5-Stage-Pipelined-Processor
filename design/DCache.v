@@ -217,7 +217,7 @@ wire [1:0]               byte_off = req_addr[1:0];
 wire [SET_BITS-1:0]      set_idx;
 generate
 if (SET_BITS == 0) begin : gen_set_idx_fully_assoc
-    assign set_idx = {SET_BITS{1'b0}};
+    assign set_idx = 1'b0;
 end else begin : gen_set_idx_normal
     assign set_idx = req_addr[OFFSET_BITS+SET_BITS-1:OFFSET_BITS];
 end
@@ -281,7 +281,7 @@ wire hit_main = |way_hit;
 wire [SET_BITS-1:0] probe_set_idx;
 generate
 if (SET_BITS == 0) begin : gen_probe_set_idx_fully_assoc
-    assign probe_set_idx = {SET_BITS{1'b0}};
+    assign probe_set_idx = 1'b0;
 end else begin : gen_probe_set_idx_normal
     assign probe_set_idx = probe_addr[OFFSET_BITS+SET_BITS-1:OFFSET_BITS];
 end
@@ -578,6 +578,21 @@ reg [LINE_IDX_BITS-1:0] flush_scan_r;
 reg                     flush_active_r;
 reg                     flush_done_r;
 
+// docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). Same
+// SET_BITS==0 guard access_hit_set's own copy uses above -- flush's own
+// address reconstruction below needs the identical fix (a THIRD previously-
+// latent instance of docs/adr/0041's own bug, this one in the flush/fence
+// path specifically -- no existing fence/flush test before this phase ever
+// ran against a fully-associative D$ sizing either).
+wire [SET_BITS-1:0] flush_scan_set;
+generate
+if (SET_BITS == 0) begin : gen_flush_scan_set_fully_assoc
+    assign flush_scan_set = 1'b0;
+end else begin : gen_flush_scan_set_normal
+    assign flush_scan_set = flush_scan_r[LINE_IDX_BITS-1:WAY_BITS];
+end
+endgenerate
+
 // docs/adr/0023-caches.md (Phase G7). A real bug found by running MMU+cache
 // constrained-random programs: resp_ready's own S_HIT_RD/S_FILL branches
 // (below) originally trusted `state` alone to mean "the CURRENT req_read/
@@ -622,9 +637,25 @@ wire [31:0] hit_rd_word = data_arr[hit_line_r*LINE_WORDS + hit_word_r];
 wire [WAY_BITS-1:0] access_hit_way = (state == S_IDLE)
     ? (hit_main ? hit_line_idx[WAY_BITS-1:0] : victim_target_way)
     : hit_line_r[WAY_BITS-1:0];
-wire [SET_BITS-1:0] access_hit_set = (state == S_IDLE)
-    ? (hit_main ? hit_line_idx[LINE_IDX_BITS-1:WAY_BITS] : set_idx)
-    : hit_line_r[LINE_IDX_BITS-1:WAY_BITS];
+// docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). A SECOND,
+// previously-latent instance of docs/adr/0041's own SET_BITS==0 part-select
+// bug (see set_idx's own comment above) -- never caught before because no
+// existing test used a fully-associative D$ sizing (tb_icache_unit.v's own
+// dut3 comment explicitly documents routing around this exact gap for I$;
+// this phase's own tb_cache_l2_f1.v is the first test to genuinely need a
+// fully-associative-shaped D$/L2, and found the D$-side twin of the same
+// bug by running). [LINE_IDX_BITS-1:WAY_BITS] reverses to a high<low slice
+// when SET_BITS==0 (LINE_IDX_BITS==WAY_BITS there) -- guarded the same way.
+wire [SET_BITS-1:0] access_hit_set;
+generate
+if (SET_BITS == 0) begin : gen_access_hit_set_fully_assoc
+    assign access_hit_set = 1'b0;
+end else begin : gen_access_hit_set_normal
+    assign access_hit_set = (state == S_IDLE)
+        ? (hit_main ? hit_line_idx[LINE_IDX_BITS-1:WAY_BITS] : set_idx)
+        : hit_line_r[LINE_IDX_BITS-1:WAY_BITS];
+end
+endgenerate
 
 wire fill_is_last_word = (fill_word_r == LINE_WORDS-1);
 wire fill_do_merge = mshr_is_write[mshr_head_r] && (fill_word_r == mshr_word_off[mshr_head_r]);
@@ -883,22 +914,33 @@ always @(posedge clk) begin
                        // state==S_IDLE, unchanged) -- deliberate scope cut,
                        // docs/adr/0044.
 
+        // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F).
+        // UNCONDITIONAL, decoupled from `state`/case(state) below entirely --
+        // a real deadlock found by running (not anticipated in the original
+        // design, which gated this on state==S_IDLE): while THIS module is
+        // itself busy (S_WB/S_FILL) waiting on a request to L2, L2Cache.v may
+        // need to evict and probe THIS module for a DIFFERENT line (the
+        // eviction pressure L2's own miss servicing for the in-flight request
+        // creates) -- gating the probe response on S_IDLE meant DCache could
+        // never leave its busy state to answer, while L2 could never finish
+        // servicing that busy request until the probe was answered. A
+        // genuine circular wait, not just a missed corner case -- confirmed
+        // by tb_cache_l2_f1.v's own "correctness" scenario hanging
+        // completely (never reaching its halt loop) before this fix. Safe to
+        // answer from ANY state: the probe reads/invalidates a line chosen
+        // by probe_addr's own independent decode (probe_found_line), never
+        // the same array slot the main FSM's own in-flight S_WB/S_FILL is
+        // concurrently writing (inclusion means a line mid-fill here, not
+        // yet valid, can never simultaneously be a line L2 already knows
+        // about and wants evicted).
+        if (probe_req) begin
+            if (probe_found)
+                valid[probe_found_line] <= 1'b0;
+        end
+
         case (state)
             S_IDLE: begin
-                // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F).
-                // Strict first priority, ahead of flush_all/req_read/
-                // req_write -- a probe is answered (and, if found,
-                // invalidated) THIS cycle; any real req_read/req_write the
-                // caller is holding is simply serviced the following cycle
-                // instead (safe: riscvpipeline.v's reg3 holds the request
-                // level until resp_ready, nothing is lost by a one-cycle
-                // defer). Permanently unreachable when the caller never
-                // asserts probe_req (L2 disabled, the default).
-                if (probe_req) begin
-                    if (probe_found)
-                        valid[probe_found_line] <= 1'b0;
-                end
-                else if (flush_all && !flush_active_r) begin
+                if (flush_all && !flush_active_r) begin
                     flush_active_r <= 1'b1;
                     flush_scan_r   <= {LINE_IDX_BITS{1'b0}};
                     state <= S_FLUSH_SCAN;
@@ -1122,7 +1164,7 @@ always @(posedge clk) begin
             S_FLUSH_SCAN: begin
                 if (valid[flush_scan_r] && dirty[flush_scan_r]) begin
                     wb_line_r <= flush_scan_r;
-                    wb_base_r <= {tag_arr[flush_scan_r], flush_scan_r[LINE_IDX_BITS-1:WAY_BITS], {OFFSET_BITS{1'b0}}};
+                    wb_base_r <= {tag_arr[flush_scan_r], flush_scan_set, {OFFSET_BITS{1'b0}}};
                     wb_return_to_flush_r <= 1'b1;
                     fill_word_r <= {WORD_OFF_BITS{1'b0}};
                     state <= S_WB;
@@ -1217,14 +1259,14 @@ assign flush_busy = flush_active_r;
 assign flush_done = flush_done_r;
 
 // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). probe_ack fires
-// combinationally the same S_IDLE cycle probe_req is seen (mirrors this
-// module's own existing write-hit resp_ready precedent -- a combinational
-// ack for a same-cycle-resolvable request), unconditionally, whether or not
-// a matching line was actually found -- "wasn't here" is itself a complete,
-// valid answer (L2Cache.v's own header covers why an over-eager probe is
-// harmless). probe_dirty/probe_data are don't-care when !probe_found; L2's
-// own probe response handling never inspects them in that case.
-assign probe_ack   = (state == S_IDLE) && probe_req;
+// combinationally the same cycle probe_req is seen, from ANY state (see the
+// unconditional probe-service block above the case(state) for why -- gating
+// this on state==S_IDLE was a real deadlock, found by running), whether or
+// not a matching line was actually found -- "wasn't here" is itself a
+// complete, valid answer (L2Cache.v's own header covers why an over-eager
+// probe is harmless). probe_dirty/probe_data are don't-care when
+// !probe_found; L2's own probe response handling never inspects them then.
+assign probe_ack   = probe_req;
 assign probe_dirty = probe_found && dirty[probe_found_line];
 generate
     for (gw = 0; gw < LINE_WORDS; gw = gw + 1) begin : gen_probe_data

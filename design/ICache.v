@@ -135,7 +135,7 @@ wire [WORD_OFF_BITS-1:0] word_off = readAddr[OFFSET_BITS-1:2];
 wire [SET_BITS-1:0]      set_idx;
 generate
 if (SET_BITS == 0) begin : gen_set_idx_fully_assoc
-    assign set_idx = {SET_BITS{1'b0}};
+    assign set_idx = 1'b0;
 end else begin : gen_set_idx_normal
     assign set_idx = readAddr[OFFSET_BITS+SET_BITS-1:OFFSET_BITS];
 end
@@ -194,7 +194,7 @@ localparam LINE_IDX_BITS = SET_BITS + WAY_BITS;
 wire [SET_BITS-1:0] probe_set_idx;
 generate
 if (SET_BITS == 0) begin : gen_probe_set_idx_fully_assoc
-    assign probe_set_idx = {SET_BITS{1'b0}};
+    assign probe_set_idx = 1'b0;
 end else begin : gen_probe_set_idx_normal
     assign probe_set_idx = probe_addr[OFFSET_BITS+SET_BITS-1:OFFSET_BITS];
 end
@@ -211,9 +211,11 @@ generate
 endgenerate
 wire probe_found = |probe_way_hit;
 wire [LINE_IDX_BITS-1:0] probe_found_line = probe_lineidx_acc[WAYS];
-// Combinational, same S_IDLE cycle, unconditionally (found or not) --
-// mirrors DCache.v's own probe_ack precedent exactly.
-assign probe_ack = (state == S_IDLE) && probe_req;
+// Combinational, from ANY state (see the unconditional probe-service block
+// above the case(state) for why -- a real deadlock, found by running,
+// gating this on state==S_IDLE), unconditionally (found or not) -- mirrors
+// DCache.v's own probe_ack precedent exactly.
+assign probe_ack = probe_req;
 // docs/adr/0042. `hit` (the module's own external port) now also reflects
 // a victim-buffer promote hit -- see the victim-cache block below for
 // vc_lookup_hit. `hit_main` (main-array-only) stays the name every
@@ -455,19 +457,21 @@ always @(posedge clk) begin
                 lru_touch(set_idx, victim_target_way);
         end
 
+        // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F).
+        // UNCONDITIONAL, decoupled from `state`/case(state) below entirely --
+        // same real deadlock DCache.v's own copy of this comment documents
+        // (found by running DCache.v's own version first): gating this on
+        // state==S_IDLE meant ICache could never answer a probe while itself
+        // busy (S_FILL) waiting on a request to L2 that L2's own eviction
+        // pressure might need to probe THIS module for. Fixed identically.
+        if (probe_req) begin
+            if (probe_found)
+                valid[probe_found_line] <= 1'b0;
+        end
+
         case (state)
             S_IDLE: begin
-                // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F).
-                // Strict first priority, same rationale as DCache.v's own
-                // copy -- a probe is answered (and, if found, invalidated)
-                // THIS cycle; a real fetch simply resolves the following
-                // cycle instead. Permanently unreachable when the caller
-                // never asserts probe_req (L2 disabled, the default).
-                if (probe_req) begin
-                    if (probe_found)
-                        valid[probe_found_line] <= 1'b0;
-                end
-                else if (!hit_main) begin
+                if (!hit_main) begin
                     if (vc_lookup_hit) begin
                         // docs/adr/0042. Promote: commit the victim
                         // buffer's own line straight into the main array

@@ -125,7 +125,7 @@ wire [1:0]               byte_off = u_addr[1:0];
 wire [SET_BITS-1:0]      set_idx;
 generate
 if (SET_BITS == 0) begin : gen_set_idx_fully_assoc
-    assign set_idx = {SET_BITS{1'b0}};
+    assign set_idx = 1'b0;
 end else begin : gen_set_idx_normal
     assign set_idx = u_addr[OFFSET_BITS+SET_BITS-1:OFFSET_BITS];
 end
@@ -303,7 +303,18 @@ assign access_hit  = access_hit_calc;
 assign access_miss = access_miss_calc;
 
 wire [WAY_BITS-1:0] access_hit_way = (state == S_IDLE) ? hit_line_idx[WAY_BITS-1:0]        : hit_line_r[WAY_BITS-1:0];
-wire [SET_BITS-1:0] access_hit_set = (state == S_IDLE) ? hit_line_idx[LINE_IDX_BITS-1:WAY_BITS] : hit_line_r[LINE_IDX_BITS-1:WAY_BITS];
+// docs/adr/0045-l2-cache-phase-f.md. Same SET_BITS==0 guard DCache.v's own
+// access_hit_set copy uses -- [LINE_IDX_BITS-1:WAY_BITS] reverses to a
+// high<low slice when SET_BITS==0 (a fully-associative L2, e.g. this
+// phase's own tb_cache_l2_f1.v "correctness" sizing).
+wire [SET_BITS-1:0] access_hit_set;
+generate
+if (SET_BITS == 0) begin : gen_access_hit_set_fully_assoc
+    assign access_hit_set = 1'b0;
+end else begin : gen_access_hit_set_normal
+    assign access_hit_set = (state == S_IDLE) ? hit_line_idx[LINE_IDX_BITS-1:WAY_BITS] : hit_line_r[LINE_IDX_BITS-1:WAY_BITS];
+end
+endgenerate
 
 integer reset_i, reset_j;
 always @(posedge clk) begin

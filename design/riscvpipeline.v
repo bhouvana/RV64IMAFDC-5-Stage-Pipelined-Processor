@@ -165,7 +165,21 @@ module PIPELINED #(
     // Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
     // Outstanding-load-miss queue depth on DCache.v. 1 = disabled,
     // bit-exact with pre-Phase-E behavior.
-    parameter MSHR_ENTRIES = 1
+    parameter MSHR_ENTRIES = 1,
+    // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). 0 (default):
+    // disabled, bit-identical to pre-Phase-F behavior for BOTH I$ and D$ --
+    // no L2Cache.v instances even elaborate, ICache.v's own L2_ENABLE stays
+    // 0 (its existing private-InstructionMemory-direct-fill path, unchanged),
+    // DCache.v's own probe_req stays tied 0 (dark). Nonzero: a real, shared,
+    // inclusive L2 sits behind both I$ and D$ (one implementation, two
+    // instances -- see L2Cache.v's own header). L2_WAYS/L2_REPLACEMENT_POLICY
+    // are independent of L1's own WAYS/REPLACEMENT_POLICY (confirmed via
+    // AskUserQuestion) -- no separate L2_LINE_BYTES parameter, each instance
+    // inherits its own L1's line size directly (ICACHE_LINE_BYTES/
+    // DCACHE_LINE_BYTES).
+    parameter L2_SIZE_BYTES = 0,
+    parameter L2_WAYS = 4,
+    parameter L2_REPLACEMENT_POLICY = 0
 )(
     input clk,
     input start,
@@ -478,17 +492,79 @@ wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on
     end else begin : gen_icache_writeback
         assign imem_wait = 1'b0;
         wire icache_busy, icache_done;
+
+        // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). L2's own
+        // I-side probe port -- ICache.v answers it whether or not L2 is
+        // enabled (permanently dark, probe_req tied 0 below, when it isn't).
+        wire icache_probe_req, icache_probe_ack;
+        wire [XLEN-1:0] icache_probe_addr;
+        // ICache.v's own new Wishbone-master bus port (Phase F6) -- only
+        // driven live when L2_SIZE_BYTES!=0 (L2_ENABLE below); dark
+        // otherwise, same as every other swappable-parameter axis.
+        wire icache_l2_m_cyc, icache_l2_m_stb;
+        wire [XLEN-1:0] icache_l2_m_addr;
+        wire [`WB_SEL_WIDTH-1:0] icache_l2_m_sel;
+        wire [2:0] icache_l2_m_funct3;
+        wire [XLEN-1:0] icache_l2_m_data_i;
+        wire icache_l2_m_ack;
+
         ICache #(.INIT_FILE(INIT_FILE), .IMEM_SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN),
                  .WAYS(ICACHE_WAYS), .CACHE_SIZE_BYTES(ICACHE_SIZE_BYTES), .LINE_BYTES(ICACHE_LINE_BYTES),
                  .MEM_LATENCY(MEM_LATENCY_I), .REPLACEMENT_POLICY(REPLACEMENT_POLICY),
-                 .VICTIM_ENTRIES(VICTIM_ENTRIES)) m_ICache(
+                 .VICTIM_ENTRIES(VICTIM_ENTRIES), .L2_ENABLE(L2_SIZE_BYTES != 0)) m_ICache(
             .clk(clk), .rst(start),
             .readAddr(imem_phys_addr),
             .inst(inst),
             .hit(icache_hit),
             .busy(icache_busy),
-            .done(icache_done)
+            .done(icache_done),
+            .probe_req(icache_probe_req), .probe_addr(icache_probe_addr), .probe_ack(icache_probe_ack),
+            .m_cyc(icache_l2_m_cyc), .m_stb(icache_l2_m_stb), .m_addr(icache_l2_m_addr),
+            .m_sel(icache_l2_m_sel), .m_funct3(icache_l2_m_funct3),
+            .m_data_i(icache_l2_m_data_i), .m_ack(icache_l2_m_ack)
         );
+
+        // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). I-side
+        // L2 splice: point-to-point, no shared bus/MemoryController
+        // involvement (I-mem is a physically private array -- confirmed by
+        // research before this phase's own design pass). At L2_SIZE_BYTES==0
+        // this branch doesn't elaborate at all -- ICache.v's own m_cyc/m_stb
+        // above are already tied 0 by its own L2_ENABLE=0 internal generate
+        // split, and icache_probe_req is tied 0 here. (Already inside the
+        // enclosing gen_icache_writeback `generate` scope -- Icarus rejects
+        // a second nested `generate` keyword, not just a second `if`.)
+        if (L2_SIZE_BYTES == 0) begin : gen_l2_icache_disabled
+            assign icache_probe_req = 1'b0;
+            assign icache_probe_addr = {XLEN{1'b0}};
+        end else begin : gen_l2_icache_enabled
+            L2Cache #(.XLEN(XLEN), .WAYS(L2_WAYS), .CACHE_SIZE_BYTES(L2_SIZE_BYTES),
+                      .LINE_BYTES(ICACHE_LINE_BYTES), .REPLACEMENT_POLICY(L2_REPLACEMENT_POLICY),
+                      .WITH_DIRTY(0)) m_L2Cache_I(
+                .clk(clk), .rst(start),
+                .u_cyc(icache_l2_m_cyc), .u_stb(icache_l2_m_stb), .u_we(1'b0),
+                .u_addr(icache_l2_m_addr), .u_data_o({XLEN{1'b0}}),
+                .u_sel(icache_l2_m_sel), .u_funct3(icache_l2_m_funct3),
+                .u_data_i(icache_l2_m_data_i), .u_ack(icache_l2_m_ack),
+                .m_cyc(l2i_m_cyc), .m_stb(l2i_m_stb), .m_we(l2i_m_we),
+                .m_addr(l2i_m_addr), .m_data_o(l2i_m_data_o), .m_sel(l2i_m_sel), .m_funct3(l2i_m_funct3),
+                .m_data_i(l2i_m_data_i), .m_ack(l2i_m_ack),
+                .probe_req(icache_probe_req), .probe_addr(icache_probe_addr), .probe_ack(icache_probe_ack),
+                .probe_dirty(1'b0), .probe_data({(XLEN*(ICACHE_LINE_BYTES/4)){1'b0}}),
+                .access_hit(), .access_miss()
+            );
+            wire l2i_m_cyc, l2i_m_stb, l2i_m_we;
+            wire [XLEN-1:0] l2i_m_addr, l2i_m_data_o;
+            wire [`WB_SEL_WIDTH-1:0] l2i_m_sel;
+            wire [2:0] l2i_m_funct3;
+            wire [XLEN-1:0] l2i_m_data_i;
+            wire l2i_m_ack;
+            InstructionMemoryWishboneAdapter #(.SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN), .INIT_FILE(INIT_FILE)) m_IMemAdapter(
+                .clk(clk), .rst(start),
+                .s_cyc(l2i_m_cyc), .s_stb(l2i_m_stb), .s_we(l2i_m_we),
+                .s_addr(l2i_m_addr), .s_data_o(l2i_m_data_o), .s_sel(l2i_m_sel),
+                .s_data_i(l2i_m_data_i), .s_ack(l2i_m_ack)
+            );
+        end
     end
     endgenerate
     //
@@ -3069,6 +3145,24 @@ end
         assign dcache_mshr_complete_data = {XLEN{1'b0}};
         assign dcache_mshr_outstanding = 1'b0;
     end else begin : gen_dcache_writeback
+        // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). DCache.v's
+        // own Wishbone-master port -- renamed to dcache_l1_m_* here (was
+        // dcache_m_* directly). When L2 is disabled, this is a plain
+        // passthrough to the outer dcache_m_*/readData/lsu_ack wires MemoryController
+        // consumes below, bit-identical to pre-Phase-F. When L2 is enabled,
+        // it instead targets L2Cache_D's own u_* slave port, and the outer
+        // dcache_m_* wires become L2Cache_D's own downstream m_* port.
+        wire dcache_l1_m_cyc, dcache_l1_m_stb, dcache_l1_m_we;
+        wire [XLEN-1:0] dcache_l1_m_addr, dcache_l1_m_data_o;
+        wire [3:0] dcache_l1_m_sel;
+        wire [2:0] dcache_l1_m_funct3, dcache_l1_m_cti;
+        wire [XLEN-1:0] dcache_l1_m_data_i;
+        wire dcache_l1_m_ack;
+
+        wire dcache_probe_req, dcache_probe_ack, dcache_probe_dirty;
+        wire [XLEN-1:0] dcache_probe_addr;
+        wire [XLEN*(DCACHE_LINE_BYTES/4)-1:0] dcache_probe_data;
+
         DCache #(.XLEN(XLEN), .WAYS(DCACHE_WAYS), .CACHE_SIZE_BYTES(DCACHE_SIZE_BYTES),
                  .LINE_BYTES(DCACHE_LINE_BYTES), .REPLACEMENT_POLICY(REPLACEMENT_POLICY),
                  .VICTIM_ENTRIES(VICTIM_ENTRIES), .BURST_ENABLE(BURST_ENABLE),
@@ -3094,12 +3188,55 @@ end
             // dirty/clean state yet for the scan to act on.
             .flush_all(fence_pending_r && !ptw_busy && !fence_flush_started_r && !dcache_mshr_outstanding),
             .flush_busy(dcache_flush_busy), .flush_done(dcache_flush_done),
-            .m_cyc(dcache_m_cyc), .m_stb(dcache_m_stb), .m_we(dcache_m_we),
-            .m_addr(dcache_m_addr), .m_data_o(dcache_m_data_o), .m_sel(dcache_m_sel),
-            .m_funct3(dcache_m_funct3), .m_cti(dcache_m_cti),
-            .m_data_i(readData), .m_ack(lsu_ack),
+            .m_cyc(dcache_l1_m_cyc), .m_stb(dcache_l1_m_stb), .m_we(dcache_l1_m_we),
+            .m_addr(dcache_l1_m_addr), .m_data_o(dcache_l1_m_data_o), .m_sel(dcache_l1_m_sel),
+            .m_funct3(dcache_l1_m_funct3), .m_cti(dcache_l1_m_cti),
+            .m_data_i(dcache_l1_m_data_i), .m_ack(dcache_l1_m_ack),
+            .probe_req(dcache_probe_req), .probe_addr(dcache_probe_addr), .probe_ack(dcache_probe_ack),
+            .probe_dirty(dcache_probe_dirty), .probe_data(dcache_probe_data),
             .access_hit(dcache_access_hit), .access_miss(dcache_access_miss)
         );
+
+        // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). D-side L2
+        // splice. At L2_SIZE_BYTES==0, a plain passthrough (no L2Cache
+        // instance elaborates at all) -- bit-identical to pre-Phase-F.
+        // (Already inside the enclosing gen_dcache_writeback `generate`
+        // scope -- no second `generate` keyword needed/allowed here.)
+        if (L2_SIZE_BYTES == 0) begin : gen_l2_dcache_disabled
+            assign dcache_m_cyc    = dcache_l1_m_cyc;
+            assign dcache_m_stb    = dcache_l1_m_stb;
+            assign dcache_m_we     = dcache_l1_m_we;
+            assign dcache_m_addr   = dcache_l1_m_addr;
+            assign dcache_m_data_o = dcache_l1_m_data_o;
+            assign dcache_m_sel    = dcache_l1_m_sel;
+            assign dcache_m_funct3 = dcache_l1_m_funct3;
+            assign dcache_m_cti    = dcache_l1_m_cti;
+            assign dcache_l1_m_data_i = readData;
+            assign dcache_l1_m_ack    = lsu_ack;
+            assign dcache_probe_req  = 1'b0;
+            assign dcache_probe_addr = {XLEN{1'b0}};
+        end else begin : gen_l2_dcache_enabled
+            L2Cache #(.XLEN(XLEN), .WAYS(L2_WAYS), .CACHE_SIZE_BYTES(L2_SIZE_BYTES),
+                      .LINE_BYTES(DCACHE_LINE_BYTES), .REPLACEMENT_POLICY(L2_REPLACEMENT_POLICY),
+                      .WITH_DIRTY(1)) m_L2Cache_D(
+                .clk(clk), .rst(start),
+                .u_cyc(dcache_l1_m_cyc), .u_stb(dcache_l1_m_stb), .u_we(dcache_l1_m_we),
+                .u_addr(dcache_l1_m_addr), .u_data_o(dcache_l1_m_data_o),
+                .u_sel(dcache_l1_m_sel), .u_funct3(dcache_l1_m_funct3),
+                .u_data_i(dcache_l1_m_data_i), .u_ack(dcache_l1_m_ack),
+                .m_cyc(dcache_m_cyc), .m_stb(dcache_m_stb), .m_we(dcache_m_we),
+                .m_addr(dcache_m_addr), .m_data_o(dcache_m_data_o), .m_sel(dcache_m_sel), .m_funct3(dcache_m_funct3),
+                .m_data_i(readData), .m_ack(lsu_ack),
+                .probe_req(dcache_probe_req), .probe_addr(dcache_probe_addr), .probe_ack(dcache_probe_ack),
+                .probe_dirty(dcache_probe_dirty), .probe_data(dcache_probe_data),
+                .access_hit(), .access_miss()
+            );
+            // L2's own downstream traffic never bursts this phase (deferred
+            // -- L2Cache.v's own header/ADR Future improvements) -- DCache.v's
+            // own BURST_ENABLE hint (dcache_l1_m_cti) is swallowed at L2's
+            // slave port and never propagates further.
+            assign dcache_m_cti = `CTI_CLASSIC;
+        end
     end
     endgenerate
 
