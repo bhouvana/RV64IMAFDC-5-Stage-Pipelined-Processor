@@ -529,20 +529,22 @@ wire dual_dispatch_room = (rob_count <= (ROB_ENTRIES - 2))
                           && (!needs_dest_1 || fl_alloc_ok1);
 wire do_dispatch_slot1 = do_dispatch && try_dual_issue && dual_dispatch_room;
 
-// FreeList only needs to actually GRANT when this cycle's instruction
-// really needs a destination -- fl_alloc_ok0/1 are combinational
-// regardless (queried before deciding do_dispatch*, see above), and
-// only actually consumed (alloc_en asserted) once each slot's own
-// do_dispatch* is known. alloc_en1 is unconditional on needs_dest_1 alone
-// (not do_dispatch_slot1) -- same benign "wastes a preg on a cycle that
-// doesn't end up using it" pattern slot0's own alloc_en0 already has,
-// harmless since the RAT/ROB writes that would reference it stay
-// correctly gated by do_dispatch_slot1 itself.
+// FreeList's own alloc_en0/1 stay a pure QUERY (fl_alloc_ok0/1 combinational
+// regardless of do_dispatch* -- dispatch_stall itself needs to know room
+// BEFORE do_dispatch is decided, see FreeList.v's own header for the
+// combinational-cycle reason this can't be gated). Gen6-L fix (docs/
+// adr/0048): the ACTUAL pop is commit_en0/1, gated on each slot's own
+// CONFIRMED do_dispatch/do_dispatch_slot1 -- without this, every cycle
+// dispatch stalls for an unrelated reason (ROB/RS/LSQ full, a same-
+// bundle class mismatch) while needs_dest/needs_dest_1 is also true
+// permanently orphaned one physical register (a real, confirmed deadlock,
+// found by this project's own OoO verification tooling -- see the ADR).
 FreeList #(.NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS)) m_FreeList(
     .clk(clk), .rst(rst),
     .alloc_en0(needs_dest), .alloc_en1(needs_dest_1),
     .alloc_preg0(fl_alloc_preg0), .alloc_preg1(fl_alloc_preg1),
     .alloc_ok0(fl_alloc_ok0), .alloc_ok1(fl_alloc_ok1),
+    .commit_en0(do_dispatch && needs_dest), .commit_en1(do_dispatch_slot1 && needs_dest_1),
     // Gen6-H: gated !is_fp_dest -- a float-destination entry's own
     // old_preg lives in the FLOAT preg space, and must be reclaimed by
     // FreeList_Float below instead, never this (integer) FreeList.
@@ -592,6 +594,10 @@ FreeList #(.NUM_PREGS(NUM_FPREGS), .NUM_AREGS(NUM_FREGS)) m_FreeList_Float(
     .alloc_en0(is_fp_op), .alloc_en1(1'b0),
     .alloc_preg0(fl_f_alloc_preg0), .alloc_preg1(),
     .alloc_ok0(fl_f_alloc_ok0), .alloc_ok1(),
+    // Gen6-L fix (docs/adr/0048): same commit_en0 gating as m_FreeList
+    // above -- no FP dual-issue in Gen6-K's own scope, so commit_en1
+    // stays tied 0, matching alloc_en1 already being tied 0 here.
+    .commit_en0(do_dispatch && is_fp_op), .commit_en1(1'b0),
     .free_en0(rob_retire_valid0 && rob_retire_has_dest0 && rob_retire_is_fp_dest0), .free_preg0(rob_retire_old_preg0),
     .free_en1(rob_retire_valid1 && rob_retire_has_dest1 && rob_retire_is_fp_dest1), .free_preg1(rob_retire_old_preg1),
     .free_count()

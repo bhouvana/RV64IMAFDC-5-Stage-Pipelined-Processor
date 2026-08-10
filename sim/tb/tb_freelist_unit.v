@@ -1,11 +1,22 @@
 `include "FreeList.v"
 
-// Generation 6, Gen6-A. Standalone unit test for FreeList.v, fully
-// independent of RegisterAliasTable.v/PhysicalRegisterFile.v/OOOCore.v --
-// drives alloc_en*/free_en* directly. NUM_PREGS=8/NUM_AREGS=6 -> a tiny
-// CAPACITY=2 free list so exhaustion/refill/wraparound are all reachable
-// in a handful of cycles, mirroring tb_scoreboard_unit.v's own
-// small-parameter-for-coverage convention.
+// Generation 6, Gen6-A (extended Gen6-L, docs/adr/0048). Standalone unit
+// test for FreeList.v, fully independent of RegisterAliasTable.v/
+// PhysicalRegisterFile.v/OOOCore.v -- drives alloc_en*/commit_en*/free_en*
+// directly. NUM_PREGS=8/NUM_AREGS=6 -> a tiny CAPACITY=2 free list so
+// exhaustion/refill/wraparound are all reachable in a handful of cycles,
+// mirroring tb_scoreboard_unit.v's own small-parameter-for-coverage
+// convention.
+//
+// Gen6-L (docs/adr/0048): alloc_en/alloc_ok are now a pure QUERY,
+// independent of whether the caller's own dispatch actually happens --
+// commit_en is the separate, real pop trigger. Every pre-existing case
+// below now drives commit_en == alloc_en (the old, single-phase behavior:
+// "query and immediately commit"), preserving their own original meaning
+// bit-for-bit. Case 8 is new: proves the actual bug this fix closes --
+// a query that succeeds but whose commit is WITHHELD (simulating a
+// caller's dispatch_stall firing for an unrelated reason) must NOT
+// consume the entry; it must still be there on a later query/commit.
 module tb_freelist_unit;
     reg clk = 0;
     always #5 clk = ~clk;
@@ -29,6 +40,7 @@ module tb_freelist_unit;
 
     reg        rst = 0;
     reg        alloc_en0 = 0, alloc_en1 = 0;
+    reg        commit_en0 = 0, commit_en1 = 0;
     reg        free_en0 = 0, free_en1 = 0;
     reg  [2:0] free_preg0 = 0, free_preg1 = 0;
     wire [2:0] alloc_preg0, alloc_preg1;
@@ -40,6 +52,7 @@ module tb_freelist_unit;
         .alloc_en0(alloc_en0), .alloc_en1(alloc_en1),
         .alloc_preg0(alloc_preg0), .alloc_preg1(alloc_preg1),
         .alloc_ok0(alloc_ok0), .alloc_ok1(alloc_ok1),
+        .commit_en0(commit_en0), .commit_en1(commit_en1),
         .free_en0(free_en0), .free_preg0(free_preg0),
         .free_en1(free_en1), .free_preg1(free_preg1),
         .free_count(free_count)
@@ -59,8 +72,9 @@ module tb_freelist_unit;
         #1;
         check_val(alloc_ok0, 1'b1, "case2: alloc_ok0 asserted, a preg is free");
         check_val(alloc_preg0, 3'd6, "case2: alloc_preg0 == 6, first free entry");
+        commit_en0 = 1;
         @(posedge clk); #1;
-        alloc_en0 = 0;
+        alloc_en0 = 0; commit_en0 = 0;
         check_val(free_count, 2'd1, "case2: free_count drops to 1 after the pop");
 
         // -- Case 3: allocate two in one cycle -- only 1 left, slot0 gets
@@ -71,8 +85,9 @@ module tb_freelist_unit;
         check_val(alloc_ok0, 1'b1, "case3: alloc_ok0 -- last free entry");
         check_val(alloc_preg0, 3'd7, "case3: alloc_preg0 == 7, the remaining free entry");
         check_val(alloc_ok1, 1'b0, "case3: alloc_ok1 -- list now empty, slot1 gets nothing");
+        commit_en0 = 1; commit_en1 = 0;   // alloc_ok1 was 0 -- committing it would violate ASSERT_ON
         @(posedge clk); #1;
-        alloc_en0 = 0; alloc_en1 = 0;
+        alloc_en0 = 0; alloc_en1 = 0; commit_en0 = 0;
         check_val(free_count, 2'd0, "case3: free_count == 0, list exhausted");
 
         // -- Case 4: exhausted list refuses any further allocation --
@@ -105,8 +120,9 @@ module tb_freelist_unit;
         check_val(alloc_preg0, 3'd6, "case6: alloc_preg0 == 6, FIFO order preserved");
         check_val(alloc_ok1, 1'b1, "case6: alloc_ok1 after refill");
         check_val(alloc_preg1, 3'd7, "case6: alloc_preg1 == 7, FIFO order preserved");
+        commit_en0 = 1; commit_en1 = 1;
         @(posedge clk); #1;
-        alloc_en0 = 0; alloc_en1 = 0;
+        alloc_en0 = 0; alloc_en1 = 0; commit_en0 = 0; commit_en1 = 0;
 
         // -- Case 7: simultaneous alloc + free the same cycle, non-
         // overlapping pregs -- both proceed independently --
@@ -123,6 +139,37 @@ module tb_freelist_unit;
         @(posedge clk); #1;
         free_en0 = 0; alloc_en0 = 0;
         check_val(free_count, 2'd1, "case7: free_count == 1 after the settled push");
+
+        // -- Case 8 (Gen6-L, docs/adr/0048's own real bug): a query that
+        // succeeds but whose commit is WITHHELD -- simulating a caller
+        // whose dispatch_stall fires for an unrelated reason the same
+        // cycle needs_dest/alloc_ok0 were both true -- must NOT consume
+        // the entry. Before this fix, alloc_ok0 alone drove the pop, so
+        // this exact scenario silently orphaned a physical register
+        // every time it occurred; a real, confirmed deadlock in
+        // design/OOOCore.v under sustained load (bench_sum_array.s under
+        // bench_runner.py --compare-ooo).
+        @(negedge clk);
+        alloc_en0 = 1;
+        #1;
+        check_val(alloc_ok0, 1'b1, "case8: alloc_ok0 -- one entry free (case7's own settled push)");
+        // commit_en0 deliberately left 0 -- query succeeds, commit withheld.
+        @(posedge clk); #1;
+        alloc_en0 = 0;
+        check_val(free_count, 2'd1, "case8: free_count UNCHANGED -- query alone must never pop");
+
+        // -- Case 9: the SAME entry the withheld query in case8 pointed at
+        // is still there, and a real commit now (query + commit together)
+        // correctly retrieves it -- no leak, no double-pop.
+        @(negedge clk);
+        alloc_en0 = 1;
+        #1;
+        check_val(alloc_ok0, 1'b1, "case9: alloc_ok0 -- the same entry case8 never actually took");
+        check_val(alloc_preg0, 3'd6, "case9: alloc_preg0 == 6 -- case7's own reclaimed preg, untouched by case8's withheld commit");
+        commit_en0 = 1;
+        @(posedge clk); #1;
+        alloc_en0 = 0; commit_en0 = 0;
+        check_val(free_count, 2'd0, "case9: free_count == 0 -- exactly one real pop happened across case8+case9");
 
         if (fails == 0) $display("PASS  freelist_unit (%0d checks)", checks);
         else $display("FAIL  freelist_unit (%0d/%0d checks failed)", fails, checks);
