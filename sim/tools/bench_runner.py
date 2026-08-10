@@ -92,6 +92,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from iss import ISS  # noqa: E402
+from random_gen import OOO_TRAILER_NOP_COUNT  # noqa: E402
 
 # Per-benchmark memory size override (bytes; shared by instruction and data
 # memory, see design/riscvpipeline.v's MEM_SIZE_BYTES). Default 128 (every
@@ -229,6 +230,163 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
             "dcache_misses": dcache_misses}, None
 
 
+# Generation 6, Gen6-L4. bench_sum_array.s is EXPECTED to FAIL under
+# --compare-ooo today -- not a tooling bug, a real, confirmed, root-caused
+# OOOCore.v deadlock this tooling found: FreeList.v's alloc_en0/alloc_en1
+# (and PhysicalRegisterFile.v's own alloc_en-driven valid-clear) are
+# unconditional on needs_dest/needs_dest_1 alone, NOT gated by the actual
+# do_dispatch/do_dispatch_slot1 decision -- necessary today to avoid a
+# genuine combinational cycle (dispatch_stall's own fl_alloc_ok0 term would
+# otherwise depend on itself through do_dispatch), but means every cycle
+# dispatch stalls for ANY reason (rob_full/rs_alu_full/lsq_full/a store
+# forcing try_dual_issue false) while needs_dest is simultaneously true
+# silently ORPHANS one physical register permanently. Confirmed by direct
+# RTL trace, not assumed: a store immediately followed by a WAW-renamed
+# ALU instruction in a real sustained loop (bench_sum_array.s's own
+# fill_loop, >=8 iterations) exhausts the 32-entry free pool and
+# permanently deadlocks dispatch -- the concrete, previously-theoretical
+# manifestation of design/OOOCore.v's own Gen6-D header comment ("no real
+# resource-exhaustion stall beyond a simple whole-cycle bubble... genuinely
+# insufficient for sustained high-occupancy execution"). A real fix needs
+# a query/commit split on FreeList.v's (and possibly
+# PhysicalRegisterFile.v's) own alloc interface -- availability must
+# become a pure function of internal state, with a separate, later-gated
+# commit pulse (tied to the CONFIRMED dispatch decision) doing the actual
+# pop/clear. Out of Gen6-L's own verification-tooling scope; real future
+# work, not attempted here -- this is exactly what building this tooling
+# was for: bench_fib.s (no memory ops) never exercises sustained
+# dispatch_stall-while-needs_dest, so it was never going to surface this.
+#
+# --compare-ooo's own supported benchmark subset --
+# bench_bubble_sort.s uses `jal x0, inner`/`jal x0, outer` as genuine
+# backward-loop control flow (not just the shared halt trailer every
+# kernel ends in), and OOOCore.v cannot execute jal at all (jump_c is
+# decoded, design/Control.v, but never consumed anywhere in
+# design/OOOCore.v -- confirmed by direct code read, same finding
+# random_gen.py's own gen_program docstring documents). Real future work
+# once/if OOOCore.v ever implements jal, not attempted here -- excluded
+# rather than silently producing a meaningless comparison.
+OOO_COMPATIBLE_BENCHES = ("bench_fib", "bench_sum_array")
+
+
+def strip_halt_trailer_for_ooo(text):
+    """Gen6-L4: every sim/benchmarks/bench_*.s kernel ends in the identical
+    `fence` + `halt:` + `jal x0, halt` block -- replaces it with plain nop
+    padding instead, same convention random_gen.py's own ooo mode uses and
+    for the same reason (see that module's gen_program docstring): jal
+    doesn't redirect PC in OOOCore.v, so the "self-loop" doesn't loop, and
+    OOOCore.v's frontend would otherwise keep fetching/dispatching past the
+    kernel's own real end into the zero-filled tail, eventually tripping
+    the illegal-opcode trap and restarting the whole program from address
+    0 (measured directly building random_gen.py's own ooo mode -- a
+    restart every ~100-150 cycles on a real generated program, far too
+    fast to let retirement-counting termination land reliably otherwise).
+    """
+    lines = text.splitlines()
+    cut = next((i for i, ln in enumerate(lines) if ln.strip() == "fence"), None)
+    if cut is None:
+        raise ValueError("no `fence` trailer line found -- benchmark doesn't match the expected shape")
+    return "\n".join(lines[:cut] + ["addi x0, x0, 0"] * OOO_TRAILER_NOP_COUNT) + "\n"
+
+
+def run_bench_ooo(name, prog_s, work_dir, iverilog_bin, mem_size, xlen=64):
+    """Gen6-L4: OOOCore.v's own --compare-ooo path. Runs the ORIGINAL
+    (unmodified, real jal-halting) file through iss.py for both the
+    EXPECTED_X10 correctness cross-check AND the DYNAMIC instruction count
+    (iss.run()'s own return value -- how many instructions actually
+    execute/retire, accounting for every loop iteration, NOT asm.py's
+    static per-file count) -- unlike sim/tools/run_random_tests.py's own
+    run_one_ooo(), whose generated programs are forward-only by
+    construction (random_gen.py's gen_program never emits a backward
+    branch), these are real hand-written kernels with real loops, so the
+    static and dynamic counts genuinely differ (a real bug found by
+    running: using the static count terminated the RTL run after roughly
+    one loop iteration, an impossible-looking 20x "speedup" was the tell).
+    The RTL run itself uses a SEPARATE, nop-trailer-stripped assembly of
+    the same source (jal doesn't work in OOOCore.v, see
+    strip_halt_trailer_for_ooo's own docstring), targeting that same
+    dynamic count for its own retirement-counting termination.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(prog_s) as f:
+        original_text = f.read()
+
+    # Correctness cross-check on the ORIGINAL (unmodified, real jal-halt)
+    # file -- iss.py handles jal correctly, no need to strip anything here.
+    prog_mem_orig = os.path.join(work_dir, f"{name}_ooo_orig.mem")
+    asm_py = os.path.join(here, "asm.py")
+    r = subprocess.run([sys.executable, asm_py, prog_s, "-o", prog_mem_orig,
+                         "--size", str(mem_size), "--xlen", str(xlen)],
+                        capture_output=True, text=True)
+    if r.returncode != 0:
+        return None, f"assembler error (original): {r.stderr.strip()}"
+    words = load_words(prog_mem_orig)
+    iss = ISS(mem_size=mem_size, xlen=xlen)
+    try:
+        # Gen6-L4: unlike run_one_ooo()'s own forward-only-by-construction
+        # generated programs (random_gen.py's gen_program never emits a
+        # backward branch), these are real hand-written kernels with real
+        # loops -- the DYNAMIC instruction count (how many times
+        # instructions actually execute/retire, iss.run()'s own return
+        # value) is what OOOCore.v's retirement counter below needs to
+        # match, not asm.py's STATIC per-file instruction count (which
+        # would only ever cover one loop iteration, terminating the RTL
+        # run absurdly early -- a real bug found by running: an
+        # impossible-looking 20x "speedup" was the tell).
+        dynamic_instrs = iss.run(words, max_steps=200000)
+    except Exception as e:  # noqa: BLE001
+        return None, f"ISS error: {e}"
+    expected = EXPECTED_X10.get(name)
+    if expected is not None and iss.regs[10] != expected:
+        return None, f"ISS correctness check failed: x10={iss.regs[10]}, expected {expected}"
+    target_retired = dynamic_instrs
+    if target_retired <= 0:
+        return None, f"ISS reported dynamic_instrs={dynamic_instrs} <= 0"
+
+    stripped_text = strip_halt_trailer_for_ooo(original_text)
+    prog_s_ooo = os.path.join(work_dir, f"{name}_ooo.s")
+    with open(prog_s_ooo, "w") as f:
+        f.write(stripped_text)
+    prog_mem = os.path.join(work_dir, f"{name}_ooo.mem")
+    r = subprocess.run([sys.executable, asm_py, prog_s_ooo, "-o", prog_mem,
+                         "--size", str(mem_size), "--xlen", str(xlen)],
+                        capture_output=True, text=True)
+    if r.returncode != 0:
+        return None, f"assembler error (stripped): {r.stderr.strip()}"
+
+    max_time = (target_retired * 70 + 500) * 10
+    tag = f"{name}_ooo"
+    dump_v = os.path.join(work_dir, f"{tag}.v")
+    out_path = os.path.join(work_dir, f"{tag}.out").replace("\\", "/")
+    init_file_rel = os.path.relpath(prog_mem, start=os.getcwd()).replace("\\", "/")
+    template = os.path.join(here, "..", "tb", "bench_ooocore_template.v")
+    with open(template) as f:
+        tpl = f.read()
+    tpl = (tpl.replace("__INIT_FILE__", init_file_rel).replace("__MAX_TIME__", str(max_time))
+              .replace("__OUT_FILE__", out_path).replace("__MEM_SIZE__", str(mem_size))
+              .replace("__XLEN__", str(xlen)).replace("__TARGET_RETIRED__", str(target_retired)))
+    with open(dump_v, "w") as f:
+        f.write(tpl)
+
+    vvp_path = os.path.join(work_dir, f"{tag}.vvp")
+    iverilog_exe = os.path.join(iverilog_bin, "iverilog.exe") if iverilog_bin else "iverilog"
+    vvp_exe = os.path.join(iverilog_bin, "vvp.exe") if iverilog_bin else "vvp"
+    r = subprocess.run([iverilog_exe, "-g2005", "-I", "design", "-o", vvp_path, dump_v],
+                        capture_output=True, text=True)
+    if r.returncode != 0:
+        return None, f"compile error: {r.stderr.strip()[:500]}"
+    r = subprocess.run([vvp_exe, vvp_path], capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(out_path):
+        return None, f"simulation error: {r.stdout.strip()[:500]} {r.stderr.strip()[:500]}"
+    if "TIMEOUT" in r.stdout:
+        return None, f"RTL never reached target retirement count: {r.stdout.strip()[:300]}"
+
+    with open(out_path) as f:
+        vals = [int(l.strip()) for l in f if l.strip()]
+    cycles = vals[0]
+    return {"instructions": target_retired, "cycles": cycles, "ipc": target_retired / cycles}, None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--iverilog-dir", default=None)
@@ -332,7 +490,37 @@ def main():
                                "(at --hazard-strategy/--pipeline-profile/--branch-predictor/"
                                "--replacement-policy, forced --cache-mode 1 and --mshr-entries 2 since "
                                "D$ prefetching is a no-op otherwise) and report the delta")
+    compare.add_argument("--compare-ooo", action="store_true",
+                          help="Gen6-L4: run PIPELINED (default config, --hazard-strategy/--pipeline-"
+                               "profile/--branch-predictor/--cache-mode/... all as passed) vs. OOOCore.v "
+                               "on bench_fib.s/bench_sum_array.s only (bench_bubble_sort.s excluded -- "
+                               "see OOO_COMPATIBLE_BENCHES's own comment) and report the cycle/IPC delta. "
+                               "A separate code path entirely, not part of the axis/pairs machinery below "
+                               "(none of PIPELINED's own config knobs apply to OOOCore.v)")
     args = ap.parse_args()
+
+    if args.compare_ooo:
+        here = os.path.dirname(os.path.abspath(__file__))
+        pipe_template = os.path.join(here, "..", "tb", "bench_template.v")
+        with tempfile.TemporaryDirectory() as work_dir:
+            for name in OOO_COMPATIBLE_BENCHES:
+                prog_s = os.path.join(args.programs_dir, f"{name}.s")
+                if not os.path.exists(prog_s):
+                    print(f"FAIL  {name}: not found under {args.programs_dir}")
+                    continue
+                mem_size = MEM_SIZE_OVERRIDES.get(name, 128)
+                pipe_result, pipe_err = run_bench(name, prog_s, work_dir, args.iverilog_dir, pipe_template,
+                                                   mem_size, xlen=64)
+                ooo_result, ooo_err = run_bench_ooo(name, prog_s, work_dir, args.iverilog_dir,
+                                                     max(mem_size, 512), xlen=64)
+                if pipe_err or ooo_err:
+                    print(f"FAIL  {name}: PIPELINED: {pipe_err or 'ok'}  OOOCore: {ooo_err or 'ok'}")
+                    continue
+                delta_pct = (ooo_result["cycles"] - pipe_result["cycles"]) / pipe_result["cycles"] * 100
+                print(f"{name:<18} PIPELINED cycles={pipe_result['cycles']:<6} IPC={pipe_result['ipc']:.3f}"
+                      f"   OOOCore cycles={ooo_result['cycles']:<6} IPC={ooo_result['ipc']:.3f}"
+                      f"   delta={delta_pct:+.1f}%")
+        sys.exit(0)
 
     if args.compare_latency and args.mem_latency_i == 0 and args.mem_latency_d == 0:
         args.mem_latency_i = args.mem_latency_d = 3
