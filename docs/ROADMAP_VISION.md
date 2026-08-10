@@ -399,23 +399,37 @@ retrofit register renaming onto `riscvpipeline.v`'s existing in-order
 
 **Release:** Out-of-Order RV64 Processor v6.0.
 
-**Status, 2026-08-10: Phases A-J in progress, IN PROGRESS not closed**
-(`docs/adr/0047-out-of-order-core-gen6-a-through-j.md`). Generation 5
-(multicore) was explicitly skipped, per user request, straight to this
-generation. `design/OOOCore.v` — a genuinely new top-level module,
+**Status, 2026-08-10: Phases A-L done, IN PROGRESS not closed**
+(`docs/adr/0047-out-of-order-core-gen6-a-through-j.md`,
+`docs/adr/0048-dual-issue-and-ooo-verification-tooling-gen6-k-l.md`).
+Generation 5 (multicore) was explicitly skipped, per user request, straight
+to this generation. `design/OOOCore.v` — a genuinely new top-level module,
 coexists with `PIPELINED`, never modifies it, exactly as this section's
 own note above requires. Register renaming, physical register file,
 reservation stations, reorder buffer, and load/store queue are all real
 and built (Gen6-A/B/C/E); Tomasulo-style tag-compare wakeup is real
 (Gen6-C); speculative execution is real but scope-cut to a single
 outstanding branch, not a deep wrong-path window (Gen6-G); dual-issue is
-NOT yet built (single-issue throughout so far) — see the ADR's own Future
-improvements for exactly what Gen6-K needs and why it wasn't attempted in
-the same pass as A-J. INT-ALU, MUL/DIV, a real (deliberately narrow) F-
-extension slice, precise exceptions (no MMU/interrupts yet), and LR-only
-atomics are all live and tested end-to-end; SC/general-AMO/FDIV/FSQRT/
-FMADD/FLW/FSW/Sv39/interrupts are real, explicitly flagged future work,
-not silently dropped. 122/122 directed suite, zero-warning compile.
+real for plain-ALU pairs (Gen6-K — falls back to single-issue for any other
+class combination; still single-execute, one ALU functional unit). INT-ALU,
+MUL/DIV, a real (deliberately narrow) F-extension slice, precise exceptions
+(no MMU/interrupts yet), and LR-only atomics are all live and tested
+end-to-end; SC/general-AMO/FDIV/FSQRT/FMADD/FLW/FSW/Sv39/interrupts are
+real, explicitly flagged future work, not silently dropped.
+
+Gen6-L (verification tooling) found and root-caused a real, unfixed
+deadlock: `FreeList.v`'s alloc grant is unconditional on `needs_dest`
+alone, not gated by the actual dispatch decision — every cycle dispatch
+stalls for any reason while `needs_dest` is also true silently orphans one
+physical register permanently. A store followed by a WAW-renamed ALU
+instruction in a real sustained loop (≥8 iterations) exhausts the 32-entry
+free pool and hangs dispatch (`bench_sum_array.s` under
+`bench_runner.py --compare-ooo`) — the concrete proof of Gen6-D's own
+"genuinely insufficient for sustained high-occupancy execution" caveat.
+Not fixed yet; see ADR 0048's own Future improvements. Constrained-random
+cross-check (50/50 seeds, `run_random_tests.py --ooo`) and formal ROB
+properties (`sim/formal/rob_formal.sv`, bounded proof) also new this phase.
+123/123 directed suite, zero-warning compile.
 
 ---
 
