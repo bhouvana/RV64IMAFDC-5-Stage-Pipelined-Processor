@@ -447,6 +447,31 @@ addi/slli and use `beq x0,x0,label` (always-taken) for loops/halt
 instead of jal — real, documented, working within OOOCore.v's own
 current scope. 125/125 directed suite, zero-warning compile.
 
+**Gen6-O (`docs/adr/0051`): lui/auipc/jal/jalr/csrrX all now real in
+OOOCore.v.** Closes the exact gap Gen6-N's own worker-program
+workarounds above had to route around. `lui`/`auipc`: a new RS_ALU
+payload field (`use_forced_a`/`forced_a_value`) overrides the ALU's
+own operand A with a captured constant (0, or this instruction's own
+PC) — purely additive, no dispatch changes. `jal`: target is known
+unconditionally at decode (no register dependency), so it redirects
+immediately, no speculation needed at all. `jalr`: target IS
+register-dependent — reuses the simpler single-outstanding
+stall-and-wait scope cut (`trap_inflight_valid_r`'s own shape, Gen6-I)
+rather than a full BTB-predicted window; real future work if profiling
+ever shows this mattering. `csrrw`/`csrrs`/`csrrc`(+i): same
+single-outstanding shape, but the old-value READ (captured at
+dispatch) and the real WRITE (fired at resolve, once the operand is
+ready) are provably independent given the scope cut's own mutual
+exclusion — `CSR.v` itself needed zero changes. All five excluded from
+Gen6-K's own dual-issue eligibility (real, deliberate scope cut).
+Found and fixed one real bug by running: a directed test's own tail
+was plain nop padding instead of a real halt, letting OOOCore.v fall
+off the end and restart from address 0 within the test's own fixed
+cycle window — corrupting a check that (unlike every other Gen6-O
+check) compared against *persistent* CSR state across that restart;
+fixed with `beq x0,x0,halt` (a genuine working infinite loop). 129/129
+directed suite, zero-warning compile.
+
 ---
 
 ## Generation 7 — Vector Processing (v7.0)

@@ -73,11 +73,21 @@ module OOOCore #(
     parameter FAREG_BITS = $clog2(NUM_FREGS),
     parameter FPREG_BITS = $clog2(NUM_FPREGS),
     parameter ROB_IDX_BITS = $clog2(ROB_ENTRIES),
-    // Reservation-station payload: {ALUSrc, ALUCtl[4:0], imm[XLEN-1:0]}.
+    // Reservation-station payload: {use_forced_a, use_link_b,
+    // forced_a_value[XLEN-1:0], ALUSrc, ALUCtl[4:0], imm[XLEN-1:0]}.
     // ALUSrc tells the execute step whether operand B is the decoded
     // immediate (I-type) or PhysicalRegisterFile's own src2 read
-    // (R-type) -- see the execute section below.
-    parameter PAYLOAD_BITS = 1 + 5 + XLEN
+    // (R-type) -- see the execute section below. Gen6-O (docs/adr/0051):
+    // use_forced_a/forced_a_value/use_link_b added for lui/auipc/jal/
+    // jalr/csrrX -- none of these compute their own destination value
+    // from a normal two-PRF-operand ALU op the way R/I-type instructions
+    // do (lui: 0+imm; auipc/jal/jalr-link: PC+something; csrrX: the
+    // CSR's own old value), so the execute stage's own operand-A/B
+    // selection needs an escape hatch from the ordinary PRF-read path,
+    // captured once at DISPATCH time (when the real value -- 0, this
+    // instruction's own PC, or the CSR's own current value -- is known)
+    // and carried through RS_ALU exactly like ALUSrc/imm already are.
+    parameter PAYLOAD_BITS = 1 + 1 + XLEN + 1 + 5 + XLEN
 )(
     input wire clk,
     input wire rst,   // active-low, same convention as every other
@@ -214,6 +224,36 @@ wire has_exception = illegalOpcode_c || isEcall_c;
 wire is_trap_related = has_exception || isMret_c;
 
 // ==========================================================================
+// Gen6-O (docs/adr/0051): lui/auipc/jal/jalr/csrrX. jump_c/jalr_c/lui_c/
+// auipc_c/isCsr_c were decoded (Control.v) since Gen6-D but never
+// consumed anywhere in this file until now (confirmed by direct code
+// read before Gen6-L's own verification tooling ever ran, and again
+// before this phase touched anything) -- OOOCore.v silently mis-executed
+// or no-op'd every one of these; see docs/adr/0048's own "real bugs/
+// findings" for the exact failure mode each one had.
+wire is_lui   = lui_c;
+wire is_auipc = auipc_c;
+wire is_jal   = jump_c && !jalr_c;   // Control.v sets jump=1 for BOTH
+                                       // jal and jalr; jalr additionally
+                                       // sets jalr=1 -- jump&&!jalr
+                                       // isolates the decode-time-
+                                       // resolvable case (see the PC-
+                                       // advance block further down).
+wire is_jalr  = jalr_c;
+wire is_csr   = isCsr_c;
+// Gen6-K's own dual-issue scope deliberately excludes all five of these
+// (single-issue only) -- see try_dual_issue's own definition further
+// down for why (real, flagged scope cut, not an oversight): each one
+// needs the NEW force-a/link-b payload machinery below, and jalr/csrrX
+// specifically need their own single-outstanding speculative-resolution
+// state (jr_inflight_valid_r/csr_inflight_valid_r further down), neither
+// of which this phase extends to a hypothetical slot1 -- doubling every
+// one of Gen6-K's own already-real same-bundle hazard concerns for a
+// class of instructions real code uses far less densely than plain ALU
+// ops, for no proven benefit yet.
+wire is_lui_auipc_jal_jalr_csr = is_lui || is_auipc || is_jal || is_jalr || is_csr;
+
+// ==========================================================================
 // Gen6-H: F-extension, scoped to a real, tested, but deliberately narrow
 // subset -- see design/OOOCore.v's own Gen6-H section further down (right
 // before the float rename stack) for the full rationale on which funct5
@@ -343,6 +383,52 @@ always @(posedge clk) begin
 end
 
 // ==========================================================================
+// Gen6-O4 (docs/adr/0051): jalr, single-outstanding scope cut -- same
+// shape as trap_inflight_valid_r (Gen6-I), NOT br_inflight's own BTB-
+// predicted speculative one: jalr's own target is register-dependent
+// (rs1+imm), genuinely unknowable at decode the way jal's own PC+imm
+// is, but ALSO not worth a real BTB-predicted speculative window for
+// this phase's own scope (jalr is far rarer in real code than a
+// conditional branch, and "predict + verify + squash-free recovery"
+// doesn't save anything if fetch/dispatch simply holds still instead
+// of ever speculating past an unresolved jalr at all -- the exact same
+// "no deep wrong-path window" real scope cut this whole generation
+// already uses for traps). Real future work: a genuine BTB-predicted
+// jalr, same shape as conditional branches, if profiling ever shows
+// this stall costing real cycles on a workload using function-pointer/
+// return-style jalr densely.
+// ==========================================================================
+reg                     jr_inflight_valid_r;
+reg [ROB_IDX_BITS-1:0]  jr_inflight_rob_tag_r;
+reg [XLEN-1:0]          jr_inflight_imm_r;
+
+wire jr_resolve = issue_valid && jr_inflight_valid_r && (issue_rob_tag == jr_inflight_rob_tag_r);
+// JALR spec: target = (rs1 + imm) & ~1. prf_rdata2 is rs1's own raw PRF
+// read -- untouched by this same RS_ALU entry's own use_forced_a0
+// override (which only ever affects alu_a/alu_out for the LINK value,
+// never prf_rdata2 itself).
+wire [XLEN-1:0] jr_target_raw = prf_rdata2 + jr_inflight_imm_r;
+wire [XLEN-1:0] jr_target = {jr_target_raw[XLEN-1:1], 1'b0};
+
+always @(posedge clk) begin
+    if (~rst) begin
+        jr_inflight_valid_r <= 1'b0;
+    end
+    else begin
+        if (do_dispatch && is_jalr) begin
+            jr_inflight_valid_r   <= 1'b1;
+            jr_inflight_rob_tag_r <= rob_alloc_tag0;
+            jr_inflight_imm_r     <= imm_d;   // plain I-type, NOT <<1 --
+                                                // see ImmGen.v's own jalr
+                                                // case comment
+        end
+        else if (jr_resolve) begin
+            jr_inflight_valid_r <= 1'b0;
+        end
+    end
+end
+
+// ==========================================================================
 // Gen6-K: dual-issue widening. `# ponytail`-tagged scope cut, real and
 // bounded, found by SCOPING this (not discovered mid-RTL): dual-dispatch
 // only when BOTH slot0 AND slot1 are plain integer ALU ops (neither is
@@ -411,8 +497,13 @@ wire is_fp_op_1 = fRegWrite_c_1 && (
 
 // Both slots must be plain ALU (regWrite integer OP/OP-IMM, no other
 // side effects) for dual-issue to even be considered this cycle.
-wire slot0_is_plain_alu = !is_mem_op && !is_div_op && !is_fp_op && !is_branch && !is_trap_related;
-wire slot1_is_plain_alu = !is_mem_op_1 && !is_div_op_1 && !is_fp_op_1 && !is_branch_1 && !is_trap_related_1;
+wire slot0_is_plain_alu = !is_mem_op && !is_div_op && !is_fp_op && !is_branch && !is_trap_related && !is_lui_auipc_jal_jalr_csr;
+// Gen6-O: slot1's own equivalent exclusion -- lui_c_1/auipc_c_1/jump_c_1/
+// jalr_c_1/isCsr_c_1 are slot1's own decode outputs (Gen6-K's own second
+// Control.v instance), already computed, never consumed until now for
+// the identical reason slot0's own versions weren't before this phase.
+wire is_lui_auipc_jal_jalr_csr_1 = lui_c_1 || auipc_c_1 || jump_c_1 || jalr_c_1 || isCsr_c_1;
+wire slot1_is_plain_alu = !is_mem_op_1 && !is_div_op_1 && !is_fp_op_1 && !is_branch_1 && !is_trap_related_1 && !is_lui_auipc_jal_jalr_csr_1;
 wire try_dual_issue = slot0_is_plain_alu && slot1_is_plain_alu;
 
 // Same-fetch-bundle RAW bypass -- the one genuinely new correctness-
@@ -529,8 +620,17 @@ wire dispatch_stall = rob_full
                                                   // branch-speculation
                                                   // section's own header
                                                   // comment
-                      || trap_inflight_valid_r;  // Gen6-I: same scope cut,
+                      || trap_inflight_valid_r   // Gen6-I: same scope cut,
                                                   // for exceptions/mret
+                      || jr_inflight_valid_r     // Gen6-O4: same scope cut,
+                                                  // for jalr (its own
+                                                  // target is register-
+                                                  // dependent, unlike
+                                                  // jal's decode-time-known
+                                                  // one -- see jr_inflight's
+                                                  // own section below)
+                      || csr_inflight_valid_r;   // Gen6-O5: same scope cut,
+                                                  // for csrrw/csrrs/csrrc(+i)
 wire do_dispatch     = !dispatch_stall;
 
 // Gen6-K: room for a SECOND dispatch this cycle, checked independently
@@ -707,14 +807,86 @@ end
 
 wire [XLEN-1:0] csr_mtvec_val, csr_mepc_val;
 
+// ==========================================================================
+// Gen6-O5 (docs/adr/0051): csrrw/csrrs/csrrc(+i), single-outstanding
+// scope cut -- same shape as jr_inflight/trap_inflight (dispatch of
+// everything else stalls until this resolves). Real research finding
+// (confirmed before writing any of this, matching this whole
+// generation's own established discipline): the READ (rd's own old-
+// value writeback) and the WRITE (the actual mutation) do NOT need to
+// happen at the same pipeline moment. Given the single-outstanding
+// scope cut already guarantees NOTHING else (no other csrrX, no trap/
+// mret, since dispatch_stall blocks ALL of them mutually exclusively)
+// can touch any CSR state between this instruction's own dispatch and
+// its own resolve, reading csr_rdata combinationally AT DISPATCH TIME
+// (captured into forced_a_value0 above, same "force A" mechanism lui/
+// auipc/jal/jalr already use, giving rd its old-value writeback via the
+// ORDINARY RS_ALU->issue->CDB pipeline, no new completion path needed)
+// is PROVABLY identical to reading it again at resolve time -- nothing
+// could have changed it in between. The WRITE still needs the real
+// operand value (rs1's PRF read for csrrw/csrrs/csrrc, or the captured
+// 5-bit uimm for the *i forms), which may not be ready at dispatch time
+// (rs1 could be an in-flight instruction's own result) -- so the write
+// itself fires at RESOLVE (RS_ALU actually issuing this entry, rs1
+// confirmed ready), exactly mirroring jr_resolve's own timing.
+// ==========================================================================
+reg                  csr_inflight_valid_r;
+reg [ROB_IDX_BITS-1:0] csr_inflight_rob_tag_r;
+reg [11:0]           csr_inflight_addr_r;
+reg [1:0]            csr_inflight_op_r;
+reg                  csr_inflight_is_imm_r;
+reg [XLEN-1:0]       csr_inflight_uimm_r;
+
+wire csr_write_fire = issue_valid && csr_inflight_valid_r && (issue_rob_tag == csr_inflight_rob_tag_r);
+wire [XLEN-1:0] csr_wdata_final = csr_inflight_is_imm_r ? csr_inflight_uimm_r : prf_rdata2;
+
+always @(posedge clk) begin
+    if (~rst) begin
+        csr_inflight_valid_r <= 1'b0;
+    end
+    else begin
+        if (do_dispatch && is_csr) begin
+            csr_inflight_valid_r   <= 1'b1;
+            csr_inflight_rob_tag_r <= rob_alloc_tag0;
+            csr_inflight_addr_r    <= imm_d[11:0];   // ImmGen.v's own
+                                                        // SYSTEM case
+                                                        // (zero-extended
+                                                        // inst[31:20])
+            csr_inflight_op_r      <= funct3_c[1:0];   // 01=write,
+                                                          // 10=set,
+                                                          // 11=clear --
+                                                          // same funct3
+                                                          // slice
+                                                          // riscvpipeline.v
+                                                          // already uses
+            csr_inflight_is_imm_r  <= funct3_c[2];     // 1 = csrrwi/
+                                                          // csrrsi/csrrci
+                                                          // (uimm, not
+                                                          // rs1)
+            csr_inflight_uimm_r    <= {{(XLEN-5){1'b0}}, rs1_areg};   // inst[19:15]
+                                                                        // IS the
+                                                                        // 5-bit uimm
+                                                                        // field for
+                                                                        // the *i forms
+                                                                        // -- same bit
+                                                                        // position
+                                                                        // rs1_areg
+                                                                        // already reads
+        end
+        else if (csr_write_fire) begin
+            csr_inflight_valid_r <= 1'b0;
+        end
+    end
+end
+
 // Every HPC/performance-counter pulse input and every S-mode/MMU-only
-// output is tied off/left open this phase -- CSR read/write instructions
-// (csrrw/csrrs/csrrc) themselves aren't dispatched/executed yet either
-// (csr_write_en permanently 0); only the trap-entry/mret machinery is
-// live. Real future work alongside the MMU/interrupts noted above.
+// output is tied off/left open this phase -- real future work alongside
+// the MMU/interrupts noted above.
 CSR #(.XLEN(XLEN)) m_CSR(
     .clk(clk), .rst(rst),
-    .csr_write_en(1'b0), .csr_addr(12'd0), .csr_op(2'd0), .csr_wdata({XLEN{1'b0}}), .csr_rdata(),
+    .csr_write_en(csr_write_fire),
+    .csr_addr(csr_write_fire ? csr_inflight_addr_r : imm_d[11:0]),
+    .csr_op(csr_inflight_op_r), .csr_wdata(csr_wdata_final), .csr_rdata(csr_old_value_captured),
     .trap_taken(csr_trap_taken), .trap_pc(trap_inflight_pc_r),
     .trap_cause({{(XLEN-32){1'b0}}, trap_inflight_cause_r}), .trap_is_interrupt(1'b0),
     .trap_value({XLEN{1'b0}}),
@@ -735,10 +907,27 @@ CSR #(.XLEN(XLEN)) m_CSR(
     .stall_icache_pulse(1'b0), .stall_imem_wait_pulse(1'b0)
 );
 
+// Gen6-O (docs/adr/0051): lui/auipc/jal/jalr/csrrX's own operand-A
+// override, captured once at DISPATCH time (this cycle's pc_r/csr old
+// value, before either can possibly change) and carried through RS_ALU
+// via the payload -- see this module's own PAYLOAD_BITS comment.
+// use_link_b (jal/jalr only): forces operand B to the literal 4, giving
+// alu_out = pc_r+4, the real link value written to rd -- jalr's own
+// REAL target (rs1+imm) is computed separately, at resolve time, from
+// prf_rdata2 (rs1's raw, untouched-by-this-override PRF read) further
+// down (see jr_inflight_* below).
+wire [XLEN-1:0] csr_old_value_captured;   // wired in the CSR section below (Gen6-O5)
+wire use_forced_a0 = is_lui || is_auipc || is_jal || is_jalr || is_csr;
+wire use_link_b0   = is_jal || is_jalr;
+wire [XLEN-1:0] forced_a_value0 =
+    is_lui   ? {XLEN{1'b0}} :
+    is_csr   ? csr_old_value_captured :
+               pc_r;   // auipc/jal/jalr-link all want THIS instruction's own PC
+
 // Dispatch-time readiness query -- rs1/rs2's CURRENT physical tags
 // (rat_rpreg0/1, from the SAME-cycle RAT read above, still the
 // pre-rename mapping) queried against PRF's own rvalid.
-wire [PAYLOAD_BITS-1:0] rs_disp_payload0 = {ALUSrc_c, ALUCtl_d, imm_d};
+wire [PAYLOAD_BITS-1:0] rs_disp_payload0 = {use_forced_a0, use_link_b0, forced_a_value0, ALUSrc_c, ALUCtl_d, imm_d};
 
 wire [PREG_BITS-1:0] issue_src1_preg, issue_src2_preg;
 wire [PAYLOAD_BITS-1:0] issue_payload;
@@ -757,7 +946,10 @@ wire [PREG_BITS-1:0] rs_alu_disp1_src1_preg = slot1_src1_from_slot0 ? fl_alloc_p
 wire                 rs_alu_disp1_src1_ready = slot1_src1_from_slot0 ? 1'b0 : prf_rvalid9;
 wire [PREG_BITS-1:0] rs_alu_disp1_src2_preg = slot1_src2_from_slot0 ? fl_alloc_preg0 : rat_rpreg3;
 wire                 rs_alu_disp1_src2_ready = slot1_src2_from_slot0 ? 1'b0 : prf_rvalid10;
-wire [PAYLOAD_BITS-1:0] rs_disp_payload1 = {ALUSrc_c_1, ALUCtl_d_1, imm_d_1};
+// Gen6-O: slot1 is never lui/auipc/jal/jalr/csrrX (slot1_is_plain_alu's
+// own exclusion, see is_lui_auipc_jal_jalr_csr_1 above) -- these three
+// fields are always irrelevant for slot1's own payload, tied off.
+wire [PAYLOAD_BITS-1:0] rs_disp_payload1 = {1'b0, 1'b0, {XLEN{1'b0}}, ALUSrc_c_1, ALUCtl_d_1, imm_d_1};
 
 ReservationStation #(.RS_ENTRIES(RS_ALU_ENTRIES), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(PAYLOAD_BITS)) m_RS_ALU(
     .clk(clk), .rst(rst),
@@ -881,12 +1073,19 @@ DataMemoryBRAM #(.SIZE_BYTES(DMEM_SIZE_BYTES), .XLEN(XLEN)) m_DMem(
 // PRF-valid the cycle they're selected (RS only selects entries whose
 // ready bits are set), so this is always live, never garbage, data.
 // ==========================================================================
-wire issue_alusrc         = issue_payload[PAYLOAD_BITS-1];
-wire [4:0] issue_aluctl    = issue_payload[PAYLOAD_BITS-2 -: 5];
+// Gen6-O: use_forced_a/use_link_b/forced_a_value sit ABOVE the original
+// {ALUSrc, ALUCtl, imm} sub-layout (which keeps its own original bit
+// positions unchanged, [XLEN+5:0]) -- see this module's own
+// PAYLOAD_BITS comment for the exact layout.
+wire issue_use_forced_a    = issue_payload[PAYLOAD_BITS-1];
+wire issue_use_link_b      = issue_payload[PAYLOAD_BITS-2];
+wire [XLEN-1:0] issue_forced_a_value = issue_payload[PAYLOAD_BITS-3 -: XLEN];
+wire issue_alusrc         = issue_payload[XLEN+5];
+wire [4:0] issue_aluctl    = issue_payload[XLEN+4 -: 5];
 wire [XLEN-1:0] issue_imm  = issue_payload[XLEN-1:0];
 
-wire [XLEN-1:0] alu_a = prf_rdata2;
-wire [XLEN-1:0] alu_b = issue_alusrc ? issue_imm : prf_rdata3;
+wire [XLEN-1:0] alu_a = issue_use_forced_a ? issue_forced_a_value : prf_rdata2;
+wire [XLEN-1:0] alu_b = issue_use_link_b ? {{(XLEN-3){1'b0}}, 3'd4} : (issue_alusrc ? issue_imm : prf_rdata3);
 wire [XLEN-1:0] alu_out;
 wire alu_zero, alu_branch_zero;
 
@@ -1169,11 +1368,28 @@ always @(posedge clk) begin
         pc_r <= csr_trap_taken ? csr_mtvec_val : csr_mepc_val;
     else if (br_resolve && br_mispredict)
         pc_r <= br_correct_target;
+    else if (jr_resolve)   // Gen6-O4: jalr's own resolve-time redirect --
+                             // same "can't coincide with do_dispatch"
+                             // argument as br_resolve/trap_resolve's own
+                             // (jr_inflight_valid_r is folded into
+                             // dispatch_stall too) -- always redirects,
+                             // no "mispredict" concept needed since
+                             // nothing ever speculates past an
+                             // unresolved jalr in the first place (see
+                             // jr_inflight's own section above).
+        pc_r <= jr_target;
     else if (do_dispatch)
         // Gen6-K: do_dispatch_slot1 only ever fires alongside try_dual_issue,
-        // which by construction excludes is_branch (slot0_is_plain_alu) --
-        // so the two arms below never actually compete for the same cycle.
-        pc_r <= (is_branch && predicted_taken) ? predicted_target :
+        // which by construction excludes is_branch/is_jal/is_jalr/is_csr
+        // (slot0_is_plain_alu) -- so none of these arms ever actually
+        // compete for the same cycle. Gen6-O3: is_jal's own target is
+        // known unconditionally at decode (pc_r + the J-type immediate,
+        // <<1 same as branch targets -- ImmGen.v's own J-type case
+        // deliberately outputs the pre-shift value, see br_inflight_imm_r's
+        // own identical comment above) -- no prediction needed, this is
+        // always correct, unlike is_branch's own predicted_target.
+        pc_r <= is_jal ? (pc_r + (imm_d << 1)) :
+                (is_branch && predicted_taken) ? predicted_target :
                 (do_dispatch_slot1 ? (pc_r + 8) : (pc_r + 4));
 end
 
