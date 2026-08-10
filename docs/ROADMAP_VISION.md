@@ -308,7 +308,23 @@ honest stopping point for Generation 3 as currently scoped. See
   pre-existing, unrelated bug (`DCache.v` never supported RV64 `ld`/`sd`,
   found via a combination — `--xlen 64` + `--cache-mode 1` — no prior
   phase's own sweep had ever exercised together).
-- **Hardware prefetchers** — next-line, stride, stream.
+- **Hardware prefetchers** — next-line, stride, stream. **DONE (Phase G,
+  `docs/adr/0046`)**: new standalone `design/Prefetcher.v` (one
+  implementation, two instances — a single-global-entry address predictor,
+  not PC-indexed, since neither cache has a per-access PC available), live
+  as a new `PREFETCH_MODE` parameter (`PF_NEXT_LINE`=1/`PF_STRIDE`=2/
+  `PF_STREAM`=3). Opportunistic reuse of each cache's own existing fill
+  machinery — D$ via a flagged MSHR entry (needs `MSHR_ENTRIES>1`), I$ via
+  its own single-entry FSM reuse (needs `L2_ENABLE=1`) — deliberately no
+  new bus master, no `MemoryController.v` change. Found and fixed a real
+  deadlock (an unbounded predicted address got no bus ack at all, hanging
+  the pipeline forever) and a real, pre-existing, unrelated scoreboard bug
+  latent since Phase E (`scoreboard_stall` missed the exact cycle a fresh
+  MSHR allocation fires, a one-cycle registration race letting a RAW/WAW
+  consumer read garbage). An honest, small, mixed-sign delta on this
+  project's own tiny benchmark kernels (+0.7%/+0.0%/-2.1%) — the real
+  mechanism proof is a direct `access_hit`/`access_miss` check on the
+  hand-built worked example, not the benchmark numbers.
 - **Non-blocking cache** — multiple outstanding misses, MSHRs. **DONE
   (Phase E, `docs/adr/0044`)**: a real `MSHR_ENTRIES`-deep outstanding-
   load-miss queue on `design/DCache.v`, `pc_stall` decoupled from a D$
@@ -335,6 +351,9 @@ honest stopping point for Generation 3 as currently scoped. See
   -18.3% on real kernels), not a capacity-dependent one. Found and fixed two
   real, deep, previously-invisible pre-existing D$ fill-path bugs along the
   way (a stuck read-ack level, and `resp_rdata` returning the wrong word).
+
+**Generation 4 (Advanced Memory Architecture v4.0) is now CLOSED** — every
+item above is done as of Phase G (`docs/adr/0046`).
 
 **Release:** Advanced Memory Architecture v4.0.
 
