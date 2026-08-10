@@ -74,7 +74,17 @@ module DCache #(
     // >1 lets a second (and further) load miss be accepted into the queue
     // while an earlier one is still filling. Not yet consumed anywhere as
     // of this commit.
-    parameter MSHR_ENTRIES = 1
+    parameter MSHR_ENTRIES = 1,
+    // Generation 4, Phase G (docs/adr/0046-hardware-prefetchers-phase-g.md).
+    // 0 (default, PF_OFF) = disabled, bit-exact with pre-Phase-G behavior.
+    // 1/2/3 (PF_NEXT_LINE/PF_STRIDE/PF_STREAM) drive an opportunistic
+    // background prefetch through the existing MSHR array whenever the
+    // cache is otherwise idle -- see Prefetcher.v's own header and this
+    // file's own prefetch_fire wire below. Requires MSHR_ENTRIES>1 to have
+    // any effect (a solo prefetch at MSHR_ENTRIES==1 would block a real
+    // access with no way to overlap it -- documented no-op otherwise,
+    // mirroring VICTIM_ENTRIES/L2_SIZE_BYTES's own "no-op unless X" family).
+    parameter PREFETCH_MODE = 0
 )(
     input clk,
     input rst,
@@ -210,6 +220,12 @@ localparam MSHR_COUNT_BITS = $clog2(MSHR_ENTRIES + 1);
 localparam POLICY_ROUND_ROBIN = 0;
 localparam POLICY_FIFO        = 1;
 localparam POLICY_LRU         = 2;
+
+// PREFETCH_MODE values (docs/adr/0046) -- same enum ICache.v's own copy uses.
+localparam PF_OFF       = 0;
+localparam PF_NEXT_LINE = 1;
+localparam PF_STRIDE    = 2;
+localparam PF_STREAM    = 3;
 
 wire [WORD_OFF_BITS-1:0] word_off = req_addr[OFFSET_BITS-1:2];
 wire [1:0]               byte_off = req_addr[1:0];
@@ -437,6 +453,77 @@ assign access_hit  = (state == S_IDLE && req_write && hit) ||
 assign access_miss = ((state == S_IDLE) && (req_read || req_write) && !hit) ||
                       mshr_busy_dispatch_miss;
 
+// docs/adr/0046-hardware-prefetchers-phase-g.md (Generation 4, Phase G).
+// Fires the predictor on every genuine demand-miss (access_miss's own
+// exactly-once-per-real-miss discipline, reused verbatim -- no new hook).
+// See Prefetcher.v's own header for why this is a single-global-entry
+// predictor, not a PC-indexed table.
+wire pf_valid_w;
+wire [XLEN-1:0] pf_addr_w;
+Prefetcher #(.XLEN(XLEN), .LINE_BYTES(LINE_BYTES), .MODE(PREFETCH_MODE)) m_prefetcher(
+    .clk(clk), .rst(rst),
+    .update_valid(access_miss),
+    .update_addr({req_addr[XLEN-1:OFFSET_BITS], {OFFSET_BITS{1'b0}}}),
+    .pf_valid(pf_valid_w), .pf_addr(pf_addr_w)
+);
+
+// A second, independent tag/set decode against the PREDICTED address --
+// same "arbitrary address, not req_addr" pattern the inclusion probe port
+// above already establishes (see probe_tag/probe_set_idx).
+wire [SET_BITS-1:0] pf_set_idx;
+generate
+if (SET_BITS == 0) begin : gen_pf_set_idx_fully_assoc
+    assign pf_set_idx = 1'b0;
+end else begin : gen_pf_set_idx_normal
+    assign pf_set_idx = pf_addr_w[OFFSET_BITS+SET_BITS-1:OFFSET_BITS];
+end
+endgenerate
+wire [TAG_BITS-1:0] pf_tag = pf_addr_w[XLEN-1:OFFSET_BITS+SET_BITS];
+
+wire [WAYS-1:0] pf_way_hit;
+generate
+    for (gw = 0; gw < WAYS; gw = gw + 1) begin : gen_pf_compare
+        assign pf_way_hit[gw] = valid[pf_set_idx*WAYS + gw] && (tag_arr[pf_set_idx*WAYS + gw] == pf_tag);
+    end
+endgenerate
+wire pf_found = |pf_way_hit;
+
+// Same conflict check mshr_addr_line_conflict already performs against
+// req_addr's own tag/set, mirrored here against the PREDICTED tag/set --
+// a prefetch must never target a line an outstanding MSHR already owns.
+wire [MSHR_ENTRIES-1:0] pf_mshr_line_match;
+generate
+    for (gm = 0; gm < MSHR_ENTRIES; gm = gm + 1) begin : gen_pf_mshr_conflict
+        assign pf_mshr_line_match[gm] = mshr_valid[gm] && (mshr_tag[gm] == pf_tag) && (mshr_set[gm] == pf_set_idx);
+    end
+endgenerate
+wire pf_mshr_conflict = |pf_mshr_line_match;
+
+// Victim-way choice for the PREDICTED set -- same POLICY_LRU/round-robin
+// choice victim_target_way already makes for req_addr's own set, mirrored
+// for pf_set_idx (age[]/victim[] are indexed by set; this just reads a
+// DIFFERENT set's own entries).
+wire [WAYS-1:0]     pf_is_lru_way;
+wire [WAY_BITS-1:0] pf_lru_way_acc [0:WAYS];
+assign pf_lru_way_acc[0] = {WAY_BITS{1'b0}};
+generate
+    for (gw = 0; gw < WAYS; gw = gw + 1) begin : gen_pf_lru_victim
+        assign pf_is_lru_way[gw]    = (age[pf_set_idx][gw] == WAYS-1);
+        assign pf_lru_way_acc[gw+1] = pf_lru_way_acc[gw] | (pf_is_lru_way[gw] ? gw[WAY_BITS-1:0] : {WAY_BITS{1'b0}});
+    end
+endgenerate
+wire [WAY_BITS-1:0] pf_victim_way = (REPLACEMENT_POLICY == POLICY_LRU) ? pf_lru_way_acc[WAYS] : victim[pf_set_idx];
+wire pf_victim_is_dirty = valid[pf_set_idx*WAYS + pf_victim_way] && dirty[pf_set_idx*WAYS + pf_victim_way];
+
+// A prefetch only fires with a spare MSHR slot to hold it non-blockingly
+// (MSHR_ENTRIES==1 permanently disables it -- see PREFETCH_MODE's own
+// header comment), never evicts a dirty line (would force a real, eager
+// writeback just for speculation), never targets an already-resident or
+// already-in-flight line.
+wire prefetch_fire = (PREFETCH_MODE != PF_OFF) && (MSHR_ENTRIES > 1)
+    && pf_valid_w && !pf_found && !pf_mshr_conflict && !pf_victim_is_dirty
+    && (mshr_count_r < MSHR_ENTRIES);
+
 // Width/sign extension for a load, mirroring DataMemoryBRAM.v's own
 // funct3-keyed case exactly, generalized with a byte_off since this
 // cache's storage is one register per WORD (not a flat byte array) --
@@ -557,6 +644,12 @@ reg                     mshr_early_retired[0:MSHR_ENTRIES-1];
 reg                     mshr_need_wb  [0:MSHR_ENTRIES-1];
 reg [LINE_IDX_BITS-1:0] mshr_wb_line  [0:MSHR_ENTRIES-1];
 reg [XLEN-1:0]          mshr_wb_base  [0:MSHR_ENTRIES-1];
+// docs/adr/0046-hardware-prefetchers-phase-g.md (Generation 4, Phase G).
+// True iff this entry is a speculative background prefetch, not a real
+// caller's request -- excludes it from resp_ready/mshr_complete (nothing
+// real is waiting on it), while the ordinary array-commit logic (valid/
+// tag_arr/dirty/victim/age) runs identically either way.
+reg                     mshr_is_prefetch[0:MSHR_ENTRIES-1];
 reg [MSHR_COUNT_BITS-1:0] mshr_count_r;            // 0..MSHR_ENTRIES, occupancy
 reg [MSHR_IDX_BITS-1:0] mshr_head_r, mshr_tail_r;  // FIFO service order
 // Hit-under-miss: a read that resolves as a genuine main-array hit while
@@ -837,8 +930,11 @@ task mshr_alloc;
     input [LINE_IDX_BITS-1:0]  a_wb_line;
     input [XLEN-1:0]           a_wb_base;
     input                      a_early_retired;
+    // docs/adr/0046-hardware-prefetchers-phase-g.md (Generation 4, Phase G).
+    input                      a_is_prefetch;
     begin
         mshr_valid[slot]        <= 1'b1;
+        mshr_is_prefetch[slot]  <= a_is_prefetch;
         mshr_set[slot]          <= a_set;
         mshr_way[slot]          <= a_way;
         mshr_tag[slot]          <= a_tag;
@@ -879,8 +975,10 @@ always @(posedge clk) begin
         mshr_head_r  <= {MSHR_IDX_BITS{1'b0}};
         mshr_tail_r  <= {MSHR_IDX_BITS{1'b0}};
         hu_pending_r <= 1'b0;
-        for (reset_m = 0; reset_m < MSHR_ENTRIES; reset_m = reset_m + 1)
-            mshr_valid[reset_m] <= 1'b0;
+        for (reset_m = 0; reset_m < MSHR_ENTRIES; reset_m = reset_m + 1) begin
+            mshr_valid[reset_m]      <= 1'b0;
+            mshr_is_prefetch[reset_m]<= 1'b0;
+        end
     end
     else begin
         flush_done_r <= 1'b0;   // default: one-cycle pulse, cleared unless set below
@@ -946,7 +1044,8 @@ always @(posedge clk) begin
                        valid[set_idx*WAYS + victim_target_way] && dirty[set_idx*WAYS + victim_target_way],
                        set_idx*WAYS + victim_target_way,
                        {tag_arr[set_idx*WAYS + victim_target_way], set_idx, {OFFSET_BITS{1'b0}}},
-                       1'b1);   // always early-retired -- mshr_alloc_now (mshr_busy_dispatch_miss) already requires req_int_load
+                       1'b1,    // always early-retired -- mshr_alloc_now (mshr_busy_dispatch_miss) already requires req_int_load
+                       1'b0);   // a_is_prefetch -- a real caller's own request, never speculative
                        // No victim-cache interaction for a queued-while-busy
                        // entry (vc_do_swap/vc_do_insert stay gated
                        // state==S_IDLE, unchanged) -- deliberate scope cut,
@@ -1095,7 +1194,8 @@ always @(posedge clk) begin
                                    valid[set_idx*WAYS + victim_target_way] && dirty[set_idx*WAYS + victim_target_way],
                                    set_idx*WAYS + victim_target_way,
                                    {tag_arr[set_idx*WAYS + victim_target_way], set_idx, {OFFSET_BITS{1'b0}}},
-                                   mshr_fresh_load_miss);   // the SAME condition that actually granted mshr_accept for this allocation -- see mshr_alloc's own header comment for the bug this closes
+                                   mshr_fresh_load_miss,   // the SAME condition that actually granted mshr_accept for this allocation -- see mshr_alloc's own header comment for the bug this closes
+                                   1'b0);   // a_is_prefetch -- a real caller's own request, never speculative
                         mshr_count_r <= mshr_count_r + 1'b1;
                         mshr_tail_r  <= (mshr_tail_r == MSHR_ENTRIES-1) ? {MSHR_IDX_BITS{1'b0}} : mshr_tail_r + 1'b1;
                         // docs/adr/0042. The victim buffer's own eviction
@@ -1136,6 +1236,27 @@ always @(posedge clk) begin
                             state <= S_FILL;
                         end
                     end
+                end
+                // docs/adr/0046-hardware-prefetchers-phase-g.md (Generation
+                // 4, Phase G). Only reached when neither flush_all nor a
+                // real req_read/req_write fired this cycle -- a genuinely
+                // idle S_IDLE cycle. Never needs S_WB first (prefetch_fire
+                // already excludes a dirty victim), so this always goes
+                // straight to S_FILL, unlike a real miss's own two-way fork
+                // above.
+                else if (prefetch_fire) begin
+                    mshr_alloc(mshr_tail_r, pf_set_idx, pf_victim_way, pf_tag, pf_addr_w,
+                               {WORD_OFF_BITS{1'b0}}, 2'b00, 3'b010, 5'b0, {XLEN{1'b0}},
+                               1'b0, {XLEN{1'b0}},
+                               1'b0, {LINE_IDX_BITS{1'b0}}, {XLEN{1'b0}},
+                               1'b1,    // early-retired -- irrelevant, mshr_is_prefetch below separately excludes this entry from resp_ready/mshr_complete regardless
+                               1'b1);   // a_is_prefetch
+                    mshr_count_r  <= mshr_count_r + 1'b1;
+                    mshr_tail_r   <= (mshr_tail_r == MSHR_ENTRIES-1) ? {MSHR_IDX_BITS{1'b0}} : mshr_tail_r + 1'b1;
+                    vwb_pending_r <= 1'b0;
+                    vwb_active_r  <= 1'b0;
+                    fill_word_r   <= {WORD_OFF_BITS{1'b0}};
+                    state         <= S_FILL;
                 end
             end
 
@@ -1273,10 +1394,17 @@ end
 // mshr_complete instead (below). hu_pending_r (hit-under-miss) OR's in
 // directly -- decoupled from `state`/req_addr matching by construction (see
 // its own header comment), and at MSHR_ENTRIES==1 it's permanently 0.
+// docs/adr/0046-hardware-prefetchers-phase-g.md (Generation 4, Phase G). The
+// S_FILL disjunct gains !mshr_is_prefetch[mshr_head_r] -- a speculative
+// prefetch entry has no real caller, so it must never accidentally satisfy
+// a real request's resp_ready even if req_addr happens to coincidentally
+// match mshr_orig_addr (which for a prefetch entry isn't a real caller's
+// address at all).
 assign resp_ready =
     (state == S_IDLE && hit && req_write && (req_read || req_write)) ||
     (state == S_HIT_RD && req_read && req_addr == served_addr_r) ||
     (state == S_FILL && m_ack && fill_is_last_word && !mshr_early_retired[mshr_head_r]
+        && !mshr_is_prefetch[mshr_head_r]
         && (req_read || req_write) && req_addr == mshr_orig_addr[mshr_head_r]) ||
     hu_pending_r;
 
@@ -1321,6 +1449,7 @@ assign resp_rdata =
             ? {hit_rd_word_hi, hit_rd_word}
             : dcache_extend_read(hit_rd_word, hit_funct3_r, hit_byteoff_r)) :
     (state == S_FILL && m_ack && fill_is_last_word && !mshr_early_retired[mshr_head_r]
+        && !mshr_is_prefetch[mshr_head_r]
         && (req_read || req_write) && req_addr == mshr_orig_addr[mshr_head_r])
         ? ((XLEN >= 64 && mshr_funct3[mshr_head_r] == `F3_LOAD_LD)
             ? {resp_fill_word_hi, resp_fill_word}
@@ -1333,7 +1462,12 @@ assign resp_rdata =
 // mshr_complete fires the SAME cycle resp_ready's own S_FILL condition
 // would have fired for a non-early-retired entry, but for the OPPOSITE case
 // -- an early-retired load whose own caller already left.
-assign mshr_complete      = (state == S_FILL) && m_ack && fill_is_last_word && mshr_early_retired[mshr_head_r];
+// docs/adr/0046-hardware-prefetchers-phase-g.md (Generation 4, Phase G).
+// Excludes a completing prefetch entry -- nothing real is waiting for it,
+// so it must never pulse a bogus completion (mshr_complete_reg/_data below
+// would carry meaningless values -- req_dest_reg was never populated for a
+// prefetch dispatch).
+assign mshr_complete      = (state == S_FILL) && m_ack && fill_is_last_word && mshr_early_retired[mshr_head_r] && !mshr_is_prefetch[mshr_head_r];
 assign mshr_complete_reg  = mshr_dest_reg[mshr_head_r];
 // Generation 4 Phase F (docs/adr/0045). Same ld-combining special case
 // resp_rdata's own S_FILL arm uses -- a non-blocking (early-retired) ld
