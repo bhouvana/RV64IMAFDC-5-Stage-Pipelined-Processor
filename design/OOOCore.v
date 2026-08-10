@@ -1,0 +1,677 @@
+`default_nettype none
+
+`include "riscv_defs.vh"
+
+// No `include for the design/*.v modules instantiated below (Control.v,
+// ALUCtrl.v, ImmGen.v, ALU.v, InstructionMemory.v, RegisterAliasTable.v,
+// FreeList.v, PhysicalRegisterFile.v, ReorderBuffer.v,
+// ReservationStation.v) -- matching this project's own established
+// convention (riscvpipeline.v/DCache.v only `include their .vh headers,
+// never sibling design/*.v modules): every design/*.v file is compiled
+// together as siblings in one iverilog invocation (`design/*.v`), so a
+// module `include here would double-declare when that same file is ALSO
+// picked up directly by the glob. Testbenches (which aren't part of that
+// glob) list the full flat dependency chain themselves instead -- see
+// sim/tb/tb_ooocore_alu_d1.v, matching tb_cache_mshr_e1.v's own
+// established flat-include-list precedent.
+
+// Generation 6 (out-of-order core), Gen6-D
+// (C:\Users\poorn\.claude\plans\gen6-ooo-core.md). A genuinely new
+// top-level core -- coexists with, never modifies, `riscvpipeline.v`'s
+// `PIPELINED` (docs/ROADMAP_VISION.md's own explicit Gen6 framing: "a new
+// core, not a modification of the existing pipeline").
+//
+// Gen6-D's OWN scope, deliberately narrow (per the plan file): INT-ALU
+// only (R-type/I-type integer ops -- no branches, no loads/stores, no
+// mul/div, no FP, no MMU, no interrupts, no atomics yet -- each is its
+// own later sub-phase). SINGLE-ISSUE internally for this first bring-up
+// (Gen6-A/B/C's own modules are all already dual-issue-CAPABLE -- 2
+// dispatch/complete/retire ports each -- but this phase only drives
+// slot0 on every one of them, leaving slot1 permanently tied off; Gen6-K
+// widens to real 2-wide once this single-issue skeleton is proven
+// correct end-to-end, matching the plan's own explicitly-flagged "decide
+// at Gen6-D time" contingency).
+//
+// Frontend (fetch/decode/rename/dispatch) is entirely COMBINATIONAL,
+// single cycle, no pipeline latches at all -- a deliberate, flagged
+// simplification for this bring-up: real frontend pipelining (separate
+// F/D/R/D stage registers, almost certainly needed for realistic timing
+// and for Gen6-K's own 2-wide widening) is future work, not attempted
+// here. What Gen6-D actually proves is the OoO BACKEND (rename -> RS ->
+// execute -> CDB -> ROB retire) is correct, decoupled from frontend
+// timing entirely.
+//
+// No resource-exhaustion stall beyond a simple whole-cycle bubble
+// (dispatch_stall, below) -- no real backpressure queueing. Sized
+// generously (ROB_ENTRIES/RS_ALU_ENTRIES/free-preg count all comfortably
+// exceed any realistic straight-line bring-up test program, and
+// single-issue-in/roughly-single-issue-out keeps steady-state occupancy
+// low) -- a real, deliberate simplification, not a hidden risk for
+// THIS phase's own test scope, but genuinely insufficient for sustained
+// high-occupancy execution; flagged, not silently dropped.
+module OOOCore #(
+    parameter XLEN            = 64,
+    parameter NUM_AREGS       = 32,
+    parameter NUM_PREGS       = 64,
+    parameter ROB_ENTRIES     = 16,
+    parameter RS_ALU_ENTRIES  = 8,
+    parameter IMEM_SIZE_BYTES = 4096,
+    parameter IMEM_INIT_FILE  = "sim/programs/arith.mem",
+    parameter DMEM_SIZE_BYTES = 4096,
+    parameter SP_INIT         = 64'd128,
+    parameter BHT_BTB_ENTRIES = 32,   // Gen6-G, matches docs/adr/0021's own default
+
+    parameter AREG_BITS  = $clog2(NUM_AREGS),
+    parameter PREG_BITS  = $clog2(NUM_PREGS),
+    parameter ROB_IDX_BITS = $clog2(ROB_ENTRIES),
+    // Reservation-station payload: {ALUSrc, ALUCtl[4:0], imm[XLEN-1:0]}.
+    // ALUSrc tells the execute step whether operand B is the decoded
+    // immediate (I-type) or PhysicalRegisterFile's own src2 read
+    // (R-type) -- see the execute section below.
+    parameter PAYLOAD_BITS = 1 + 5 + XLEN
+)(
+    input wire clk,
+    input wire rst    // active-low, same convention as every other
+                        // module in this project (Register.v, DCache.v, ...)
+);
+
+// ==========================================================================
+// Fetch (combinational read at pc_r; no cache/MMU yet -- Gen6-D scope)
+// ==========================================================================
+reg [XLEN-1:0] pc_r;
+
+wire [XLEN-1:0] inst_full;
+InstructionMemory #(.INIT_FILE(IMEM_INIT_FILE), .SIZE_BYTES(IMEM_SIZE_BYTES), .XLEN(XLEN)) m_IMem(
+    .readAddr(pc_r),
+    .inst(inst_full)
+);
+wire [31:0] inst_word = inst_full[31:0];   // instructions are always a
+                                            // 32-bit word here -- Gen6-D
+                                            // doesn't support RVC yet.
+
+// ==========================================================================
+// Decode (reuses the SAME Control.v/ALUCtrl.v/ImmGen.v this project's
+// existing PIPELINED core already uses and has already verified --
+// decode logic doesn't care whether the backend is in-order or OoO).
+// ==========================================================================
+wire [4:0] rs1_areg = inst_word[19:15];
+wire [4:0] rs2_areg = inst_word[24:20];
+wire [4:0] rd_areg  = inst_word[11:7];
+
+wire branch_c, memRead_c, memtoReg_c, memWrite_c, ALUSrc_c, regWrite_c;
+wire [1:0] ALUOp_c;
+wire [2:0] funct3_c;
+wire [6:0] funct7_c;
+wire jump_c, jalr_c, lui_c, auipc_c, isCsr_c, isEcall_c, isEbreak_c, isMret_c, isSret_c, isSfenceVma_c, isFence_c, isAmo_c, illegalOpcode_c, fRegWrite_c;
+
+Control #(.XLEN(XLEN)) m_Control(
+    .opcode(inst_word[6:0]),
+    .funt7(inst_word[31:25]),
+    .funt3(inst_word[14:12]),
+    .csr_imm12(inst_word[31:20]),
+    .branch(branch_c), .memRead(memRead_c), .memtoReg(memtoReg_c),
+    .ALUOp(ALUOp_c), .memWrite(memWrite_c), .ALUSrc(ALUSrc_c), .regWrite(regWrite_c),
+    .funct3(funct3_c), .funct7(funct7_c),
+    .jump(jump_c), .jalr(jalr_c), .lui(lui_c), .auipc(auipc_c),
+    .isCsr(isCsr_c), .isEcall(isEcall_c), .isEbreak(isEbreak_c), .isMret(isMret_c),
+    .isSret(isSret_c), .isSfenceVma(isSfenceVma_c), .isFence(isFence_c), .isAmo(isAmo_c),
+    .illegalOpcode(illegalOpcode_c), .fRegWrite(fRegWrite_c)
+);
+
+wire [4:0] ALUCtl_d;
+ALUCtrl m_ALUCtrl(.ALUOp(ALUOp_c), .funct7_c(funct7_c), .funct3_c(funct3_c), .ALUCtl(ALUCtl_d));
+
+wire [XLEN-1:0] imm_d;
+ImmGen #(.Width(XLEN)) m_ImmGen(.inst(inst_full), .imm(imm_d));
+
+// Gen6-D+E's own scope cut: plain integer regWrite ALU ops (OP/OP-IMM)
+// and plain integer loads/stores (LOAD/STORE) are supported --
+// fRegWrite/isCsr/isEcall/branch/jump/isAmo instructions all decode
+// harmlessly (their Control.v outputs are simply never consumed below)
+// but produce no real effect yet; each is its own later Gen6-* sub-phase.
+wire needs_dest = regWrite_c && (rd_areg != 5'd0);
+wire is_mem_op  = memRead_c || memWrite_c;
+// Gen6-F: DIV/DIVU/REM/REMU route to their own reservation station +
+// Divider.v, NOT the single-cycle RS_ALU/ALU.v path -- mirrors
+// riscvpipeline.v's own isDivRem detection exactly (same ALUCtl
+// literals). MUL/MULH/MULHSU/MULHU need no new routing at all: ALU.v
+// already computes them single-cycle (docs/adr/0006), so they already
+// flow correctly through the existing Gen6-D RS_ALU path -- confirmed
+// by this phase's own directed test, not assumed.
+wire is_div_op = (ALUCtl_d == `ALUCTL_DIV) || (ALUCtl_d == `ALUCTL_DIVU) ||
+                 (ALUCtl_d == `ALUCTL_REM) || (ALUCtl_d == `ALUCTL_REMU);
+// Gen6-G: conditional branches also need no new execution unit --
+// ALU.v's own ALUCTL_BEQ/BNE/BLT/BGE/BLE/BGT/BLTU/BGEU family (branch_c
+// selects OPCODE_BRANCH -> ALUOP_BRANCH -> ALUCtrl.v's existing branch
+// case) already computes `branch_zero`, so a branch dispatches through
+// the ordinary RS_ALU/ALU.v path exactly like an ALU op with no
+// destination (regWrite_c is already 0 for OPCODE_BRANCH, matching a
+// store's own has_dest=0 shape). JAL/JALR are explicitly OUT of this
+// phase's own scope -- deferred, not silently dropped; see the header
+// comment on the branch-speculation section below for why.
+wire is_branch = branch_c;
+
+// ==========================================================================
+// Gen6-G: branch speculation. Reuses Gen1's own Bht.v/Btb.v exactly
+// (docs/adr/0021) -- queried combinationally every cycle at pc_r (before
+// even knowing if the fetched instruction IS a branch; is_branch gates
+// whether the prediction is ever acted on, same "untagged, aliasing is
+// harmless" table design those modules already document).
+//
+// `# ponytail`-tagged scope cut, real and load-bearing, not incidental:
+// AT MOST ONE branch may be in flight (dispatched but not yet resolved)
+// at a time -- dispatch of EVERYTHING (not just other branches) stalls
+// until it resolves (br_inflight_valid_r, folded into dispatch_stall
+// below). This means a misprediction NEVER has anything dispatched past
+// the branch to unwind -- no ROB truncation, no RS_ALU/RS_DIV/LSQ flush,
+// no physical-register reclaim, and RegisterAliasTable.v's own
+// restore_en (built in Gen6-A for exactly this) isn't even needed, since
+// no speculative rename divergence can ever happen. Recovery is just "PC
+// was wrong, redirect it." This is a REAL, substantial narrowing from
+// this generation's own originally-confirmed "full speculation, ROB-based
+// squash of an arbitrary wrong-path window" scope -- deep speculation
+// needs RS_ALU/RS_DIV/LSQ entries (and an in-progress division/memory
+// access!) to be abortable mid-flight, a genuinely larger, riskier
+// undertaking flagged here as real future work, not attempted in this
+// pass. What IS real and working here: BHT/BTB-trained prediction, a
+// genuine speculative PC redirect, and correct misprediction recovery --
+// just with a narrow (single-branch) speculative window instead of a
+// deep one.
+//
+// JAL/JALR are explicitly OUT of scope this phase (deferred): JAL's
+// target is unconditionally known at decode (pc+imm, no speculation
+// needed at all), and JALR needs its own BTB-based target prediction --
+// neither shares this section's own "predict direction, verify at
+// resolve" shape closely enough to fold in for free, and this phase's
+// own directed test only needs conditional branches to prove the
+// mechanism.
+// Forward declarations, same reason as every other Gen6-* one in this
+// file: these are driven by regs/wires declared below (or, for
+// alu_branch_zero/issue_valid/issue_rob_tag, by the execute-section ALU
+// instantiation further down) but referenced here inside the Bht.v/
+// Btb.v instantiations' own port connections.
+reg                     br_inflight_valid_r;
+reg [ROB_IDX_BITS-1:0]  br_inflight_rob_tag_r;
+reg [XLEN-1:0]          br_inflight_pc_r;
+reg [XLEN-1:0]          br_inflight_imm_r;
+reg                     br_inflight_predicted_taken_r;
+reg [XLEN-1:0]          br_inflight_predicted_target_r;
+
+// Resolution: the cycle RS_ALU issues the exact entry carrying the
+// in-flight branch's own rob_tag, alu_branch_zero (computed the SAME
+// cycle from that entry's own rs1/rs2, see the execute section below)
+// is its real, ground-truth outcome.
+wire br_resolve = issue_valid && br_inflight_valid_r && (issue_rob_tag == br_inflight_rob_tag_r);
+wire br_actual_taken  = alu_branch_zero;
+wire [XLEN-1:0] br_actual_target = br_inflight_pc_r + br_inflight_imm_r;
+wire [XLEN-1:0] br_correct_target = br_actual_taken ? br_actual_target : (br_inflight_pc_r + {{(XLEN-3){1'b0}}, 3'd4});
+wire br_mispredict = br_resolve && (
+    (br_actual_taken != br_inflight_predicted_taken_r) ||
+    (br_actual_taken && (br_actual_target != br_inflight_predicted_target_r))
+);
+
+wire predict_taken_bht, btb_hit;
+wire [XLEN-1:0] btb_target;
+Bht #(.XLEN(XLEN), .NUM_ENTRIES(BHT_BTB_ENTRIES)) m_Bht(
+    .clk(clk), .rst(rst),
+    .query_pc(pc_r), .predict_taken(predict_taken_bht),
+    .train_pc({XLEN{1'b0}}), .train_predict_taken(),
+    .update_valid(br_resolve), .update_pc(br_inflight_pc_r), .update_taken(br_actual_taken)
+);
+Btb #(.XLEN(XLEN), .NUM_ENTRIES(BHT_BTB_ENTRIES)) m_Btb(
+    .clk(clk), .rst(rst),
+    .query_pc(pc_r), .hit(btb_hit), .target(btb_target),
+    .update_valid(br_resolve && br_actual_taken), .update_pc(br_inflight_pc_r), .update_target(br_actual_target)
+);
+
+// Both BHT (direction) and BTB (target) must agree before trusting a
+// taken prediction -- matches docs/adr/0021's own established
+// requirement (a cold BTB entry with no real target can't be redirected
+// to, even if the direction predictor alone guesses taken).
+wire predicted_taken  = is_branch && predict_taken_bht && btb_hit;
+wire [XLEN-1:0] predicted_target = btb_target;
+
+always @(posedge clk) begin
+    if (~rst) begin
+        br_inflight_valid_r <= 1'b0;
+    end
+    else begin
+        if (do_dispatch && is_branch) begin
+            br_inflight_valid_r            <= 1'b1;
+            br_inflight_rob_tag_r          <= rob_alloc_tag0;
+            br_inflight_pc_r               <= pc_r;
+            // ImmGen.v's own B-type case (see its header comment) deliberately
+            // outputs the RAW immediate, pre-`<<1` -- riscvpipeline.v applies
+            // a separate ShiftLeftOne.v downstream before ever treating it as
+            // a real byte offset (branch/jal immediates are encoded in
+            // multiples of 2, bit 0 implicit-0). Found by running: this
+            // phase's own first branch test redirected to pc+4 instead of
+            // the real target, exactly the symptom of using the pre-shift
+            // value directly. imm_d itself must NOT be shifted at its own
+            // declaration (I-type/S-type consumers elsewhere need the
+            // unshifted value) -- only this branch-specific latch applies it.
+            br_inflight_imm_r              <= (imm_d << 1);
+            br_inflight_predicted_taken_r  <= predicted_taken;
+            br_inflight_predicted_target_r <= predicted_target;
+        end
+        else if (br_resolve) begin
+            br_inflight_valid_r <= 1'b0;
+        end
+    end
+end
+
+// ==========================================================================
+// Rename: RegisterAliasTable.v (operand tags) + FreeList.v (fresh
+// physical register for the destination, if any) + PhysicalRegisterFile.v
+// (operand READINESS at dispatch time, via its own rvalid* ports -- the
+// same 4-read-port PRF Gen6-A built specifically so dispatch-time
+// readiness and issue-time value-fetch could share one module, see
+// PhysicalRegisterFile.v's own header comment).
+// ==========================================================================
+wire [PREG_BITS-1:0] rat_rpreg0, rat_rpreg1;   // rs1/rs2 -> current preg tag
+wire [PREG_BITS-1:0] rat_old_preg0;            // rd's PRE-rename mapping (for FreeList reclaim at retire)
+
+// Forward declarations -- these are driven by ReorderBuffer.v (m_ROB,
+// instantiated further down) but consumed here by FreeList.v/
+// RegisterAliasTable.v's own retire-commit ports. Declared here, ahead
+// of first use, so every net has a real explicit declaration before its
+// earliest reference (Icarus -g2005 flags a forward-referenced net used
+// only inside an instantiation's port connections as an "implicit
+// definition" warning otherwise, even though the eventual `wire`
+// declaration is real).
+wire rob_retire_valid0, rob_retire_has_dest0;
+wire [AREG_BITS-1:0] rob_retire_areg0;
+wire [PREG_BITS-1:0] rob_retire_preg0, rob_retire_old_preg0;
+// ReorderBuffer.v retires up to 2/cycle INTERNALLY (slot0 AND slot1)
+// whenever both happen to be done the same cycle head_r reaches them --
+// entirely independent of how many dispatch ports the caller actually
+// drives. A single-issue caller that dispatches through slot0 only but
+// leaves slot1's RETIRE outputs unwired would silently lose whichever
+// instruction retires as slot1 (its RAT commit/FreeList reclaim would
+// simply never happen) -- a real bug this phase's own end-to-end test
+// found by running (a queued load completing one cycle behind an
+// adjacent already-done entry let both retire together). Both slot1
+// retire ports are wired through to RegisterAliasTable.v/FreeList.v's
+// own already-present slot1 commit/free ports below, even though
+// dispatch itself stays single-issue until Gen6-K -- retire draining
+// faster than 1/cycle when the ROB has a backlog of already-completed
+// entries is always correct, never something dispatch's own width needs
+// to match.
+wire rob_retire_valid1, rob_retire_has_dest1;
+wire [AREG_BITS-1:0] rob_retire_areg1;
+wire [PREG_BITS-1:0] rob_retire_preg1, rob_retire_old_preg1;
+wire issue_valid;
+wire [ROB_IDX_BITS-1:0] issue_rob_tag;
+wire [PREG_BITS-1:0] issue_dest_preg;
+
+// Gen6-E: LoadStoreQueue.v's own completion, forward-declared for the
+// identical reason (consumed by ROB/RS_ALU/PRF, all instantiated before
+// m_LSQ itself further down).
+wire                    lsq_complete_valid, lsq_complete_is_load;
+wire [PREG_BITS-1:0]    lsq_complete_dest_preg;
+wire [XLEN-1:0]         lsq_complete_data;
+wire [ROB_IDX_BITS-1:0] lsq_complete_rob_tag;
+wire                    lsq_full;
+
+// Gen6-F: Divider.v's own completion, forward-declared for the identical
+// reason (consumed by ROB/RS_ALU/LSQ/PRF, all instantiated before
+// m_Divider itself further down). div_complete_valid is Divider.v's own
+// one-cycle `done` pulse passed straight through (no extra registering
+// needed -- see the in-flight-tracking comment further down for why the
+// dest_preg/rob_tag/data fields ARE separately latched).
+wire                    div_complete_valid;
+wire [PREG_BITS-1:0]    div_complete_dest_preg;
+wire [XLEN-1:0]         div_complete_data;
+wire [ROB_IDX_BITS-1:0] div_complete_rob_tag;
+wire                    rs_div_full;
+
+wire [PREG_BITS-1:0] fl_alloc_preg0;
+wire                 fl_alloc_ok0;
+wire [$clog2(NUM_PREGS - NUM_AREGS):0] fl_free_count;   // unused beyond
+    // debug visibility -- dispatch_stall below gates on fl_alloc_ok0
+    // directly, not this raw count. Width matches FreeList.v's own
+    // free_count port exactly ([CAP_BITS:0], CAP_BITS = $clog2(CAPACITY)).
+
+wire dispatch_stall = rob_full
+                      || (is_mem_op ? lsq_full : (is_div_op ? rs_div_full : rs_alu_full))
+                      || (needs_dest && !fl_alloc_ok0)
+                      || br_inflight_valid_r;   // Gen6-G: single-outstanding-
+                                                  // branch scope cut, see the
+                                                  // branch-speculation
+                                                  // section's own header
+                                                  // comment
+wire do_dispatch     = !dispatch_stall;
+
+// FreeList only needs to actually GRANT when this cycle's instruction
+// really needs a destination -- fl_alloc_ok0 is combinational regardless
+// (queried before deciding do_dispatch, see dispatch_stall above), and
+// only actually consumed (alloc_en0 asserted) once do_dispatch is known.
+FreeList #(.NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS)) m_FreeList(
+    .clk(clk), .rst(rst),
+    .alloc_en0(needs_dest), .alloc_en1(1'b0),
+    .alloc_preg0(fl_alloc_preg0), .alloc_preg1(),
+    .alloc_ok0(fl_alloc_ok0), .alloc_ok1(),
+    .free_en0(rob_retire_valid0 && rob_retire_has_dest0), .free_preg0(rob_retire_old_preg0),
+    .free_en1(rob_retire_valid1 && rob_retire_has_dest1), .free_preg1(rob_retire_old_preg1),
+    .free_count(fl_free_count)
+);
+
+RegisterAliasTable #(.NUM_AREGS(NUM_AREGS), .NUM_PREGS(NUM_PREGS)) m_RAT(
+    .clk(clk), .rst(rst),
+    .raddr0(rs1_areg), .raddr1(rs2_areg), .raddr2({AREG_BITS{1'b0}}), .raddr3({AREG_BITS{1'b0}}),
+    .rpreg0(rat_rpreg0), .rpreg1(rat_rpreg1), .rpreg2(), .rpreg3(),
+    .wen0(do_dispatch && needs_dest), .waddr0(rd_areg), .wpreg0(fl_alloc_preg0), .old_preg0(rat_old_preg0),
+    .wen1(1'b0), .waddr1({AREG_BITS{1'b0}}), .wpreg1({PREG_BITS{1'b0}}), .old_preg1(),
+    .cwen0(rob_retire_valid0 && rob_retire_has_dest0), .cwaddr0(rob_retire_areg0), .cwpreg0(rob_retire_preg0),
+    .cwen1(rob_retire_valid1 && rob_retire_has_dest1), .cwaddr1(rob_retire_areg1), .cwpreg1(rob_retire_preg1),
+    .restore_en(1'b0)   // Gen6-G adds real speculation/squash; nothing to
+                          // restore yet since nothing speculative can be
+                          // in flight (no branches in Gen6-D's own scope).
+);
+
+wire [XLEN-1:0] prf_rdata0, prf_rdata1, prf_rdata2, prf_rdata3;
+wire            prf_rvalid0, prf_rvalid1, prf_rvalid2, prf_rvalid3;
+
+// ==========================================================================
+// Dispatch: ReorderBuffer.v (program-order retire tracking) +
+// ReservationStation.v (one instance, the INT-ALU class -- Gen6-D's only
+// functional-unit class).
+// ==========================================================================
+wire [ROB_IDX_BITS-1:0] rob_alloc_tag0;
+wire rob_full, rob_empty;
+wire [$clog2(ROB_ENTRIES+1)-1:0] rob_count;
+
+ReorderBuffer #(.ROB_ENTRIES(ROB_ENTRIES), .AREG_BITS(AREG_BITS), .PREG_BITS(PREG_BITS)) m_ROB(
+    .clk(clk), .rst(rst),
+    .alloc_en0(do_dispatch), .alloc_has_dest0(needs_dest),
+    .alloc_areg0(rd_areg), .alloc_preg0(needs_dest ? fl_alloc_preg0 : {PREG_BITS{1'b0}}),
+    .alloc_old_preg0(rat_old_preg0), .alloc_tag0(rob_alloc_tag0),
+    .alloc_en1(1'b0), .alloc_has_dest1(1'b0),
+    .alloc_areg1({AREG_BITS{1'b0}}), .alloc_preg1({PREG_BITS{1'b0}}),
+    .alloc_old_preg1({PREG_BITS{1'b0}}), .alloc_tag1(),
+    .complete_en0(issue_valid), .complete_tag0(issue_rob_tag),
+    .complete_en1(lsq_complete_valid), .complete_tag1(lsq_complete_rob_tag),
+    .complete_en2(div_complete_valid), .complete_tag2(div_complete_rob_tag),
+    .retire_valid0(rob_retire_valid0), .retire_has_dest0(rob_retire_has_dest0),
+    .retire_areg0(rob_retire_areg0), .retire_preg0(rob_retire_preg0), .retire_old_preg0(rob_retire_old_preg0),
+    .retire_valid1(rob_retire_valid1), .retire_has_dest1(rob_retire_has_dest1),
+    .retire_areg1(rob_retire_areg1), .retire_preg1(rob_retire_preg1), .retire_old_preg1(rob_retire_old_preg1),
+    .rob_count(rob_count), .rob_full(rob_full), .rob_empty(rob_empty)
+);
+
+// Dispatch-time readiness query -- rs1/rs2's CURRENT physical tags
+// (rat_rpreg0/1, from the SAME-cycle RAT read above, still the
+// pre-rename mapping) queried against PRF's own rvalid.
+wire [PAYLOAD_BITS-1:0] rs_disp_payload0 = {ALUSrc_c, ALUCtl_d, imm_d};
+
+wire [PREG_BITS-1:0] issue_src1_preg, issue_src2_preg;
+wire [PAYLOAD_BITS-1:0] issue_payload;
+wire rs_alu_full;
+wire [$clog2(RS_ALU_ENTRIES+1)-1:0] rs_alu_count;
+
+ReservationStation #(.RS_ENTRIES(RS_ALU_ENTRIES), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(PAYLOAD_BITS)) m_RS_ALU(
+    .clk(clk), .rst(rst),
+    .disp_en0(do_dispatch && !is_mem_op && !is_div_op),
+    .disp_src1_preg0(rat_rpreg0), .disp_src1_ready0(prf_rvalid0),
+    .disp_src2_preg0(rat_rpreg1), .disp_src2_ready0(prf_rvalid1),
+    .disp_dest_preg0(needs_dest ? fl_alloc_preg0 : {PREG_BITS{1'b0}}),
+    .disp_rob_tag0(rob_alloc_tag0), .disp_payload0(rs_disp_payload0),
+    .disp_en1(1'b0),
+    .disp_src1_preg1({PREG_BITS{1'b0}}), .disp_src1_ready1(1'b0),
+    .disp_src2_preg1({PREG_BITS{1'b0}}), .disp_src2_ready1(1'b0),
+    .disp_dest_preg1({PREG_BITS{1'b0}}), .disp_rob_tag1({ROB_IDX_BITS{1'b0}}), .disp_payload1({PAYLOAD_BITS{1'b0}}),
+    // CDB snoop: port0 is self (ALU results waking OTHER ALU-RS entries,
+    // same as Gen6-D); port1 is Gen6-E's own addition -- a load's result
+    // (lsq_complete_valid && is_load) can be exactly the operand an
+    // ALU-RS entry is waiting on; port2 (Gen6-F) a completed DIV/REM's
+    // result.
+    .cdb_valid0(issue_valid), .cdb_preg0(issue_dest_preg),
+    .cdb_valid1(lsq_complete_valid && lsq_complete_is_load), .cdb_preg1(lsq_complete_dest_preg),
+    .cdb_valid2(div_complete_valid), .cdb_preg2(div_complete_dest_preg),
+    .issue_valid(issue_valid),
+    .issue_src1_preg(issue_src1_preg), .issue_src2_preg(issue_src2_preg), .issue_dest_preg(issue_dest_preg),
+    .issue_rob_tag(issue_rob_tag), .issue_payload(issue_payload),
+    .issue_ack(issue_valid),   // the single ALU is combinational/never
+                                 // busy -- always accept the same cycle
+                                 // it's offered (no backpressure needed
+                                 // for this functional-unit class)
+    .rs_count(rs_alu_count), .rs_full(rs_alu_full)
+);
+
+// ==========================================================================
+// Gen6-E: LoadStoreQueue.v (one instance) + a real DataMemoryBRAM.v --
+// see LoadStoreQueue.v's own header for this phase's explicit in-order/
+// single-outstanding scope cut and the DCache-tag-reuse research finding.
+// rs1 (rat_rpreg0) is always the base register (loads AND stores);
+// rs2 (rat_rpreg1) is the store data source (S-type; irrelevant, and
+// never consulted, for loads). imm_d/funct3_c are already correctly
+// I-type/S-type decoded by the SAME ImmGen.v/Control.v this cycle's
+// dispatching instruction already went through above.
+// ==========================================================================
+wire [PREG_BITS-1:0] lsq_head_base_preg, lsq_head_store_data_preg;
+wire [XLEN-1:0]      lsq_mem_address, lsq_mem_writeData, lsq_mem_readData;
+wire                 lsq_mem_memRead, lsq_mem_memWrite;
+wire [2:0]           lsq_mem_funct3;
+wire [$clog2(8+1)-1:0] lsq_count;   // debug visibility only
+
+LoadStoreQueue #(.XLEN(XLEN), .LSQ_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS)) m_LSQ(
+    .clk(clk), .rst(rst),
+    .disp_en0(do_dispatch && is_mem_op), .disp_is_store0(memWrite_c),
+    .disp_base_preg0(rat_rpreg0), .disp_base_ready0(prf_rvalid0),
+    .disp_imm0(imm_d), .disp_funct3_0(funct3_c),
+    .disp_store_data_preg0(rat_rpreg1), .disp_store_data_ready0(prf_rvalid1),
+    .disp_dest_preg0(needs_dest ? fl_alloc_preg0 : {PREG_BITS{1'b0}}),
+    .disp_rob_tag0(rob_alloc_tag0),
+    .disp_en1(1'b0), .disp_is_store1(1'b0),
+    .disp_base_preg1({PREG_BITS{1'b0}}), .disp_base_ready1(1'b0),
+    .disp_imm1({XLEN{1'b0}}), .disp_funct3_1(3'd0),
+    .disp_store_data_preg1({PREG_BITS{1'b0}}), .disp_store_data_ready1(1'b0),
+    .disp_dest_preg1({PREG_BITS{1'b0}}), .disp_rob_tag1({ROB_IDX_BITS{1'b0}}),
+    // CDB snoop: port0 an ALU result (e.g. a base register computed by a
+    // prior addi still in flight); port1 self (an earlier queued load's
+    // own result feeding a LATER entry's base/store-data operand); port2
+    // (Gen6-F) a completed DIV/REM's result.
+    .cdb_valid0(issue_valid), .cdb_preg0(issue_dest_preg),
+    .cdb_valid1(lsq_complete_valid && lsq_complete_is_load), .cdb_preg1(lsq_complete_dest_preg),
+    .cdb_valid2(div_complete_valid), .cdb_preg2(div_complete_dest_preg),
+    .head_base_preg(lsq_head_base_preg), .head_store_data_preg(lsq_head_store_data_preg),
+    .mem_base_value(prf_rdata4), .mem_store_data_value(prf_rdata5),
+    .mem_memRead(lsq_mem_memRead), .mem_memWrite(lsq_mem_memWrite),
+    .mem_address(lsq_mem_address), .mem_writeData(lsq_mem_writeData), .mem_funct3(lsq_mem_funct3),
+    .mem_readData(lsq_mem_readData),
+    .complete_valid(lsq_complete_valid), .complete_is_load(lsq_complete_is_load),
+    .complete_dest_preg(lsq_complete_dest_preg), .complete_data(lsq_complete_data),
+    .complete_rob_tag(lsq_complete_rob_tag),
+    .lsq_count(lsq_count), .lsq_full(lsq_full)
+);
+
+DataMemoryBRAM #(.SIZE_BYTES(DMEM_SIZE_BYTES), .XLEN(XLEN)) m_DMem(
+    .clk(clk), .rst(rst),
+    .memWrite(lsq_mem_memWrite), .memRead(lsq_mem_memRead),
+    .address(lsq_mem_address), .writeData(lsq_mem_writeData), .funct3(lsq_mem_funct3),
+    .readData(lsq_mem_readData)
+);
+
+// ==========================================================================
+// Execute: the SAME existing ALU.v this project's PIPELINED core already
+// uses, fed by PRF reads at the entry ReservationStation just selected
+// (issue_src1_preg/issue_src2_preg) -- by construction, both are already
+// PRF-valid the cycle they're selected (RS only selects entries whose
+// ready bits are set), so this is always live, never garbage, data.
+// ==========================================================================
+wire issue_alusrc         = issue_payload[PAYLOAD_BITS-1];
+wire [4:0] issue_aluctl    = issue_payload[PAYLOAD_BITS-2 -: 5];
+wire [XLEN-1:0] issue_imm  = issue_payload[XLEN-1:0];
+
+wire [XLEN-1:0] alu_a = prf_rdata2;
+wire [XLEN-1:0] alu_b = issue_alusrc ? issue_imm : prf_rdata3;
+wire [XLEN-1:0] alu_out;
+wire alu_zero, alu_branch_zero;
+
+ALU #(.XLEN(XLEN)) m_ALU(
+    .ALUCtl(issue_aluctl), .A(alu_a), .B(alu_b), .wordOp(1'b0),
+    .ALUOut(alu_out), .zero(alu_zero), .branch_zero(alu_branch_zero)
+);
+
+// ==========================================================================
+// Gen6-F: MUL/DIV. MUL/MULH/MULHSU/MULHU need nothing new -- ALU.v (above)
+// already computes them single-cycle, so they already flow through the
+// ordinary RS_ALU path. DIV/DIVU/REM/REMU get their own reservation
+// station (its own functional-unit class, per the plan) + a real instance
+// of the SAME multi-cycle Divider.v riscvpipeline.v already uses.
+//
+// `start` only needs to pulse the ONE cycle Divider.v's own FSM accepts a
+// fresh operation (traced directly against Divider.v's own logic: once
+// `busy<=1` fires, its `else if (busy)` branch never looks at `start`
+// again) -- riscvpipeline.v happens to hold it level for its own unrelated
+// reason (its single in-flight instruction sits in EX for the whole
+// division), not because Divider.v itself requires it.
+//
+// Divider.v's own dest_preg/rob_tag are NOT still available when `done`
+// eventually fires (the RS_DIV entry that carried them was already
+// cleared the cycle `start` accepted it, exactly like RS_ALU's own
+// instant-issue entries) -- a small in-flight register latches them the
+// SAME cycle `start` fires and holds until `done`, mirroring
+// LoadStoreQueue.v's own "caller needs to remember what's in flight"
+// shape but for a single always-serialized (single Divider instance)
+// operation rather than a queue.
+// ==========================================================================
+wire [PREG_BITS-1:0] issue_src1_preg_div, issue_src2_preg_div, issue_dest_preg_div;
+wire [ROB_IDX_BITS-1:0] issue_rob_tag_div;
+wire [1:0] issue_payload_div;   // {select_remainder, isSigned}
+wire issue_valid_div;
+wire [$clog2(8+1)-1:0] rs_div_count;   // debug visibility only
+
+// RV32M funct3 encoding for this family: bit1 distinguishes DIV/DIVU(0)
+// from REM/REMU(1); bit0 distinguishes signed(0) from unsigned(1).
+wire div_disp_select_rem = funct3_c[1];
+wire div_disp_signed     = ~funct3_c[0];
+
+ReservationStation #(.RS_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(2)) m_RS_DIV(
+    .clk(clk), .rst(rst),
+    .disp_en0(do_dispatch && is_div_op),
+    .disp_src1_preg0(rat_rpreg0), .disp_src1_ready0(prf_rvalid0),
+    .disp_src2_preg0(rat_rpreg1), .disp_src2_ready0(prf_rvalid1),
+    .disp_dest_preg0(needs_dest ? fl_alloc_preg0 : {PREG_BITS{1'b0}}),
+    .disp_rob_tag0(rob_alloc_tag0), .disp_payload0({div_disp_select_rem, div_disp_signed}),
+    .disp_en1(1'b0),
+    .disp_src1_preg1({PREG_BITS{1'b0}}), .disp_src1_ready1(1'b0),
+    .disp_src2_preg1({PREG_BITS{1'b0}}), .disp_src2_ready1(1'b0),
+    .disp_dest_preg1({PREG_BITS{1'b0}}), .disp_rob_tag1({ROB_IDX_BITS{1'b0}}), .disp_payload1(2'd0),
+    .cdb_valid0(issue_valid), .cdb_preg0(issue_dest_preg),
+    .cdb_valid1(lsq_complete_valid && lsq_complete_is_load), .cdb_preg1(lsq_complete_dest_preg),
+    .cdb_valid2(div_complete_valid), .cdb_preg2(div_complete_dest_preg),
+    .issue_valid(issue_valid_div),
+    .issue_src1_preg(issue_src1_preg_div), .issue_src2_preg(issue_src2_preg_div), .issue_dest_preg(issue_dest_preg_div),
+    .issue_rob_tag(issue_rob_tag_div), .issue_payload(issue_payload_div),
+    .issue_ack(div_start),   // only accepted the cycle Divider.v itself is free
+    .rs_count(rs_div_count), .rs_full(rs_div_full)
+);
+
+wire [XLEN-1:0] prf_rdata6, prf_rdata7;   // Divider.v's own dividend/divisor read
+
+wire div_start = issue_valid_div && !div_busy && !div_done;
+wire div_busy, div_done;
+wire [XLEN-1:0] div_quotient, div_remainder;
+
+// isSigned/dividend/divisor are all fed LIVE (issue_payload_div/
+// prf_rdata6/prf_rdata7 -- combinational reads of whichever entry RS_DIV
+// currently has selected), never from a registered snapshot: Divider.v
+// samples them at the exact edge `start` is asserted, so anything fed
+// from a register that only updates the cycle AFTER div_start fires
+// would be one division's data late. A real bug this phase's own
+// directed test caught by running: `isSigned` was originally wired to a
+// registered div_inflight_signed_r instead, which meant a division only
+// picked up its OWN signed-ness once the FOLLOWING division's `start`
+// overwrote it -- invisible whenever consecutive divisions shared the
+// same signed-ness (this test's own div/div/rem/rem run all-signed
+// first), and only surfaced once a divu (unsigned) followed a rem
+// (signed): the divu silently ran as a signed division instead, using
+// the still-stale bit left over from the division before it.
+Divider #(.XLEN(XLEN)) m_Divider(
+    .clk(clk), .rst(rst),
+    .start(div_start), .isSigned(issue_payload_div[0]),
+    .dividend(prf_rdata6), .divisor(prf_rdata7),
+    .busy(div_busy), .done(div_done),
+    .quotient(div_quotient), .remainder(div_remainder)
+);
+
+// dest_preg/rob_tag/select_remainder genuinely DO need latching (unlike
+// isSigned/dividend/divisor above) -- Divider.v itself has no concept of
+// them, so nothing else keeps them alive across the many cycles between
+// `start` and `done`, and the RS_DIV entry that originally carried them
+// is long gone (cleared the same cycle `start`/issue_ack fired).
+reg [ROB_IDX_BITS-1:0] div_inflight_rob_tag_r;
+reg [PREG_BITS-1:0]    div_inflight_dest_preg_r;
+reg                    div_inflight_select_rem_r;
+always @(posedge clk) begin
+    if (rst && div_start) begin
+        div_inflight_rob_tag_r    <= issue_rob_tag_div;
+        div_inflight_dest_preg_r  <= issue_dest_preg_div;
+        div_inflight_select_rem_r <= issue_payload_div[1];
+    end
+end
+
+assign div_complete_valid     = div_done;
+assign div_complete_rob_tag   = div_inflight_rob_tag_r;
+assign div_complete_dest_preg = div_inflight_dest_preg_r;
+assign div_complete_data      = div_inflight_select_rem_r ? div_remainder : div_quotient;
+
+wire [XLEN-1:0] prf_rdata4, prf_rdata5;
+
+PhysicalRegisterFile #(.XLEN(XLEN), .NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS), .SP_INIT(SP_INIT)) m_PRF(
+    .clk(clk), .rst(rst),
+    // Port 0/1: dispatch-time readiness query for THIS cycle's
+    // dispatching instruction. Port 2/3: issue-time operand VALUE fetch
+    // for whichever entry RS_ALU just selected. Port 4/5 (Gen6-E): the
+    // LSQ's own head-entry base/store-data value fetch. Port 6/7
+    // (Gen6-F): Divider.v's own dividend/divisor fetch for whichever
+    // entry RS_DIV just selected.
+    .raddr0(rat_rpreg0), .raddr1(rat_rpreg1),
+    .raddr2(issue_src1_preg), .raddr3(issue_src2_preg),
+    .raddr4(lsq_head_base_preg), .raddr5(lsq_head_store_data_preg),
+    .raddr6(issue_src1_preg_div), .raddr7(issue_src2_preg_div),
+    .rdata0(prf_rdata0), .rdata1(prf_rdata1), .rdata2(prf_rdata2), .rdata3(prf_rdata3),
+    .rdata4(prf_rdata4), .rdata5(prf_rdata5), .rdata6(prf_rdata6), .rdata7(prf_rdata7),
+    .rvalid0(prf_rvalid0), .rvalid1(prf_rvalid1), .rvalid2(), .rvalid3(), .rvalid4(), .rvalid5(), .rvalid6(), .rvalid7(),
+    // CDB writeback -- port0 the ALU's own result (single-cycle execute,
+    // no latency); port1 (Gen6-E) a completed LOAD's result (a store has
+    // no destination register, so lsq_complete_is_load gates this);
+    // port2 (Gen6-F) a completed DIV/REM's result.
+    .wen0(issue_valid), .waddr0(issue_dest_preg), .wdata0(alu_out),
+    .wen1(lsq_complete_valid && lsq_complete_is_load), .waddr1(lsq_complete_dest_preg), .wdata1(lsq_complete_data),
+    .wen2(div_complete_valid), .waddr2(div_complete_dest_preg), .wdata2(div_complete_data),
+    // Rename allocation -- clears valid for the fresh preg THIS cycle's
+    // dispatching instruction claims (if any).
+    .alloc_en0(do_dispatch && needs_dest), .alloc_preg0(fl_alloc_preg0),
+    .alloc_en1(1'b0), .alloc_preg1({PREG_BITS{1'b0}})
+);
+
+// ==========================================================================
+// Fetch advance: single-issue, sequential PC, now with Gen6-G's own
+// speculative redirect. Priority: a mispredict recovery (br_resolve &&
+// br_mispredict) always wins -- it can only ever fire when do_dispatch is
+// already guaranteed 0 this same cycle (br_inflight_valid_r, still its
+// pre-edge 1, is folded into dispatch_stall above), so there's no real
+// same-cycle conflict between the two branches below, just defensive
+// ordering. A resource-exhaustion stall (dispatch_stall, including the
+// single-outstanding-branch stall) holds PC and re-fetches/re-decodes the
+// identical instruction next cycle instead (safe: nothing about fetch/
+// decode has side effects on its own, only actually asserted dispatch/
+// alloc pulses matter) -- this is also exactly what happens while a
+// branch is in flight and CORRECTLY predicted: nothing here needs to redo
+// anything once br_inflight_valid_r drops, since pc_r already sits at the
+// right place from when the branch itself dispatched.
+// ==========================================================================
+always @(posedge clk) begin
+    if (~rst)
+        pc_r <= {XLEN{1'b0}};
+    else if (br_resolve && br_mispredict)
+        pc_r <= br_correct_target;
+    else if (do_dispatch)
+        pc_r <= (is_branch && predicted_taken) ? predicted_target : (pc_r + 4);
+end
+
+endmodule
+
+`default_nettype wire
