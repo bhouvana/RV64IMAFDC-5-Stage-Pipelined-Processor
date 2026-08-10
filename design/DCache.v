@@ -161,7 +161,23 @@ module DCache #(
     // never re-fire during the multi-cycle S_WB/S_FILL service that
     // follows.
     output                          access_hit,
-    output                          access_miss
+    output                          access_miss,
+
+    // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). Inclusion
+    // probe responder -- driven by an L2Cache.v instance sitting below this
+    // module, ONLY when a caller actually wires it (riscvpipeline.v ties
+    // probe_req=0 when L2 is disabled, the default -- this whole port stays
+    // permanently dark/inert then, bit-identical to pre-Phase-F behavior).
+    // L2 probes UNCONDITIONALLY before evicting any currently-valid line it
+    // holds (no present_in_l1 tracking on L2's own side, see L2Cache.v's
+    // header) -- this module's own job is simple: answer truthfully whether
+    // probe_addr's line is resident here right now, and if so, hand over its
+    // dirty bit + full data and invalidate it, same cycle.
+    input                           probe_req,
+    input      [XLEN-1:0]           probe_addr,
+    output                          probe_ack,
+    output                          probe_dirty,
+    output     [XLEN*LINE_WORDS-1:0] probe_data
 );
 
 localparam LINE_WORDS    = LINE_BYTES / 4;
@@ -254,6 +270,34 @@ wire [LINE_IDX_BITS-1:0] hit_line_idx = hit_lineidx_acc[WAYS];
 // which a victim-buffer promote genuinely is too, so broadening it here
 // fixes those three sites for free with no further edits needed there.
 wire hit_main = |way_hit;
+
+// docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). A SECOND,
+// independent tag/set decode + N-way compare against probe_addr -- this is
+// deliberately NOT req_addr/tag/set_idx (a probe can arrive for a
+// completely different address than whatever the main FSM is currently
+// servicing). Same accumulator-reduction shape way_hit/hit_data_acc already
+// use above. Permanently inert (probe_found stays 0) when the caller never
+// asserts probe_req.
+wire [SET_BITS-1:0] probe_set_idx;
+generate
+if (SET_BITS == 0) begin : gen_probe_set_idx_fully_assoc
+    assign probe_set_idx = {SET_BITS{1'b0}};
+end else begin : gen_probe_set_idx_normal
+    assign probe_set_idx = probe_addr[OFFSET_BITS+SET_BITS-1:OFFSET_BITS];
+end
+endgenerate
+wire [TAG_BITS-1:0] probe_tag = probe_addr[XLEN-1:OFFSET_BITS+SET_BITS];
+wire [WAYS-1:0]          probe_way_hit;
+wire [LINE_IDX_BITS-1:0] probe_lineidx_acc[0:WAYS];
+assign probe_lineidx_acc[0] = {LINE_IDX_BITS{1'b0}};
+generate
+    for (gw = 0; gw < WAYS; gw = gw + 1) begin : gen_probe_compare
+        assign probe_way_hit[gw] = valid[probe_set_idx*WAYS + gw] && (tag_arr[probe_set_idx*WAYS + gw] == probe_tag);
+        assign probe_lineidx_acc[gw+1] = probe_lineidx_acc[gw] | (probe_way_hit[gw] ? (probe_set_idx*WAYS + gw) : {LINE_IDX_BITS{1'b0}});
+    end
+endgenerate
+wire probe_found = |probe_way_hit;
+wire [LINE_IDX_BITS-1:0] probe_found_line = probe_lineidx_acc[WAYS];
 
 // docs/adr/0041. POLICY_LRU's own victim choice -- same shape as
 // ICache.v's own gen_lru_victim block. (hit_line_idx already gives a
@@ -841,7 +885,20 @@ always @(posedge clk) begin
 
         case (state)
             S_IDLE: begin
-                if (flush_all && !flush_active_r) begin
+                // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F).
+                // Strict first priority, ahead of flush_all/req_read/
+                // req_write -- a probe is answered (and, if found,
+                // invalidated) THIS cycle; any real req_read/req_write the
+                // caller is holding is simply serviced the following cycle
+                // instead (safe: riscvpipeline.v's reg3 holds the request
+                // level until resp_ready, nothing is lost by a one-cycle
+                // defer). Permanently unreachable when the caller never
+                // asserts probe_req (L2 disabled, the default).
+                if (probe_req) begin
+                    if (probe_found)
+                        valid[probe_found_line] <= 1'b0;
+                end
+                else if (flush_all && !flush_active_r) begin
                     flush_active_r <= 1'b1;
                     flush_scan_r   <= {LINE_IDX_BITS{1'b0}};
                     state <= S_FLUSH_SCAN;
@@ -1158,6 +1215,22 @@ assign mshr_outstanding   = (mshr_count_r != {MSHR_COUNT_BITS{1'b0}});
 
 assign flush_busy = flush_active_r;
 assign flush_done = flush_done_r;
+
+// docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). probe_ack fires
+// combinationally the same S_IDLE cycle probe_req is seen (mirrors this
+// module's own existing write-hit resp_ready precedent -- a combinational
+// ack for a same-cycle-resolvable request), unconditionally, whether or not
+// a matching line was actually found -- "wasn't here" is itself a complete,
+// valid answer (L2Cache.v's own header covers why an over-eager probe is
+// harmless). probe_dirty/probe_data are don't-care when !probe_found; L2's
+// own probe response handling never inspects them in that case.
+assign probe_ack   = (state == S_IDLE) && probe_req;
+assign probe_dirty = probe_found && dirty[probe_found_line];
+generate
+    for (gw = 0; gw < LINE_WORDS; gw = gw + 1) begin : gen_probe_data
+        assign probe_data[gw*XLEN +: XLEN] = data_arr[probe_found_line*LINE_WORDS + gw];
+    end
+endgenerate
 
 assign m_cyc    = (state == S_WB) || (state == S_FILL);
 assign m_stb    = m_cyc;
