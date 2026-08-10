@@ -26,6 +26,21 @@ module Register #(
     input [$clog2(NUM_REGS)-1:0] readReg2,
     input [$clog2(NUM_REGS)-1:0] writeReg,
     input [XLEN-1:0] writeData,
+    // Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
+    // A second, independent write port for MSHR-completion writeback -- a
+    // load that retired early (see Scoreboard.v) needs its result written
+    // OUT OF BAND from the normal WB-stage write above, since its own
+    // pipeline slot already moved on by the time its data arrives. No
+    // arbitration logic needed here: the scoreboard's own WAW stall (a new
+    // instruction can never target a register with a pending MSHR) is what
+    // guarantees these two ports never race for the SAME register on the
+    // SAME cycle -- the ASSERT_ON block below flags a violation loudly
+    // rather than silently dropping one write, matching this project's own
+    // "never fail silently" discipline (docs/adr/0043's own stuck-ack bug
+    // went undetected for exactly this class of reason).
+    input we2,
+    input [$clog2(NUM_REGS)-1:0] waddr2,
+    input [XLEN-1:0] wdata2,
     output [XLEN-1:0] readData1,
     output [XLEN-1:0] readData2
 );
@@ -42,11 +57,16 @@ module Register #(
     // and consumer exactly 3 instructions apart with no intervening hazard).
     // That gap fell through every existing hazard/forwarding path silently
     // until sim/programs/arith.s caught it -- see docs/adr/0002-register-file-write-first-bypass.md.
+    // The we2/waddr2/wdata2 arm extends the identical bypass to the new
+    // MSHR-completion port -- an ID-stage read landing the exact cycle a
+    // completion writes back must see the fresh value too.
     assign readData1 = (readReg1 == 0) ? {XLEN{1'b0}} :
                         (regWrite && writeReg == readReg1) ? writeData :
+                        (we2 && waddr2 == readReg1) ? wdata2 :
                         regs[readReg1];
     assign readData2 = (readReg2 == 0) ? {XLEN{1'b0}} :
                         (regWrite && writeReg == readReg2) ? writeData :
+                        (we2 && waddr2 == readReg2) ? wdata2 :
                         regs[readReg2];
 
     always @(posedge clk) begin
@@ -55,9 +75,23 @@ module Register #(
                 regs[reset_i] <= {XLEN{1'b0}};
             regs[2] <= SP_INIT;
         end
-        else if(regWrite)
-            regs[writeReg] <= (writeReg == 0) ? {XLEN{1'b0}} : writeData;
+        else begin
+            if (we2 && waddr2 != 0)
+                regs[waddr2] <= wdata2;
+            if (regWrite)
+                regs[writeReg] <= (writeReg == 0) ? {XLEN{1'b0}} : writeData;
+        end
     end
+
+// Generation 4, Phase E. See we2's own header comment above -- the
+// scoreboard's WAW stall should make this unreachable; assert it loudly if
+// it ever isn't, rather than silently letting regWrite's own write win.
+`ifdef ASSERT_ON
+always @(posedge clk) begin
+    if (rst && regWrite && we2 && waddr2 == writeReg && waddr2 != 0)
+        begin $display("ASSERTION FAILED @t=%0t: regfile write-port collision, both ports targeting x%0d", $time, waddr2); $finish; end
+end
+`endif
 
 // Compiled in only with -DASSERT_ON (see sim/run_tests.sh). x0 is hardwired
 // to 0 in two independent places above (the write path and the write-first

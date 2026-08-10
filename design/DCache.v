@@ -64,7 +64,16 @@ module DCache #(
     // Wishbone B3 CTI signaling (`CTI_INCR_BURST/`CTI_END_OF_BURST) across
     // a line fill/writeback's own multi-word sequence. Not yet consumed
     // anywhere as of this commit.
-    parameter BURST_ENABLE = 0
+    parameter BURST_ENABLE = 0,
+    // Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md):
+    // outstanding-LOAD-miss queue depth. 1 = disabled, bit-exact with
+    // pre-Phase-E behavior -- every dispatch decision below still reduces
+    // to today's single-outstanding fork (a store, or a load with no free
+    // MSHR slot, always falls back to the pre-existing blocking wait).
+    // >1 lets a second (and further) load miss be accepted into the queue
+    // while an earlier one is still filling. Not yet consumed anywhere as
+    // of this commit.
+    parameter MSHR_ENTRIES = 1
 )(
     input clk,
     input rst,
@@ -77,6 +86,50 @@ module DCache #(
     input      [2:0]       req_funct3,  // DataMemoryBRAM.v's own encoding: 000=lb 001=lh 010=lw 100=lbu 101=lhu (stores use [1:0]: 00=sb 01=sh else=sw)
     output     [XLEN-1:0]  resp_rdata,
     output                 resp_ready,
+    // Generation 4, Phase E. Caller-supplied architectural destination
+    // register for a LOAD -- only ever consumed if this request becomes a
+    // non-blocking MSHR (mshr_accept) or an S_IDLE-fork load miss at
+    // MSHR_ENTRIES>1; ignored for stores/hits.
+    input      [4:0]       req_dest_reg,
+    // Generation 4, Phase E. True only when THIS req_read, if it misses,
+    // is a genuine plain-integer load (riscvpipeline.v wires this to
+    // regWrite_regem) -- a real, serious gap found by running the
+    // constrained-random harness at MSHR_ENTRIES>1, not anticipated in the
+    // original design: memRead_regem is ALSO true for a floating-point
+    // load (OPCODE_LOAD_FP sets memRead=1 AND fRegWrite=1, never
+    // regWrite), whose real destination is FRegister.v, not Register.v --
+    // req_dest_reg/mshr_complete_reg/RegisterFile.v's own port2 have no
+    // way to route a result there. Without this gate, an flw miss would
+    // get queued as non-blocking, retire with no valid data written
+    // ANYWHERE (its result silently vanishes -- neither the normal
+    // resp_ready-driven float-writeback path nor the new integer-only
+    // completion path ever fires for it). Hit-under-miss is unaffected
+    // (mshr_busy_dispatch_hit resolves through the ordinary resp_ready/
+    // resp_rdata path every load, integer or float, already uses) --
+    // only the queued/non-blocking accept path needs this gate.
+    input                   req_int_load,
+
+    // Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
+    // Fires the SAME cycle a load miss is accepted into the MSHR queue
+    // (whether the bus was idle or already busy with an earlier entry) --
+    // the caller may retire this instruction now without data; the result
+    // arrives later via mshr_complete. Never fires for a store (stores
+    // always use the traditional resp_ready path, see module header) or
+    // when MSHR_ENTRIES==1 (bit-identical-to-today requirement).
+    output                 mshr_accept,
+    // Pulses exactly once when a queued MSHR's fill finishes, carrying the
+    // destination register and final (already-extended) data directly --
+    // decoupled from req_addr/resp_ready, since the caller that issued
+    // this load is long gone by the time its fill completes.
+    output                 mshr_complete,
+    output     [4:0]       mshr_complete_reg,
+    output     [XLEN-1:0]  mshr_complete_data,
+    // Generation 4, Phase E. Fence must wait for every outstanding MSHR to
+    // drain before starting its scan (a line still mid-fill has no
+    // meaningful dirty/clean state to flush yet) -- riscvpipeline.v's own
+    // fence_pending_r gate consumes this alongside its existing !ptw_busy
+    // check.
+    output                 mshr_outstanding,
 
     // fence -- unconditional whole-cache writeback of every dirty line
     // (lines stay valid/cached, just become clean -- not an invalidation).
@@ -120,6 +173,20 @@ localparam WORD_OFF_BITS = OFFSET_BITS - 2;
 localparam TAG_BITS      = XLEN - SET_BITS - OFFSET_BITS;
 localparam WAY_BITS      = $clog2(WAYS);
 localparam LINE_IDX_BITS = SET_BITS + WAY_BITS;
+// Generation 4, Phase E. Same "$clog2(1)==0 would give a zero-width reg"
+// guard this file's own SET_BITS==0 fix (docs/adr/0041) established --
+// MSHR_ENTRIES==1 (the default/disabled case) needs a real 1-bit index
+// even though $clog2(1)==0.
+localparam MSHR_IDX_BITS = (MSHR_ENTRIES <= 1) ? 1 : $clog2(MSHR_ENTRIES);
+// A count of OCCUPIED entries needs to represent MSHR_ENTRIES itself (the
+// full-queue value), one more than the largest INDEX (MSHR_ENTRIES-1) --
+// $clog2(MSHR_ENTRIES) alone is one bit too narrow (e.g. MSHR_ENTRIES=2
+// needs 2 bits to hold the value 2, not the 1 bit $clog2(2) gives, which
+// can only ever hold 0 or 1 and silently wraps 1+1 back to 0). A real bug
+// found by running tb_mshr_unit.v's own case3 (queue-full-reject wrongly
+// saw mshr_count_r==0 with both entries genuinely mshr_valid), not
+// anticipated in the original design.
+localparam MSHR_COUNT_BITS = $clog2(MSHR_ENTRIES + 1);
 
 // REPLACEMENT_POLICY values (docs/adr/0041) -- same three values as
 // ICache.v's own copy.
@@ -298,9 +365,19 @@ wire hit = hit_main | vc_lookup_hit;
 // still-the-same-request from a new one" reason), which fires exactly
 // once per read-hit since state can't re-enter S_HIT_RD without a fresh
 // S_IDLE request first.
+// Generation 4, Phase E. access_miss also counts a busy-dispatch miss
+// (mshr_busy_dispatch_miss, a real new miss just accepted into the queue)
+// -- correctness improvement, at MSHR_ENTRIES==1 this term is permanently
+// false (mshr_busy_dispatch_miss requires mshr_room, which requires
+// MSHR_ENTRIES>1), preserving bit-identical behavior at the default.
+// access_hit deliberately does NOT gain a hu_pending_r term -- hit-under-
+// miss stays invisible to the hit/miss perf counter and POLICY_LRU's own
+// recency touch, a narrow, documented gap (docs/adr/0044's own Future
+// improvements), not a correctness issue (the data served is still right).
 assign access_hit  = (state == S_IDLE && req_write && hit) ||
                       (state == S_HIT_RD && req_read && req_addr == served_addr_r);
-assign access_miss = (state == S_IDLE) && (req_read || req_write) && !hit;
+assign access_miss = ((state == S_IDLE) && (req_read || req_write) && !hit) ||
+                      mshr_busy_dispatch_miss;
 
 // Width/sign extension for a load, mirroring DataMemoryBRAM.v's own
 // funct3-keyed case exactly, generalized with a byte_off since this
@@ -385,16 +462,54 @@ reg [WORD_OFF_BITS-1:0] hit_word_r;
 reg [2:0]               hit_funct3_r;
 reg [1:0]               hit_byteoff_r;
 
-reg [SET_BITS-1:0]      miss_set_r;
-reg [WAY_BITS-1:0]      miss_way_r;
-reg [TAG_BITS-1:0]      miss_tag_r;
-reg [XLEN-1:0]          miss_base_r;
-reg [WORD_OFF_BITS-1:0] miss_word_off_r;
-reg [1:0]               miss_byteoff_r;
-reg [2:0]               miss_funct3_r;
-reg                     miss_is_write_r;
-reg [XLEN-1:0]          miss_wdata_r;
-reg [XLEN-1:0]          miss_orig_addr_r;   // full req_addr at miss-detection, for resp_ready's own address-match gate (see served_addr_r's header comment)
+// Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
+// The single-outstanding "which miss is being serviced" bookkeeping this
+// block used to hold directly (miss_set_r/miss_way_r/...) now lives in the
+// mshr_*[] arrays declared further down, indexed by mshr_head_r (the entry
+// S_WB/S_FILL are CURRENTLY servicing) -- see mshr_alloc's own header
+// comment for why. wb_line_r/wb_base_r below still name the ACTIVE
+// writeback target directly (both a miss's own primary-line eviction AND a
+// plain flush scan use them identically to before) -- refreshed from
+// mshr_wb_line[]/mshr_wb_base[] only at the moment bus-service advances to
+// a newly-current head (S_FILL's own completion logic, below).
+
+// One entry per outstanding LOAD miss (a store-miss reuses the same array
+// too, always alone -- see mshr_alloc's own header comment below). No
+// separate flat miss_*_r registers anymore -- S_WB/S_FILL read whichever
+// entry mshr_head_r currently points at.
+reg                     mshr_valid    [0:MSHR_ENTRIES-1];
+reg [SET_BITS-1:0]      mshr_set      [0:MSHR_ENTRIES-1];
+reg [WAY_BITS-1:0]      mshr_way      [0:MSHR_ENTRIES-1];
+reg [TAG_BITS-1:0]      mshr_tag      [0:MSHR_ENTRIES-1];
+reg [XLEN-1:0]          mshr_base     [0:MSHR_ENTRIES-1];
+reg [WORD_OFF_BITS-1:0] mshr_word_off [0:MSHR_ENTRIES-1];
+reg [1:0]               mshr_byteoff  [0:MSHR_ENTRIES-1];
+reg [2:0]               mshr_funct3   [0:MSHR_ENTRIES-1];
+reg [4:0]               mshr_dest_reg [0:MSHR_ENTRIES-1];
+reg [XLEN-1:0]          mshr_orig_addr[0:MSHR_ENTRIES-1];
+reg                     mshr_is_write     [0:MSHR_ENTRIES-1];
+reg [XLEN-1:0]          mshr_wdata        [0:MSHR_ENTRIES-1];
+// True iff this entry's own caller already retired without waiting --
+// gates whether S_FILL's completion pulses mshr_complete (side-channel)
+// or the traditional address-matched resp_ready (caller still holding).
+reg                     mshr_early_retired[0:MSHR_ENTRIES-1];
+// This entry's own primary-line eviction bookkeeping -- captured at
+// allocation time so a QUEUED (not immediately serviced) entry's own
+// writeback-before-fill need isn't lost while it waits its turn.
+reg                     mshr_need_wb  [0:MSHR_ENTRIES-1];
+reg [LINE_IDX_BITS-1:0] mshr_wb_line  [0:MSHR_ENTRIES-1];
+reg [XLEN-1:0]          mshr_wb_base  [0:MSHR_ENTRIES-1];
+reg [MSHR_COUNT_BITS-1:0] mshr_count_r;            // 0..MSHR_ENTRIES, occupancy
+reg [MSHR_IDX_BITS-1:0] mshr_head_r, mshr_tail_r;  // FIFO service order
+// Hit-under-miss: a read that resolves as a genuine main-array hit while
+// state != S_IDLE (bus busy servicing an earlier MSHR). Decoupled from
+// `state` entirely (state stays whatever it is, servicing the earlier
+// entry) -- resolves 1 cycle later via resp_ready/resp_rdata (OR'd in
+// below), matching the existing S_HIT_RD read-hit's own 1-cycle latency.
+// Victim-buffer hits are NOT served this way (deliberate scope cut, see
+// docs/adr/0044) -- only hit_main qualifies.
+reg                     hu_pending_r;
+reg [XLEN-1:0]          hu_data_r;
 
 reg [WORD_OFF_BITS-1:0] fill_word_r;   // shared progress counter: fill AND writeback (mirrors Ptw.v's own pte_r reuse-across-levels precedent)
 reg [LINE_IDX_BITS-1:0] wb_line_r;
@@ -468,10 +583,99 @@ wire [SET_BITS-1:0] access_hit_set = (state == S_IDLE)
     : hit_line_r[LINE_IDX_BITS-1:WAY_BITS];
 
 wire fill_is_last_word = (fill_word_r == LINE_WORDS-1);
-wire fill_do_merge = miss_is_write_r && (fill_word_r == miss_word_off_r);
+wire fill_do_merge = mshr_is_write[mshr_head_r] && (fill_word_r == mshr_word_off[mshr_head_r]);
 wire [31:0] fill_value = fill_do_merge
-    ? dcache_merge_write(m_data_i, miss_funct3_r[1:0], miss_byteoff_r, miss_wdata_r)
+    ? dcache_merge_write(m_data_i, mshr_funct3[mshr_head_r][1:0], mshr_byteoff[mshr_head_r], mshr_wdata[mshr_head_r])
     : m_data_i;
+
+// Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
+// Does req_addr's own line already have an outstanding MSHR (queued or
+// actively being serviced)? Same N-way-compare shape way_hit already uses.
+genvar gm;
+wire [MSHR_ENTRIES-1:0] mshr_line_match;
+generate
+    for (gm = 0; gm < MSHR_ENTRIES; gm = gm + 1) begin : gen_mshr_conflict
+        assign mshr_line_match[gm] = mshr_valid[gm] && (mshr_tag[gm] == tag) && (mshr_set[gm] == set_idx);
+    end
+endgenerate
+wire mshr_addr_line_conflict = |mshr_line_match;
+
+// A fresh dispatch (state==S_IDLE, i.e. mshr_count_r==0 by construction --
+// state never returns to S_IDLE while any MSHR is outstanding, see S_FILL's
+// own completion logic below) mirrors the pre-existing flush/hit/miss
+// if/else-if ordering in the S_IDLE case exactly, so this wire agrees with
+// whichever fork that case block actually takes.
+wire fresh_dispatch_ok    = (state == S_IDLE) && !(flush_all && !flush_active_r);
+// A load miss dispatched fresh: MSHR_ENTRIES==1 keeps this permanently
+// false (falls through to the pre-existing blocking S_FILL fork below,
+// bit-identical to pre-Phase-E behavior -- the Global Constraint this
+// whole phase is built around).
+wire mshr_fresh_load_miss = fresh_dispatch_ok && req_read && !req_write && !hit && req_int_load && (MSHR_ENTRIES > 1);
+
+// A NEW request landing while the bus is genuinely busy servicing an
+// earlier MSHR's own writeback/fill (state==S_WB or S_FILL specifically --
+// NOT `state != S_IDLE`, which would wrongly also include S_HIT_RD, the
+// ordinary 1-cycle delay EVERY existing hit-read already uses regardless
+// of MSHR_ENTRIES; a real bug caught by tb_cache_lru_b1's own regression
+// run -- a plain hit-read was spuriously double-served the cycle after,
+// once via its own S_HIT_RD/served_addr_r completion and once more via a
+// falsely-armed hu_pending_r). Only possible at all once some earlier load
+// already used mshr_accept to retire early, so MSHR_ENTRIES==1 (which never
+// grants mshr_accept) never reaches req_addr actually changing here either;
+// still written unconditionally, safe/inert dead logic at MSHR_ENTRIES==1.
+wire mshr_busy = (state == S_WB) || (state == S_FILL);
+wire mshr_busy_dispatch_hit  = mshr_busy && req_read && !req_write && hit_main;
+wire mshr_room               = (MSHR_ENTRIES > 1) && (mshr_count_r < MSHR_ENTRIES) && !mshr_addr_line_conflict;
+wire mshr_busy_dispatch_miss = mshr_busy && req_read && !req_write && !hit && req_int_load && mshr_room;
+
+wire mshr_accept = mshr_fresh_load_miss || mshr_busy_dispatch_miss;
+
+// Generation 4, Phase E. Unified per-cycle MSHR occupancy bookkeeping --
+// see the two `if`-chains inside the always block below (before and inside
+// case(state)) for why these are computed once, combinationally, rather
+// than left to two independent non-blocking-assignment sites.
+wire mshr_complete_now = (state == S_FILL) && m_ack && fill_is_last_word;
+wire mshr_alloc_now    = mshr_busy_dispatch_miss;
+wire [MSHR_IDX_BITS-1:0] mshr_head_next = (mshr_head_r == MSHR_ENTRIES-1) ? {MSHR_IDX_BITS{1'b0}} : mshr_head_r + 1'b1;
+wire [MSHR_IDX_BITS-1:0] mshr_tail_next = (mshr_tail_r == MSHR_ENTRIES-1) ? {MSHR_IDX_BITS{1'b0}} : mshr_tail_r + 1'b1;
+// How many entries remain queued after this cycle's completion (if any) --
+// MUST also add back a same-cycle busy-dispatch allocation. A real bug
+// found by running the constrained-random harness (a permanent hang, the
+// scoreboard's own pending bit for the stuck entry's destination register
+// then deadlocks pc_stall forever): the original version of this wire
+// argued a new allocation "lands at the TAIL and never affects whether the
+// just-advanced HEAD has more work" -- true in general, but wrong in the
+// specific case this comment failed to consider: when completion drains
+// the queue to exactly 0 and a new entry arrives the SAME cycle, that new
+// entry's own tail-slot IS the just-advanced head's own new position (the
+// queue was empty, so head and tail coincide) -- S_FILL's own completion
+// logic below needs to know there IS more work, or it sends state to
+// S_IDLE while the just-allocated entry sits valid but never serviced,
+// permanently stuck (mshr_count_r itself stays consistent, at 1, because
+// the unified head/tail/count writer above already correctly nets this
+// exact case to "unchanged" -- only THIS wire's own separate, narrower
+// "is there more work for S_FILL to continue with" question was wrong).
+wire [MSHR_COUNT_BITS-1:0] mshr_count_after_complete =
+    (mshr_complete_now ? (mshr_count_r - 1'b1) : mshr_count_r) + (mshr_alloc_now ? 1'b1 : 1'b0);
+// When a same-cycle allocation lands exactly at the just-advanced head's
+// own new position (queue was down to its last entry, refilled the same
+// cycle it drained), that entry's own mshr_need_wb/mshr_wb_line/
+// mshr_wb_base aren't in the array yet -- mshr_alloc's own writes are
+// non-blocking, still in flight this same edge. S_FILL's completion arm
+// below must use the SAME live combinational wires mshr_alloc_now's own
+// busy-dispatch call already computes them from, not read the array back
+// stale. A real bug found by running (same session as mshr_count_after_
+// complete's own fix above, discovered investigating the same hang).
+wire mshr_new_head_is_fresh_alloc = mshr_alloc_now && (mshr_head_next == mshr_tail_r);
+wire mshr_new_head_need_wb = mshr_new_head_is_fresh_alloc
+    ? (valid[set_idx*WAYS + victim_target_way] && dirty[set_idx*WAYS + victim_target_way])
+    : mshr_need_wb[mshr_head_next];
+wire [LINE_IDX_BITS-1:0] mshr_new_head_wb_line = mshr_new_head_is_fresh_alloc
+    ? (set_idx*WAYS + victim_target_way)
+    : mshr_wb_line[mshr_head_next];
+wire [XLEN-1:0] mshr_new_head_wb_base = mshr_new_head_is_fresh_alloc
+    ? {tag_arr[set_idx*WAYS + victim_target_way], set_idx, {OFFSET_BITS{1'b0}}}
+    : mshr_wb_base[mshr_head_next];
 
 // docs/adr/0041. Same LRU-stack update ICache.v's own lru_touch performs.
 task lru_touch;
@@ -488,7 +692,59 @@ task lru_touch;
     end
 endtask
 
-integer reset_i, reset_j, vcw;
+// Generation 4, Phase E. Shared field-writer for a new MSHR entry, called
+// from both the fresh-S_IDLE-dispatch fork and the busy-dispatch fork below
+// -- avoids duplicating this ~15-field assignment list at two call sites.
+// a_early_retired is passed EXPLICITLY by each call site, computed from the
+// SAME condition that actually granted mshr_accept for this allocation --
+// NOT re-derived from a_is_write alone. A real bug found by running the
+// constrained-random harness at MSHR_ENTRIES>1 (not anticipated in the
+// original design): a re-derived "(MSHR_ENTRIES>1) && !a_is_write" is TRUE
+// for ANY read, including a float load (flw) that req_int_load correctly
+// blocked from ever getting mshr_accept -- its own MSHR entry got wrongly
+// marked early-retired anyway, so its completion fired mshr_complete
+// instead of the traditional resp_ready the caller was actually still
+// holding out for, and mshr_complete_reg (driven from req_dest_reg, an
+// F-register encoding for that instruction) silently corrupted whichever
+// INTEGER register happened to share that same 5-bit encoding.
+task mshr_alloc;
+    input [MSHR_IDX_BITS-1:0] slot;
+    input [SET_BITS-1:0]      a_set;
+    input [WAY_BITS-1:0]      a_way;
+    input [TAG_BITS-1:0]      a_tag;
+    input [XLEN-1:0]          a_base;
+    input [WORD_OFF_BITS-1:0] a_word_off;
+    input [1:0]                a_byteoff;
+    input [2:0]                a_funct3;
+    input [4:0]                a_dest_reg;
+    input [XLEN-1:0]           a_orig_addr;
+    input                      a_is_write;
+    input [XLEN-1:0]           a_wdata;
+    input                      a_need_wb;
+    input [LINE_IDX_BITS-1:0]  a_wb_line;
+    input [XLEN-1:0]           a_wb_base;
+    input                      a_early_retired;
+    begin
+        mshr_valid[slot]        <= 1'b1;
+        mshr_set[slot]          <= a_set;
+        mshr_way[slot]          <= a_way;
+        mshr_tag[slot]          <= a_tag;
+        mshr_base[slot]         <= a_base;
+        mshr_word_off[slot]     <= a_word_off;
+        mshr_byteoff[slot]      <= a_byteoff;
+        mshr_funct3[slot]       <= a_funct3;
+        mshr_dest_reg[slot]     <= a_dest_reg;
+        mshr_orig_addr[slot]    <= a_orig_addr;
+        mshr_is_write[slot]     <= a_is_write;
+        mshr_wdata[slot]        <= a_wdata;
+        mshr_early_retired[slot]<= a_early_retired;
+        mshr_need_wb[slot]      <= a_need_wb;
+        mshr_wb_line[slot]      <= a_wb_line;
+        mshr_wb_base[slot]      <= a_wb_base;
+    end
+endtask
+
+integer reset_i, reset_j, reset_m, vcw;
 always @(posedge clk) begin
     if (~rst) begin
         state <= S_IDLE;
@@ -505,6 +761,13 @@ always @(posedge clk) begin
             for (reset_j = 0; reset_j < WAYS; reset_j = reset_j + 1)
                 age[reset_i][reset_j] <= reset_j[WAY_BITS-1:0];
         end
+        // Generation 4, Phase E.
+        mshr_count_r <= {MSHR_COUNT_BITS{1'b0}};
+        mshr_head_r  <= {MSHR_IDX_BITS{1'b0}};
+        mshr_tail_r  <= {MSHR_IDX_BITS{1'b0}};
+        hu_pending_r <= 1'b0;
+        for (reset_m = 0; reset_m < MSHR_ENTRIES; reset_m = reset_m + 1)
+            mshr_valid[reset_m] <= 1'b0;
     end
     else begin
         flush_done_r <= 1'b0;   // default: one-cycle pulse, cleared unless set below
@@ -515,6 +778,66 @@ always @(posedge clk) begin
         // completion (below, inside S_FILL).
         if (REPLACEMENT_POLICY == POLICY_LRU && access_hit)
             lru_touch(access_hit_set, access_hit_way);
+
+        // Generation 4, Phase E (docs/adr/0044). Hit-under-miss: decoupled
+        // from `state`/case(state) below entirely -- see hu_pending_r's own
+        // header comment. Defaults to 0 unless mshr_busy_dispatch_hit fires
+        // this cycle (a pure 1-cycle pulse, no queue -- at most one
+        // hit-under-miss can be "in flight" at a time by construction, the
+        // caller holds this exact request for its one committed stall
+        // cycle same as an ordinary S_HIT_RD read-hit).
+        if (mshr_busy_dispatch_hit) begin
+            hu_pending_r <= 1'b1;
+            hu_data_r    <= dcache_extend_read(hit_data, req_funct3, byte_off);
+        end
+        else begin
+            hu_pending_r <= 1'b0;
+        end
+
+        // Generation 4, Phase E. Single writer for mshr_count_r/mshr_head_r/
+        // mshr_tail_r covering BOTH a same-cycle bus-service completion
+        // (mshr_complete_now, the current head's fill just finished) and a
+        // same-cycle busy-dispatch allocation (mshr_alloc_now, a new load
+        // miss queued while busy) -- kept as one if/else-if chain
+        // specifically so neither can silently clobber the other's write
+        // to the SAME registers in the same always-block invocation (two
+        // separate top-level `if`s both non-blocking-assigning mshr_count_r
+        // this same cycle would only keep the textually-later one). The
+        // fresh-S_IDLE-dispatch allocation's own count_r/tail_r writes stay
+        // inside the S_IDLE case arm below -- mutually exclusive with both
+        // conditions here by construction (state can't be S_IDLE and also
+        // != S_IDLE/== S_FILL at once).
+        if (mshr_complete_now && mshr_alloc_now) begin
+            mshr_head_r <= mshr_head_next;
+            mshr_tail_r <= mshr_tail_next;
+            // count net-unchanged (one entry leaves, one arrives) -- no
+            // assignment needed, non-blocking "no write" keeps the old value.
+        end
+        else if (mshr_complete_now) begin
+            mshr_head_r  <= mshr_head_next;
+            mshr_count_r <= mshr_count_r - 1'b1;
+        end
+        else if (mshr_alloc_now) begin
+            mshr_tail_r  <= mshr_tail_next;
+            mshr_count_r <= mshr_count_r + 1'b1;
+        end
+
+        if (mshr_complete_now)
+            mshr_valid[mshr_head_r] <= 1'b0;
+
+        if (mshr_alloc_now)
+            mshr_alloc(mshr_tail_r, set_idx, victim_target_way, tag,
+                       {req_addr[XLEN-1:OFFSET_BITS], {OFFSET_BITS{1'b0}}},
+                       word_off, byte_off, req_funct3, req_dest_reg, req_addr,
+                       1'b0, {XLEN{1'b0}},   // never a store -- see module header
+                       valid[set_idx*WAYS + victim_target_way] && dirty[set_idx*WAYS + victim_target_way],
+                       set_idx*WAYS + victim_target_way,
+                       {tag_arr[set_idx*WAYS + victim_target_way], set_idx, {OFFSET_BITS{1'b0}}},
+                       1'b1);   // always early-retired -- mshr_alloc_now (mshr_busy_dispatch_miss) already requires req_int_load
+                       // No victim-cache interaction for a queued-while-busy
+                       // entry (vc_do_swap/vc_do_insert stay gated
+                       // state==S_IDLE, unchanged) -- deliberate scope cut,
+                       // docs/adr/0044.
 
         case (state)
             S_IDLE: begin
@@ -584,21 +907,37 @@ always @(posedge clk) begin
                         end
                     end
                     else begin
-                        miss_set_r      <= set_idx;
-                        miss_tag_r      <= tag;
-                        miss_way_r      <= victim_target_way;
-                        miss_base_r     <= {req_addr[XLEN-1:OFFSET_BITS], {OFFSET_BITS{1'b0}}};
-                        miss_word_off_r <= word_off;
-                        miss_byteoff_r  <= byte_off;
-                        miss_funct3_r   <= req_funct3;
-                        miss_is_write_r <= req_write;
-                        miss_wdata_r    <= req_wdata;
-                        miss_orig_addr_r <= req_addr;
+                        // Generation 4, Phase E. Was a flat miss_*_r write;
+                        // now allocates into the MSHR array at mshr_tail_r
+                        // (== mshr_head_r here, queue is empty -- state
+                        // can't be S_IDLE otherwise, see mshr_room's own
+                        // header comment) via the shared mshr_alloc task.
+                        // Bus-service kickoff below (wb_line_r/wb_base_r/
+                        // vwb_active_r/state) is UNCHANGED from pre-Phase-E
+                        // -- still driven by the live combinational wires,
+                        // not the array (mshr_alloc's own writes aren't
+                        // visible until next cycle, by which point state
+                        // already left S_IDLE).
+                        mshr_alloc(mshr_tail_r, set_idx, victim_target_way, tag,
+                                   {req_addr[XLEN-1:OFFSET_BITS], {OFFSET_BITS{1'b0}}},
+                                   word_off, byte_off, req_funct3, req_dest_reg, req_addr,
+                                   req_write, req_wdata,
+                                   valid[set_idx*WAYS + victim_target_way] && dirty[set_idx*WAYS + victim_target_way],
+                                   set_idx*WAYS + victim_target_way,
+                                   {tag_arr[set_idx*WAYS + victim_target_way], set_idx, {OFFSET_BITS{1'b0}}},
+                                   mshr_fresh_load_miss);   // the SAME condition that actually granted mshr_accept for this allocation -- see mshr_alloc's own header comment for the bug this closes
+                        mshr_count_r <= mshr_count_r + 1'b1;
+                        mshr_tail_r  <= (mshr_tail_r == MSHR_ENTRIES-1) ? {MSHR_IDX_BITS{1'b0}} : mshr_tail_r + 1'b1;
                         // docs/adr/0042. The victim buffer's own eviction
                         // (if do_insert's target FIFO slot was valid+dirty)
                         // needs writing back too -- latched here regardless
                         // of which fork below is taken (see S_WB's own
-                        // completion logic for how it's chained in).
+                        // completion logic for how it's chained in). Only
+                        // ever set from THIS fork (a fresh S_IDLE dispatch)
+                        // -- see mshr_busy_dispatch_miss's own header
+                        // comment for why a queued-while-busy entry never
+                        // gets victim-buffer interaction (a deliberate,
+                        // documented scope cut, docs/adr/0044).
                         vwb_pending_r <= evict_out_valid && evict_out_dirty;
                         vwb_tag_r     <= evict_out_tag;
                         vwb_data_r    <= evict_out_data;
@@ -685,15 +1024,37 @@ always @(posedge clk) begin
 
             S_FILL: begin
                 if (m_ack) begin
-                    data_arr[(miss_set_r*WAYS + miss_way_r)*LINE_WORDS + fill_word_r] <= fill_value;
+                    data_arr[(mshr_set[mshr_head_r]*WAYS + mshr_way[mshr_head_r])*LINE_WORDS + fill_word_r] <= fill_value;
                     if (fill_is_last_word) begin
-                        valid[miss_set_r*WAYS + miss_way_r]   <= 1'b1;
-                        tag_arr[miss_set_r*WAYS + miss_way_r] <= miss_tag_r;
-                        dirty[miss_set_r*WAYS + miss_way_r]   <= miss_is_write_r;   // a read-miss fill is clean; a write-allocate fill is dirty
-                        victim[miss_set_r] <= (miss_way_r == WAYS-1) ? {WAY_BITS{1'b0}} : miss_way_r + 1'b1;
+                        valid[mshr_set[mshr_head_r]*WAYS + mshr_way[mshr_head_r]]   <= 1'b1;
+                        tag_arr[mshr_set[mshr_head_r]*WAYS + mshr_way[mshr_head_r]] <= mshr_tag[mshr_head_r];
+                        dirty[mshr_set[mshr_head_r]*WAYS + mshr_way[mshr_head_r]]   <= mshr_is_write[mshr_head_r];   // a read-miss fill is clean; a write-allocate fill is dirty
+                        victim[mshr_set[mshr_head_r]] <= (mshr_way[mshr_head_r] == WAYS-1) ? {WAY_BITS{1'b0}} : mshr_way[mshr_head_r] + 1'b1;
                         if (REPLACEMENT_POLICY == POLICY_LRU)
-                            lru_touch(miss_set_r, miss_way_r);
-                        state <= S_IDLE;
+                            lru_touch(mshr_set[mshr_head_r], mshr_way[mshr_head_r]);
+                        // Generation 4, Phase E. mshr_valid[mshr_head_r]/
+                        // mshr_count_r/mshr_head_r themselves are written by
+                        // the unified block above (mshr_complete_now) -- not
+                        // here, to stay the single writer. Only the NEXT
+                        // `state` (and, if continuing to a new head that
+                        // itself needs a primary-line writeback first,
+                        // wb_line_r/wb_base_r) is this arm's own job.
+                        if (mshr_count_after_complete == {MSHR_COUNT_BITS{1'b0}}) begin
+                            state <= S_IDLE;
+                        end
+                        else begin
+                            fill_word_r <= {WORD_OFF_BITS{1'b0}};
+                            if (mshr_new_head_need_wb) begin
+                                wb_line_r     <= mshr_new_head_wb_line;
+                                wb_base_r     <= mshr_new_head_wb_base;
+                                wb_return_to_flush_r <= 1'b0;
+                                vwb_active_r  <= 1'b0;   // a queued entry never has victim-chain business, see mshr_alloc_now's own comment above
+                                state <= S_WB;
+                            end
+                            else begin
+                                state <= S_FILL;   // stays S_FILL; mshr_head_r already advancing via the unified block above
+                            end
+                        end
                     end
                     else begin
                         fill_word_r <= fill_word_r + 1'b1;
@@ -734,11 +1095,20 @@ end
 // fresh, on its own timing) -- while a real repeat of the SAME address
 // (e.g. the caller hasn't advanced yet) still correctly matches and
 // harmlessly re-confirms the same answer.
+// Generation 4, Phase E. The S_FILL arm below now also excludes an
+// early-retired entry (mshr_early_retired[mshr_head_r]) -- that caller is
+// long gone by the time this fires, so req_addr==mshr_orig_addr[mshr_head_r]
+// could otherwise spuriously match a genuinely NEW, unrelated request that
+// happens to reuse the same address; its own completion is delivered via
+// mshr_complete instead (below). hu_pending_r (hit-under-miss) OR's in
+// directly -- decoupled from `state`/req_addr matching by construction (see
+// its own header comment), and at MSHR_ENTRIES==1 it's permanently 0.
 assign resp_ready =
     (state == S_IDLE && hit && req_write && (req_read || req_write)) ||
     (state == S_HIT_RD && req_read && req_addr == served_addr_r) ||
-    (state == S_FILL && m_ack && fill_is_last_word
-        && (req_read || req_write) && req_addr == miss_orig_addr_r);
+    (state == S_FILL && m_ack && fill_is_last_word && !mshr_early_retired[mshr_head_r]
+        && (req_read || req_write) && req_addr == mshr_orig_addr[mshr_head_r]) ||
+    hu_pending_r;
 
 // docs/adr/0043-memory-controller-phase-d.md (Generation 4, Phase D). A
 // second, real, pre-existing bug found while chasing the RamWishboneAdapter.v
@@ -763,17 +1133,28 @@ assign resp_ready =
 // this same edge) -- reading it combinationally right now would see the
 // stale pre-write value, so that specific case still uses fill_value
 // directly (the fresh, about-to-be-written value).
-wire [31:0] resp_fill_word = (miss_word_off_r == fill_word_r)
+wire [31:0] resp_fill_word = (mshr_word_off[mshr_head_r] == fill_word_r)
     ? fill_value
-    : data_arr[(miss_set_r*WAYS + miss_way_r)*LINE_WORDS + miss_word_off_r];
+    : data_arr[(mshr_set[mshr_head_r]*WAYS + mshr_way[mshr_head_r])*LINE_WORDS + mshr_word_off[mshr_head_r]];
 
 assign resp_rdata =
     (state == S_HIT_RD && req_read && req_addr == served_addr_r)
         ? dcache_extend_read(hit_rd_word, hit_funct3_r, hit_byteoff_r) :
-    (state == S_FILL && m_ack && fill_is_last_word
-        && (req_read || req_write) && req_addr == miss_orig_addr_r)
-        ? dcache_extend_read(resp_fill_word, miss_funct3_r, miss_byteoff_r) :
+    (state == S_FILL && m_ack && fill_is_last_word && !mshr_early_retired[mshr_head_r]
+        && (req_read || req_write) && req_addr == mshr_orig_addr[mshr_head_r])
+        ? dcache_extend_read(resp_fill_word, mshr_funct3[mshr_head_r], mshr_byteoff[mshr_head_r]) :
+    hu_pending_r ? hu_data_r :
                                                         {XLEN{1'b0}};
+
+// Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
+// mshr_accept was already declared combinationally above (dispatch section).
+// mshr_complete fires the SAME cycle resp_ready's own S_FILL condition
+// would have fired for a non-early-retired entry, but for the OPPOSITE case
+// -- an early-retired load whose own caller already left.
+assign mshr_complete      = (state == S_FILL) && m_ack && fill_is_last_word && mshr_early_retired[mshr_head_r];
+assign mshr_complete_reg  = mshr_dest_reg[mshr_head_r];
+assign mshr_complete_data = dcache_extend_read(resp_fill_word, mshr_funct3[mshr_head_r], mshr_byteoff[mshr_head_r]);
+assign mshr_outstanding   = (mshr_count_r != {MSHR_COUNT_BITS{1'b0}});
 
 assign flush_busy = flush_active_r;
 assign flush_done = flush_done_r;
@@ -782,7 +1163,7 @@ assign m_cyc    = (state == S_WB) || (state == S_FILL);
 assign m_stb    = m_cyc;
 assign m_we     = (state == S_WB);
 assign m_addr   = (state == S_WB) ? (wb_base_r + {{(XLEN-OFFSET_BITS){1'b0}}, fill_word_r, 2'b00})
-                                   : (miss_base_r + {{(XLEN-OFFSET_BITS){1'b0}}, fill_word_r, 2'b00});
+                                   : (mshr_base[mshr_head_r] + {{(XLEN-OFFSET_BITS){1'b0}}, fill_word_r, 2'b00});
 // docs/adr/0042. vwb_active_r selects the victim buffer's own latched
 // evicted line (vwb_data_r, a flat XLEN*LINE_WORDS-wide register, not a
 // data_arr index) instead of the primary miss's own real main-array line.

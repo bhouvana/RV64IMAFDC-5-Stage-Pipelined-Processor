@@ -161,7 +161,11 @@ module PIPELINED #(
     // Default 0 (no extra cost once a burst is already flowing); only
     // consulted when BURST_ENABLE=1 and MEM_LATENCY_D>0. Not yet consumed
     // anywhere as of this commit.
-    parameter MEM_LATENCY_D_BURST = 0
+    parameter MEM_LATENCY_D_BURST = 0,
+    // Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
+    // Outstanding-load-miss queue depth on DCache.v. 1 = disabled,
+    // bit-exact with pre-Phase-E behavior.
+    parameter MSHR_ENTRIES = 1
 )(
     input clk,
     input start,
@@ -824,11 +828,28 @@ wire [6:0] funct7_control;
     Register #(.XLEN(XLEN), .NUM_REGS(NUM_REGS), .SP_INIT(MEM_SIZE_BYTES)) m_Register(
         .clk(clk),
         .rst(start),
-        .regWrite(regWrite_regwb),
+        // Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-
+        // phase-e.md). !mshr_pending_regwb_r suppresses the normal WB-stage
+        // write for a load that retired early with its real data still
+        // outstanding -- see mshr_pending_regwb_r's own header comment
+        // (declared near reg4, forward-referenced here same as every other
+        // MEM-stage-block signal this file's WB section already consumes).
+        // Permanently 1 (no suppression) at MSHR_ENTRIES==1, since
+        // mshr_pending_regwb_r never sets there.
+        .regWrite(regWrite_regwb && !mshr_pending_regwb_r),
         .readReg1(inst_regfd[19:15]),
         .readReg2(inst_regfd[24:20]),
         .writeReg(write_to_Reg_regwb),
         .writeData(writeData_regwb),
+        // Generation 4, Phase E. The MSHR-completion write port, driven
+        // straight off DCache.v's own mshr_complete/mshr_complete_reg/
+        // mshr_complete_data -- see Register.v's own header comment for why
+        // no arbitration logic is needed here (the scoreboard's WAW stall
+        // guarantees this port and the ordinary one above never target the
+        // same register the same cycle).
+        .we2(dcache_mshr_complete),
+        .waddr2(dcache_mshr_complete_reg),
+        .wdata2(dcache_mshr_complete_data),
         .readData1(readData1),
         .readData2(readData2)
     );
@@ -1013,7 +1034,17 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     // instruction already in ID before the miss began would be re-latched
     // into EX every stall cycle instead of exactly once -- the same bug
     // class docs/adr/0016 found for HazardNoForward.v's own stall).
-    .flush(flush | float_load_use_hazard | itlb_miss | icache_miss | imem_wait),  // docs/adr/0024 (Phase I3): imem_wait joins the same I-side group. docs/adr/0019 (Phase C7): bubble reg2 while an flw
+    // Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
+    // scoreboard_stall joins the same front-end-only-interlock category as
+    // itlb_miss/float_load_use_hazard below -- a real bug found by running
+    // the constrained-random harness (MMU+MSHR combo): scoreboard_stall was
+    // already OR'd into pc_stall (freezing PC/fetch) but NOT into reg2's own
+    // flush input here, so reg2 kept re-latching the SAME stalled
+    // instruction's full CONTROL fields into EX every single stall cycle
+    // (not bubbled) instead of exactly once -- the identical bug class this
+    // file's own itlb_miss/float_load_use_hazard additions already document
+    // fixing for their own front-end interlocks.
+    .flush(flush | float_load_use_hazard | itlb_miss | icache_miss | imem_wait | scoreboard_stall),  // docs/adr/0024 (Phase I3): imem_wait joins the same I-side group. docs/adr/0019 (Phase C7): bubble reg2 while an flw
                                           // load-use hazard clears, same "insert a nop, real
                                           // instruction retries from IF/ID" shape as Hazard.v's own
     .branch_taken(branch_taken),
@@ -1609,7 +1640,14 @@ endgenerate
     wire mem_trigger = (CACHE_MODE == CACHE_NONE) ? (memRead_regem || (memWrite_regem && !lsu_ack)) :
         (memRead_regem || (memWrite_regem && !dcache_resp_ready) || fence_pending_r);
     reg mem_stall_done_r;
-    wire mem_stall = mem_trigger && !mem_stall_done_r;
+    // Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
+    // !dcache_mshr_accept suppresses the stall for exactly the cycle a load
+    // miss is accepted into DCache.v's own MSHR queue -- the whole point of
+    // going non-blocking. dcache_mshr_accept is permanently 0 under
+    // CACHE_NONE and at MSHR_ENTRIES==1 (see DCache.v's own mshr_accept
+    // derivation), so this term is inert and mem_stall stays bit-identical
+    // to pre-Phase-E behavior in both of those cases.
+    wire mem_stall = mem_trigger && !mem_stall_done_r && !dcache_mshr_accept;
     always @(posedge clk) begin
         if (~start) mem_stall_done_r <= 1'b0;
         else if (!mem_stall) mem_stall_done_r <= 1'b0;
@@ -1683,13 +1721,61 @@ endgenerate
         (amo_funct5 == `AMO_F5_MAXU) ? ((amo_captured_read_r > readData2_regem) ? amo_captured_read_r : readData2_regem) :
         readData2_regem;  // AMOSWAP, LR (never reaches phase 1 in practice -- see below), SC, default
 
+    // Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
+    // Register scoreboard: tracks every register with a still-outstanding
+    // MSHR fill. alloc fires the same cycle dcache_mshr_accept does (the
+    // destination register of whichever load reg3 currently holds);
+    // complete fires the same cycle dcache_mshr_complete does. Every
+    // dcache_mshr_*/write_to_Reg_regem signal here is forward-referenced to
+    // the MEM-stage bus-master block below, same pattern this file already
+    // relies on for dcache_resp_ready/dcache_flush_done/priv_mode_w.
+    wire [31:0] scoreboard_pending_mask;
+    Scoreboard #(.REG_BITS(REG_ADDR_WIDTH)) m_Scoreboard(
+        .clk(clk), .rst(start),
+        .alloc_valid(dcache_mshr_accept), .alloc_reg(write_to_Reg_regem),
+        .complete_valid(dcache_mshr_complete), .complete_reg(dcache_mshr_complete_reg),
+        .check_reg({REG_ADDR_WIDTH{1'b0}}), .reg_pending(),
+        .pending_mask(scoreboard_pending_mask)
+    );
+    // RAW: this decode-stage instruction reads a register with a pending
+    // MSHR. WAW: this decode-stage instruction's OWN destination register
+    // also has one -- a second producer for the same register is never
+    // allowed to dispatch while the first is still outstanding (this is
+    // what makes Scoreboard.v's own alloc_reg==complete_reg same-cycle case
+    // unreachable in practice, see its header comment). Same stage/shape as
+    // Hazard.v's own `stall` (checked against inst_regfd's rs1/rs2,
+    // decode-stage), joined into pc_stall alongside it below, NOT
+    // reg2_hold -- freezing PC/reg1 is sufficient, reg2 naturally
+    // re-presents the same frozen instruction next cycle, same as every
+    // other load-use-shaped stall in this file.
+    // A real bug found by running the constrained-random harness: the WAW
+    // arm originally checked regWrite_regde/write_to_Reg_regde -- reg2's
+    // OWN OUTPUT, i.e. the instruction ALREADY one stage past decode (the
+    // one currently in EX), not the NEW instruction inst_regfd itself is
+    // about to become. That instruction's own WAW hazard was never
+    // detected at all (checking the wrong, already-committed instruction
+    // instead), letting a genuine WAW race through: a store... no, a
+    // regWrite'ing instruction targeting the same register as a still-
+    // outstanding MSHR could dispatch and retire BEFORE that MSHR's own
+    // late (port2) completion, which then clobbered the correct value.
+    // The fix uses regWrite/inst_regfd[11:7] -- the plain, combinational
+    // Control.v-decoded signals for THIS cycle's inst_regfd, the exact
+    // same wires reg2's own .regWrite/.writeReg input ports consume.
+    wire scoreboard_stall = scoreboard_pending_mask[inst_regfd[19:15]] |
+                             scoreboard_pending_mask[inst_regfd[24:20]] |
+                             (regWrite && scoreboard_pending_mask[inst_regfd[11:7]]);
+
     // docs/adr/00NN-mmu-sv32.md (Phase F5): itlb_miss/dtlb_miss are defined
     // in the MMU translation block below (forward-referenced here).
     // docs/adr/0023-caches.md (Phase G3): icache_miss joins them, same
     // forward-reference pattern, always 0 under CACHE_NONE.
     // docs/adr/0024-variable-latency-memory.md (Phase I3): imem_wait joins
     // them, always 0 under CACHE_WRITEBACK_SETASSOC and at MEM_LATENCY_I=0.
-    assign pc_stall = stall | div_stall | mem_stall | fp_stall | float_load_use_hazard | itlb_miss | dtlb_miss | icache_miss | imem_wait | amo_stall;
+    // Generation 4, Phase E: scoreboard_stall joins them, always 0 unless
+    // some earlier load's own MSHR is genuinely still outstanding
+    // (permanently 0 at MSHR_ENTRIES==1, since dcache_mshr_accept never
+    // fires there -- see DCache.v's own mshr_accept derivation).
+    assign pc_stall = stall | div_stall | mem_stall | fp_stall | float_load_use_hazard | itlb_miss | dtlb_miss | icache_miss | imem_wait | amo_stall | scoreboard_stall;
 
     // reg2's own hold condition, factored out for reuse below (CSR.v's write
     // gating needs to know exactly the same thing reg2 does: "is this
@@ -2957,6 +3043,10 @@ end
     wire dcache_access_hit, dcache_access_miss;
     wire dcache_hit_pulse_w  = dcache_access_hit;
     wire dcache_miss_pulse_w = dcache_access_miss;
+    // Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
+    wire dcache_mshr_accept, dcache_mshr_complete, dcache_mshr_outstanding;
+    wire [4:0] dcache_mshr_complete_reg;
+    wire [XLEN-1:0] dcache_mshr_complete_data;
     generate
     if (CACHE_MODE == CACHE_NONE) begin : gen_dcache_none
         assign dcache_resp_ready = 1'b0;
@@ -2973,16 +3063,36 @@ end
         assign dcache_m_cti = `CTI_CLASSIC;
         assign dcache_access_hit = 1'b0;
         assign dcache_access_miss = 1'b0;
+        assign dcache_mshr_accept = 1'b0;
+        assign dcache_mshr_complete = 1'b0;
+        assign dcache_mshr_complete_reg = 5'b0;
+        assign dcache_mshr_complete_data = {XLEN{1'b0}};
+        assign dcache_mshr_outstanding = 1'b0;
     end else begin : gen_dcache_writeback
         DCache #(.XLEN(XLEN), .WAYS(DCACHE_WAYS), .CACHE_SIZE_BYTES(DCACHE_SIZE_BYTES),
                  .LINE_BYTES(DCACHE_LINE_BYTES), .REPLACEMENT_POLICY(REPLACEMENT_POLICY),
-                 .VICTIM_ENTRIES(VICTIM_ENTRIES), .BURST_ENABLE(BURST_ENABLE)) m_DCache(
+                 .VICTIM_ENTRIES(VICTIM_ENTRIES), .BURST_ENABLE(BURST_ENABLE),
+                 .MSHR_ENTRIES(MSHR_ENTRIES)) m_DCache(
             .clk(clk), .rst(start),
             .req_read(memRead_regem && !ptw_busy),
             .req_write(memWrite_regem && !ptw_busy),
             .req_addr(ALUOut_regem), .req_wdata(readData2_regem), .req_funct3(funct3_regem),
+            .req_dest_reg(write_to_Reg_regem),
+            // Generation 4, Phase E. See DCache.v's own req_int_load header
+            // comment -- regWrite_regem is exactly true for a plain integer
+            // load (OPCODE_LOAD) and false for a float load (OPCODE_LOAD_FP
+            // sets fRegWrite, never regWrite), the real found-by-running
+            // gap this port closes.
+            .req_int_load(regWrite_regem),
             .resp_rdata(dcache_resp_rdata), .resp_ready(dcache_resp_ready),
-            .flush_all(fence_pending_r && !ptw_busy && !fence_flush_started_r),
+            .mshr_accept(dcache_mshr_accept), .mshr_complete(dcache_mshr_complete),
+            .mshr_complete_reg(dcache_mshr_complete_reg), .mshr_complete_data(dcache_mshr_complete_data),
+            .mshr_outstanding(dcache_mshr_outstanding),
+            // Generation 4, Phase E. !dcache_mshr_outstanding joins the
+            // existing gate: fence must wait for every outstanding MSHR to
+            // drain first -- a line still mid-fill has no meaningful
+            // dirty/clean state yet for the scan to act on.
+            .flush_all(fence_pending_r && !ptw_busy && !fence_flush_started_r && !dcache_mshr_outstanding),
             .flush_busy(dcache_flush_busy), .flush_done(dcache_flush_done),
             .m_cyc(dcache_m_cyc), .m_stb(dcache_m_stb), .m_we(dcache_m_we),
             .m_addr(dcache_m_addr), .m_data_o(dcache_m_data_o), .m_sel(dcache_m_sel),
@@ -3347,6 +3457,34 @@ reg4 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg4(
     .isAmo_regwb(isAmo_regwb)
 );
 wire isAmo_regwb;  // docs/adr/0038-a-extension-phase-v.md
+
+// Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
+// Shadow, hand-mirrored regem->regwb shift register for a single new bit
+// (does THIS instruction's own destination register have a still-pending
+// MSHR it just allocated) -- NOT a new field threaded through reg3.v/
+// reg4.v's own fixed port lists, just one plain register updating on the
+// IDENTICAL `!(mem_stall | amo_stall)` condition those modules already use
+// for their own hold, so it shifts in lockstep with them by construction.
+// ONE stage, not two: dcache_mshr_accept is ALREADY a "regem-stage" live
+// signal (combinational off whichever instruction reg3 currently holds,
+// exactly like regWrite_regem itself), not something computed upstream of
+// reg3 -- a real bug found by running (tb_cache_mshr_e1.v's own dut2):
+// an earlier version of this register mirrored dcache_mshr_accept through
+// a redundant extra stage first, landing the suppression flag on the
+// FOLLOWING instruction (one cycle late) instead of the load itself,
+// silently dropping that next instruction's own real WB-stage write.
+// When dcache_mshr_accept fires, reg3/reg4 both advance normally this
+// cycle (mem_stall was suppressed) -- the retiring instruction's own
+// WB-stage write must be suppressed too (its real data hasn't arrived yet;
+// it comes later via RegisterFile.v's own we2/waddr2/wdata2, driven
+// straight off dcache_mshr_complete below), or a fresh literal 0/garbage
+// read would briefly land in the register before the real value overwrites
+// it.
+reg mshr_pending_regwb_r;
+always @(posedge clk) begin
+    if (~start) mshr_pending_regwb_r <= 1'b0;
+    else if (!(mem_stall | amo_stall)) mshr_pending_regwb_r <= dcache_mshr_accept;
+end
 
 // ==========================================================================
 // WB -- Writeback
