@@ -290,7 +290,22 @@ honest stopping point for Generation 3 as currently scoped. See
   I$/D$) live as a new `VICTIM_ENTRIES` parameter, resolving a promote-hit
   in the same cycle as an ordinary hit. L2 remains real, unscoped backlog.
 - **Hardware prefetchers** — next-line, stride, stream.
-- **Non-blocking cache** — multiple outstanding misses, MSHRs.
+- **Non-blocking cache** — multiple outstanding misses, MSHRs. **DONE
+  (Phase E, `docs/adr/0044`)**: a real `MSHR_ENTRIES`-deep outstanding-
+  load-miss queue on `design/DCache.v`, `pc_stall` decoupled from a D$
+  miss when a slot is free (loads only, scope-cut deliberately), a new
+  `design/Scoreboard.v` for RAW/WAW tracking, and a second write port on
+  `design/Register.v` for out-of-issue-order completion. Six real bugs
+  found and fixed along the way (an `mshr_count_r` width bug, a mirror-
+  register off-by-one, floating loads never excluded from non-blocking
+  eligibility, `mshr_early_retired` re-derived instead of passed through,
+  a same-cycle complete+alloc coincidence, and a WAW check that read the
+  wrong pipeline stage plus a missing `reg2` bubble) — the biggest
+  structural change any Gen4 phase has made, and the bug count reflects
+  that honestly. A real, measured win on a hand-built worked example
+  (19 vs 25 cycles, ~24% faster) but an honest zero delta on this
+  project's own tiny benchmark kernels, same "not much to exploit"
+  pattern every prior cache-family phase found.
 - **Memory controller** — burst transfers, improved arbitration. **DONE
   (Phase D, `docs/adr/0043`)**: new standalone `design/MemoryController.v`
   (extracts the existing multi-requester bus mux, no policy change — a real
