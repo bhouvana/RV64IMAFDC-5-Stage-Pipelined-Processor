@@ -288,7 +288,26 @@ honest stopping point for Generation 3 as currently scoped. See
   caches. **Victim cache DONE (Phase C, `docs/adr/0042`)**: new standalone
   `design/VictimCache.v` (small fully-associative buffer, shared by both
   I$/D$) live as a new `VICTIM_ENTRIES` parameter, resolving a promote-hit
-  in the same cycle as an ordinary hit. L2 remains real, unscoped backlog.
+  in the same cycle as an ordinary hit. **L2 DONE (Phase F, `docs/adr/0045`)**:
+  new standalone `design/L2Cache.v` (one implementation, two instances —
+  I-side splices via a new `ICache.v` bus-master port + new
+  `InstructionMemoryWishboneAdapter.v`; D-side splices between `DCache.v`
+  and `MemoryController.v`), live as a new `L2_SIZE_BYTES`/`L2_WAYS`/
+  `L2_REPLACEMENT_POLICY` parameter family, inclusive (unconditional
+  probe-before-evict into L1, no `present_in_l1` tracking — L1's own
+  response is always authoritative). A real measured win on a hand-built
+  worked example (148 vs 162 cycles, L2 hit vs a full round trip to
+  backing RAM) but an honest *negative* delta on this project's own tiny
+  benchmark kernels (+9% to +55% cycles — these already fit inside 4KB L1,
+  so L2 only ever adds latency with nothing to relieve). Found and fixed a
+  real deadlock (probe response was gated to `state==S_IDLE`, a genuine
+  circular wait with L2's own eviction servicing), two previously-latent
+  `docs/adr/0041`-class part-select bugs (the fully-associative sizing gap
+  that ADR explicitly flagged as unfixed), a real gap where `fence` never
+  reached L2 at all (dirty writes silently stuck forever), and a real
+  pre-existing, unrelated bug (`DCache.v` never supported RV64 `ld`/`sd`,
+  found via a combination — `--xlen 64` + `--cache-mode 1` — no prior
+  phase's own sweep had ever exercised together).
 - **Hardware prefetchers** — next-line, stride, stream.
 - **Non-blocking cache** — multiple outstanding misses, MSHRs. **DONE
   (Phase E, `docs/adr/0044`)**: a real `MSHR_ENTRIES`-deep outstanding-
