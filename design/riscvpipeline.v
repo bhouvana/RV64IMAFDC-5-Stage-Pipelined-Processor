@@ -179,7 +179,16 @@ module PIPELINED #(
     // DCACHE_LINE_BYTES).
     parameter L2_SIZE_BYTES = 0,
     parameter L2_WAYS = 4,
-    parameter L2_REPLACEMENT_POLICY = 0
+    parameter L2_REPLACEMENT_POLICY = 0,
+    // Generation 4, Phase G (docs/adr/0046-hardware-prefetchers-phase-g.md).
+    // 0 (default, PF_OFF) = disabled, bit-exact with pre-Phase-G behavior.
+    // 1/2/3 = PF_NEXT_LINE/PF_STRIDE/PF_STREAM, an opportunistic background
+    // prefetch through each cache's own existing fill machinery (no new bus
+    // master, no MemoryController.v change -- see Prefetcher.v's header).
+    // D$ prefetching also needs MSHR_ENTRIES>1; I$ prefetching also needs
+    // L2_SIZE_BYTES!=0 (both documented no-ops otherwise, enforced inside
+    // ICache.v/DCache.v themselves, not here).
+    parameter PREFETCH_MODE = 0
 )(
     input clk,
     input start,
@@ -511,7 +520,8 @@ wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on
         ICache #(.INIT_FILE(INIT_FILE), .IMEM_SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN),
                  .WAYS(ICACHE_WAYS), .CACHE_SIZE_BYTES(ICACHE_SIZE_BYTES), .LINE_BYTES(ICACHE_LINE_BYTES),
                  .MEM_LATENCY(MEM_LATENCY_I), .REPLACEMENT_POLICY(REPLACEMENT_POLICY),
-                 .VICTIM_ENTRIES(VICTIM_ENTRIES), .L2_ENABLE(L2_SIZE_BYTES != 0)) m_ICache(
+                 .VICTIM_ENTRIES(VICTIM_ENTRIES), .L2_ENABLE(L2_SIZE_BYTES != 0),
+                 .PREFETCH_MODE(PREFETCH_MODE)) m_ICache(
             .clk(clk), .rst(start),
             .readAddr(imem_phys_addr),
             .inst(inst),
@@ -3219,7 +3229,7 @@ end
         DCache #(.XLEN(XLEN), .WAYS(DCACHE_WAYS), .CACHE_SIZE_BYTES(DCACHE_SIZE_BYTES),
                  .LINE_BYTES(DCACHE_LINE_BYTES), .REPLACEMENT_POLICY(REPLACEMENT_POLICY),
                  .VICTIM_ENTRIES(VICTIM_ENTRIES), .BURST_ENABLE(BURST_ENABLE),
-                 .MSHR_ENTRIES(MSHR_ENTRIES)) m_DCache(
+                 .MSHR_ENTRIES(MSHR_ENTRIES), .PREFETCH_MODE(PREFETCH_MODE)) m_DCache(
             .clk(clk), .rst(start),
             .req_read(memRead_regem && !ptw_busy),
             .req_write(memWrite_regem && !ptw_busy),
