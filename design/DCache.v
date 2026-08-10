@@ -1,6 +1,7 @@
 `default_nettype none
 
 `include "wb_defs.vh"
+`include "riscv_defs.vh"
 
 // docs/adr/0023-caches.md (Phase G4). Set-associative, PIPT, write-back +
 // write-allocate data cache. Standalone this phase (G4): its own Wishbone-
@@ -212,6 +213,19 @@ localparam POLICY_LRU         = 2;
 
 wire [WORD_OFF_BITS-1:0] word_off = req_addr[OFFSET_BITS-1:2];
 wire [1:0]               byte_off = req_addr[1:0];
+// Generation 4 Phase F (docs/adr/0045). `sd`'s own upper 32 bits, computed
+// width-safely at every XLEN: zero-extend req_wdata up to a real 64 bits
+// FIRST, then slice -- a literal `req_wdata[63:32]` is a real, in-range
+// slice only at XLEN>=64; at XLEN=32 it's an out-of-bounds part-select
+// (still elaborates under Icarus, silently reading 'bx with a real
+// warning -- this project's own zero-warning bar catches it) even though
+// every real consumer of this wire is itself gated `XLEN>=64` and never
+// actually reads it there. This form is safe/warning-free at both widths
+// (the `{(64-XLEN){1'b0}}` padding term itself reduces to a harmless
+// zero-width nested repeat at XLEN==64, the same legal-when-nested form
+// DataMemoryBRAM.v's own `{{(XLEN-32){...}}, ...}` idiom already relies on).
+wire [63:0] req_wdata_ext64 = {{(64-XLEN){1'b0}}, req_wdata};
+wire [31:0] req_wdata_hi32 = req_wdata_ext64[63:32];
 // docs/adr/0041. Same fix as ICache.v's own set_idx -- see its comment for
 // the full rationale.
 wire [SET_BITS-1:0]      set_idx;
@@ -620,6 +634,13 @@ endgenerate
 reg [XLEN-1:0]     served_addr_r;   // latched at S_HIT_RD entry -- the address that read is for
 
 wire [31:0] hit_rd_word = data_arr[hit_line_r*LINE_WORDS + hit_word_r];
+// Generation 4 Phase F (docs/adr/0045). `ld`'s own upper 32 bits -- see the
+// S_IDLE write-hit arm's own comment above for the full rationale (a real,
+// pre-existing RV64+cache integration gap this phase's own constrained-
+// random sweep found, unrelated to L2 itself). Only meaningful/read when
+// hit_funct3_r==`F3_LOAD_LD; harmless (an extra combinational read) at
+// every other funct3.
+wire [31:0] hit_rd_word_hi = data_arr[hit_line_r*LINE_WORDS + hit_word_r + 1];
 
 // docs/adr/0041. The way/set access_hit (declared above) touched: at
 // S_IDLE (the write-hit case, resp_ready fires the SAME cycle) it's
@@ -659,9 +680,26 @@ endgenerate
 
 wire fill_is_last_word = (fill_word_r == LINE_WORDS-1);
 wire fill_do_merge = mshr_is_write[mshr_head_r] && (fill_word_r == mshr_word_off[mshr_head_r]);
+// Generation 4 Phase F (docs/adr/0045). `sd`'s own upper-32-bit fill-time
+// merge -- a write-allocate miss for an 8-byte store needs its SECOND
+// (high) word written too, one fill cycle later, using the upper half of
+// the MSHR's own already-XLEN-wide mshr_wdata (which dcache_merge_write's
+// own 32-bit `wdata` port truncates automatically when passed the raw
+// value directly, same as the S_IDLE write-hit arm's own comment already
+// explains). A full 64-bit replace, always -- `sd` never partial-merges,
+// same as `sw` never does.
+wire fill_do_merge_hi = (XLEN >= 64) && mshr_is_write[mshr_head_r]
+    && (mshr_funct3[mshr_head_r] == `F3_STORE_SD) && (fill_word_r == mshr_word_off[mshr_head_r] + 1'b1);
+// Width-safe at every XLEN -- see req_wdata_hi32's own comment above for why
+// a literal `mshr_wdata[mshr_head_r][63:32]` isn't (a real, warning-flagged
+// out-of-range slice at XLEN=32, found by running the zero-warning check).
+wire [63:0] mshr_wdata_ext64 = {{(64-XLEN){1'b0}}, mshr_wdata[mshr_head_r]};
+wire [31:0] mshr_wdata_hi32 = mshr_wdata_ext64[63:32];
 wire [31:0] fill_value = fill_do_merge
     ? dcache_merge_write(m_data_i, mshr_funct3[mshr_head_r][1:0], mshr_byteoff[mshr_head_r], mshr_wdata[mshr_head_r])
-    : m_data_i;
+    : fill_do_merge_hi
+        ? mshr_wdata_hi32
+        : m_data_i;
 
 // Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
 // Does req_addr's own line already have an outstanding MSHR (queued or
@@ -951,6 +989,32 @@ always @(posedge clk) begin
                             if (req_write) begin
                                 data_arr[hit_line_idx*LINE_WORDS + word_off] <=
                                     dcache_merge_write(hit_data, req_funct3[1:0], byte_off, req_wdata);
+                                // Generation 2 (RV64) + Generation 4 Phase F
+                                // integration gap, found by running the
+                                // constrained-random harness at --xlen 64
+                                // --cache-mode 1 combined (never exercised
+                                // together by any prior phase's own sweep --
+                                // confirmed pre-existing, unrelated to L2,
+                                // by reproducing identically with L2
+                                // disabled). data_arr's own LINE_WORDS
+                                // granularity is a fixed 4 bytes regardless
+                                // of XLEN (word_off = req_addr[OFFSET_BITS-1:2]),
+                                // so an 8-byte `sd` (`F3_STORE_SD`) needs a
+                                // SECOND write, one slot higher, for its own
+                                // upper 32 bits -- dcache_merge_write itself
+                                // stays untouched (32-bit, one-slot,
+                                // unchanged) since req_wdata's own low 32
+                                // bits already flow through its existing
+                                // default/sw-shaped arm correctly (funct3_lo
+                                // 2'b11 falls to the same "full replace"
+                                // case 2'b10/sw already uses). Naturally-
+                                // aligned 8-byte access assumed (same
+                                // alignment convention this file's own
+                                // header already documents) -- word_off+1
+                                // is always the correct, in-line adjacent
+                                // slot, never crossing a line boundary.
+                                if (XLEN >= 64 && req_funct3 == `F3_STORE_SD)
+                                    data_arr[hit_line_idx*LINE_WORDS + word_off + 1] <= req_wdata_hi32;
                                 dirty[hit_line_idx] <= 1'b1;
                                 // resp_ready combinational this cycle (see assign below), stays in S_IDLE
                             end
@@ -973,11 +1037,18 @@ always @(posedge clk) begin
                                 // existing S_IDLE&&hit&&req_write arm
                                 // already fires, `hit` having been
                                 // broadened to include vc_lookup_hit).
+                                // Generation 4 Phase F (docs/adr/0045). Same
+                                // sd-upper-32-bits gap the hit_main write
+                                // arm above documents in full -- the
+                                // victim-buffer promote path needs the
+                                // identical second-word handling.
                                 for (vcw = 0; vcw < LINE_WORDS; vcw = vcw + 1)
                                     data_arr[(set_idx*WAYS + victim_target_way)*LINE_WORDS + vcw] <=
                                         (vcw == word_off)
                                             ? dcache_merge_write(vc_lookup_data[vcw*XLEN +: XLEN], req_funct3[1:0], byte_off, req_wdata)
-                                            : vc_lookup_data[vcw*XLEN +: XLEN];
+                                            : (XLEN >= 64 && req_funct3 == `F3_STORE_SD && vcw == word_off + 1)
+                                                ? req_wdata_hi32
+                                                : vc_lookup_data[vcw*XLEN +: XLEN];
                                 tag_arr[set_idx*WAYS + victim_target_way] <= tag;
                                 valid[set_idx*WAYS + victim_target_way]   <= 1'b1;
                                 dirty[set_idx*WAYS + victim_target_way]   <= 1'b1; // a write always dirties it, regardless of the promoted line's own prior dirtiness
@@ -1235,13 +1306,25 @@ assign resp_ready =
 wire [31:0] resp_fill_word = (mshr_word_off[mshr_head_r] == fill_word_r)
     ? fill_value
     : data_arr[(mshr_set[mshr_head_r]*WAYS + mshr_way[mshr_head_r])*LINE_WORDS + mshr_word_off[mshr_head_r]];
+// Generation 4 Phase F (docs/adr/0045). `ld`'s own upper 32 bits -- same
+// "use fill_value if it's the exact word committing THIS cycle, else read
+// the already-committed data_arr slot" logic resp_fill_word's own comment
+// above derives, mirrored one slot higher. Only meaningful when
+// mshr_funct3[mshr_head_r]==`F3_LOAD_LD.
+wire [31:0] resp_fill_word_hi = (mshr_word_off[mshr_head_r] + 1'b1 == fill_word_r)
+    ? fill_value
+    : data_arr[(mshr_set[mshr_head_r]*WAYS + mshr_way[mshr_head_r])*LINE_WORDS + mshr_word_off[mshr_head_r] + 1];
 
 assign resp_rdata =
     (state == S_HIT_RD && req_read && req_addr == served_addr_r)
-        ? dcache_extend_read(hit_rd_word, hit_funct3_r, hit_byteoff_r) :
+        ? ((XLEN >= 64 && hit_funct3_r == `F3_LOAD_LD)
+            ? {hit_rd_word_hi, hit_rd_word}
+            : dcache_extend_read(hit_rd_word, hit_funct3_r, hit_byteoff_r)) :
     (state == S_FILL && m_ack && fill_is_last_word && !mshr_early_retired[mshr_head_r]
         && (req_read || req_write) && req_addr == mshr_orig_addr[mshr_head_r])
-        ? dcache_extend_read(resp_fill_word, mshr_funct3[mshr_head_r], mshr_byteoff[mshr_head_r]) :
+        ? ((XLEN >= 64 && mshr_funct3[mshr_head_r] == `F3_LOAD_LD)
+            ? {resp_fill_word_hi, resp_fill_word}
+            : dcache_extend_read(resp_fill_word, mshr_funct3[mshr_head_r], mshr_byteoff[mshr_head_r])) :
     hu_pending_r ? hu_data_r :
                                                         {XLEN{1'b0}};
 
@@ -1252,7 +1335,12 @@ assign resp_rdata =
 // -- an early-retired load whose own caller already left.
 assign mshr_complete      = (state == S_FILL) && m_ack && fill_is_last_word && mshr_early_retired[mshr_head_r];
 assign mshr_complete_reg  = mshr_dest_reg[mshr_head_r];
-assign mshr_complete_data = dcache_extend_read(resp_fill_word, mshr_funct3[mshr_head_r], mshr_byteoff[mshr_head_r]);
+// Generation 4 Phase F (docs/adr/0045). Same ld-combining special case
+// resp_rdata's own S_FILL arm uses -- a non-blocking (early-retired) ld
+// miss needs its own upper 32 bits here too.
+assign mshr_complete_data = (XLEN >= 64 && mshr_funct3[mshr_head_r] == `F3_LOAD_LD)
+    ? {resp_fill_word_hi, resp_fill_word}
+    : dcache_extend_read(resp_fill_word, mshr_funct3[mshr_head_r], mshr_byteoff[mshr_head_r]);
 assign mshr_outstanding   = (mshr_count_r != {MSHR_COUNT_BITS{1'b0}});
 
 assign flush_busy = flush_active_r;
