@@ -160,6 +160,24 @@ wire is_div_op = (ALUCtl_d == `ALUCTL_DIV) || (ALUCtl_d == `ALUCTL_DIVU) ||
 // comment on the branch-speculation section below for why.
 wire is_branch = branch_c;
 
+// Gen6-I: precise exceptions, ROB-retire-gated (the research finding this
+// whole generation's own planning session made: CSR.v's existing single-
+// trap-scalar, exactly-once-per-instruction contract is satisfied
+// UNMODIFIED as long as only the ROB-retiring instruction ever asserts
+// trap_taken/mret_taken -- no CSR.v change needed at all, unlike every
+// other Gen6-* integration so far). Scope this phase, deliberately
+// narrow: illegal-instruction and ecall (the two causes this core's own
+// decode can already recognize combinationally) plus mret (needed for a
+// complete, testable trap round trip) -- real interrupts (timer/
+// software/external) and the Sv39 MMU (page faults, address translation)
+// are explicitly OUT of scope, real future work, not attempted this
+// pass: both need their own careful design (interrupts need a real
+// retire-boundary injection point; the MMU touches fetch AND
+// LoadStoreQueue.v's own address path).
+wire has_exception = illegalOpcode_c || isEcall_c;
+wire is_trap_related = has_exception || isMret_c;
+
+// ==========================================================================
 // Gen6-H: F-extension, scoped to a real, tested, but deliberately narrow
 // subset -- see design/OOOCore.v's own Gen6-H section further down (right
 // before the float rename stack) for the full rationale on which funct5
@@ -310,6 +328,7 @@ wire [PREG_BITS-1:0] rat_old_preg0;            // rd's PRE-rename mapping (for F
 wire rob_retire_valid0, rob_retire_has_dest0, rob_retire_is_fp_dest0;
 wire [AREG_BITS-1:0] rob_retire_areg0;
 wire [PREG_BITS-1:0] rob_retire_preg0, rob_retire_old_preg0;
+wire [ROB_IDX_BITS-1:0] rob_retire_tag0;
 // ReorderBuffer.v retires up to 2/cycle INTERNALLY (slot0 AND slot1)
 // whenever both happen to be done the same cycle head_r reaches them --
 // entirely independent of how many dispatch ports the caller actually
@@ -328,6 +347,7 @@ wire [PREG_BITS-1:0] rob_retire_preg0, rob_retire_old_preg0;
 wire rob_retire_valid1, rob_retire_has_dest1, rob_retire_is_fp_dest1;
 wire [AREG_BITS-1:0] rob_retire_areg1;
 wire [PREG_BITS-1:0] rob_retire_preg1, rob_retire_old_preg1;
+wire [ROB_IDX_BITS-1:0] rob_retire_tag1;
 wire issue_valid;
 wire [ROB_IDX_BITS-1:0] issue_rob_tag;
 wire [PREG_BITS-1:0] issue_dest_preg;
@@ -377,11 +397,13 @@ wire dispatch_stall = rob_full
                       || (is_mem_op ? lsq_full : (is_div_op ? rs_div_full : (is_fp_op ? rs_falu_full : rs_alu_full)))
                       || (needs_dest && !fl_alloc_ok0)
                       || (is_fp_op && !fl_f_alloc_ok0)   // Gen6-H
-                      || br_inflight_valid_r;   // Gen6-G: single-outstanding-
+                      || br_inflight_valid_r    // Gen6-G: single-outstanding-
                                                   // branch scope cut, see the
                                                   // branch-speculation
                                                   // section's own header
                                                   // comment
+                      || trap_inflight_valid_r;  // Gen6-I: same scope cut,
+                                                  // for exceptions/mret
 wire do_dispatch     = !dispatch_stall;
 
 // FreeList only needs to actually GRANT when this cycle's instruction
@@ -484,9 +506,83 @@ ReorderBuffer #(.ROB_ENTRIES(ROB_ENTRIES), .AREG_BITS(AREG_BITS), .PREG_BITS(PRE
     .complete_en3(falu_complete_valid), .complete_tag3(falu_complete_rob_tag),
     .retire_valid0(rob_retire_valid0), .retire_has_dest0(rob_retire_has_dest0), .retire_is_fp_dest0(rob_retire_is_fp_dest0),
     .retire_areg0(rob_retire_areg0), .retire_preg0(rob_retire_preg0), .retire_old_preg0(rob_retire_old_preg0),
+    .retire_tag0(rob_retire_tag0),
     .retire_valid1(rob_retire_valid1), .retire_has_dest1(rob_retire_has_dest1), .retire_is_fp_dest1(rob_retire_is_fp_dest1),
     .retire_areg1(rob_retire_areg1), .retire_preg1(rob_retire_preg1), .retire_old_preg1(rob_retire_old_preg1),
+    .retire_tag1(rob_retire_tag1),
     .rob_count(rob_count), .rob_full(rob_full), .rob_empty(rob_empty)
+);
+
+// ==========================================================================
+// Gen6-I: precise exceptions via ROB-retire-gated CSR.v. Same "single
+// outstanding speculative thing" scope cut as Gen6-G's own branches
+// (br_inflight_valid_r) -- dispatch of EVERYTHING stalls once a trap-
+// related instruction (illegal opcode, ecall, or mret) is in flight,
+// until it retires. This means the retiring instruction really is the
+// ONLY thing that can ever assert trap_taken/mret_taken, satisfying
+// CSR.v's own existing single-scalar/exactly-once contract with ZERO
+// changes to that module -- the exact research finding this generation's
+// own planning session made before writing any RTL. An excepting
+// instruction still gets an ordinary (no-dest) ROB entry and flows
+// through RS_ALU exactly like a store/branch (harmless garbage ALU
+// computation, discarded) so it retires normally -- only the ACT of
+// retiring it is special.
+reg                     trap_inflight_valid_r;
+reg                     trap_inflight_is_mret_r;
+reg [XLEN-1:0]          trap_inflight_pc_r;
+reg [31:0]              trap_inflight_cause_r;
+reg [ROB_IDX_BITS-1:0]  trap_inflight_rob_tag_r;
+
+wire trap_resolve = rob_retire_valid0 && trap_inflight_valid_r && (rob_retire_tag0 == trap_inflight_rob_tag_r);
+wire csr_trap_taken = trap_resolve && !trap_inflight_is_mret_r;
+wire csr_mret_taken = trap_resolve && trap_inflight_is_mret_r;
+
+always @(posedge clk) begin
+    if (~rst) begin
+        trap_inflight_valid_r <= 1'b0;
+    end
+    else begin
+        if (do_dispatch && is_trap_related) begin
+            trap_inflight_valid_r   <= 1'b1;
+            trap_inflight_is_mret_r <= isMret_c;
+            trap_inflight_pc_r      <= pc_r;
+            trap_inflight_cause_r   <= isEcall_c ? `MCAUSE_ECALL_FROM_M : `MCAUSE_ILLEGAL_INSTRUCTION;
+            trap_inflight_rob_tag_r <= rob_alloc_tag0;
+        end
+        else if (trap_resolve) begin
+            trap_inflight_valid_r <= 1'b0;
+        end
+    end
+end
+
+wire [XLEN-1:0] csr_mtvec_val, csr_mepc_val;
+
+// Every HPC/performance-counter pulse input and every S-mode/MMU-only
+// output is tied off/left open this phase -- CSR read/write instructions
+// (csrrw/csrrs/csrrc) themselves aren't dispatched/executed yet either
+// (csr_write_en permanently 0); only the trap-entry/mret machinery is
+// live. Real future work alongside the MMU/interrupts noted above.
+CSR #(.XLEN(XLEN)) m_CSR(
+    .clk(clk), .rst(rst),
+    .csr_write_en(1'b0), .csr_addr(12'd0), .csr_op(2'd0), .csr_wdata({XLEN{1'b0}}), .csr_rdata(),
+    .trap_taken(csr_trap_taken), .trap_pc(trap_inflight_pc_r),
+    .trap_cause({{(XLEN-32){1'b0}}, trap_inflight_cause_r}), .trap_is_interrupt(1'b0),
+    .trap_value({XLEN{1'b0}}),
+    .mret_taken(csr_mret_taken), .sret_taken(1'b0),
+    .fp_flags_we(1'b0), .fp_flags_in(5'd0), .frm_val(),
+    .msip_pending(1'b0), .timer_pending(1'b0), .ext_pending(1'b0),
+    .mstatus_mie(), .mie_msie(), .mie_mtie(), .mie_meie(),
+    .mie_ssie(), .mie_stie(), .mip_ssip(), .mip_stip(),
+    .mstatus_mpie(), .mstatus_sie(), .mstatus_spie(), .mstatus_spp(), .mstatus_mpp(),
+    .mtvec_val(csr_mtvec_val), .mepc_val(csr_mepc_val),
+    .priv_mode_val(), .stvec_val(), .sepc_val(), .trap_target_is_s(),
+    .satp_mode_val(), .satp_ppn_val(),
+    .instret_pulse(1'b0), .branch_retired_pulse(1'b0), .mispredict_pulse(1'b0),
+    .icache_hit_pulse(1'b0), .icache_miss_pulse(1'b0), .dcache_hit_pulse(1'b0), .dcache_miss_pulse(1'b0),
+    .stall_cycle_pulse(1'b0), .interrupt_pulse(1'b0), .exception_pulse(1'b0),
+    .stall_hazard_pulse(1'b0), .stall_div_pulse(1'b0), .stall_mem_pulse(1'b0), .stall_fp_pulse(1'b0),
+    .stall_float_lu_pulse(1'b0), .stall_itlb_pulse(1'b0), .stall_dtlb_pulse(1'b0),
+    .stall_icache_pulse(1'b0), .stall_imem_wait_pulse(1'b0)
 );
 
 // Dispatch-time readiness query -- rs1/rs2's CURRENT physical tags
@@ -856,6 +952,12 @@ PhysicalRegisterFile #(.XLEN(XLEN), .NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS)
 always @(posedge clk) begin
     if (~rst)
         pc_r <= {XLEN{1'b0}};
+    else if (trap_resolve)   // Gen6-I: highest priority -- an exception/
+                               // mret retiring always redirects, same
+                               // "can't coincide with do_dispatch" argument
+                               // as br_resolve's own (trap_inflight_valid_r
+                               // is also folded into dispatch_stall)
+        pc_r <= csr_trap_taken ? csr_mtvec_val : csr_mepc_val;
     else if (br_resolve && br_mispredict)
         pc_r <= br_correct_target;
     else if (do_dispatch)

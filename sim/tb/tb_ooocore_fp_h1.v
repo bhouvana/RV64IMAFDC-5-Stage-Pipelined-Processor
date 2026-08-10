@@ -15,6 +15,7 @@
 `include "Divider.v"
 `include "Bht.v"
 `include "Btb.v"
+`include "CSR.v"
 
 // Generation 6, Gen6-H. OOOCore.v's first F-extension end-to-end test:
 // fetch->decode->rename(SEPARATE float RAT/FreeList/PRF)->dispatch->

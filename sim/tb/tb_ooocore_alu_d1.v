@@ -15,6 +15,7 @@
 `include "Divider.v"
 `include "Bht.v"
 `include "Btb.v"
+`include "CSR.v"
 
 // Generation 6, Gen6-D. OOOCore.v's first end-to-end test: fetch -> decode
 // -> rename -> dispatch -> RS -> ALU execute -> CDB -> ROB retire, all the

@@ -15,6 +15,7 @@
 `include "Divider.v"
 `include "Bht.v"
 `include "Btb.v"
+`include "CSR.v"
 
 // Generation 6, Gen6-F. OOOCore.v's first MUL/DIV end-to-end test.
 // MUL/MULH/MULHSU/MULHU flow through the pre-existing RS_ALU/ALU.v path

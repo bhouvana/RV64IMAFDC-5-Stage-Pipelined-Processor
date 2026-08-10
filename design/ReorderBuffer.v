@@ -89,6 +89,16 @@ module ReorderBuffer #(
     output wire [AREG_BITS-1:0]  retire_areg0,
     output wire [PREG_BITS-1:0]  retire_preg0,
     output wire [PREG_BITS-1:0]  retire_old_preg0,
+    output wire [IDX_BITS-1:0]   retire_tag0,   // Gen6-I -- this entry's
+                                                  // own ROB index, so a
+                                                  // caller-side in-flight
+                                                  // tracker (e.g. a single
+                                                  // pending exception) can
+                                                  // tell exactly when ITS
+                                                  // OWN entry is the one
+                                                  // retiring, same tag-match
+                                                  // discipline br_resolve/
+                                                  // div_complete already use
 
     output wire                  retire_valid1,
     output wire                  retire_has_dest1,
@@ -96,6 +106,7 @@ module ReorderBuffer #(
     output wire [AREG_BITS-1:0]  retire_areg1,
     output wire [PREG_BITS-1:0]  retire_preg1,
     output wire [PREG_BITS-1:0]  retire_old_preg1,
+    output wire [IDX_BITS-1:0]   retire_tag1,
 
     output wire [CNT_BITS-1:0]   rob_count,
     output wire                  rob_full,
@@ -152,6 +163,7 @@ assign retire_is_fp_dest0 = e_is_fp_dest[head_r];
 assign retire_areg0       = e_areg[head_r];
 assign retire_preg0       = e_preg[head_r];
 assign retire_old_preg0   = e_old_preg[head_r];
+assign retire_tag0        = head_r;
 
 assign retire_valid1      = slot1_can_retire;
 assign retire_has_dest1   = e_has_dest[head1_idx];
@@ -159,6 +171,7 @@ assign retire_is_fp_dest1 = e_is_fp_dest[head1_idx];
 assign retire_areg1       = e_areg[head1_idx];
 assign retire_preg1       = e_preg[head1_idx];
 assign retire_old_preg1   = e_old_preg[head1_idx];
+assign retire_tag1        = head1_idx;
 
 wire [1:0] retire_count = (slot0_can_retire ? 2'd1 : 2'd0) + (slot1_can_retire ? 2'd1 : 2'd0);
 wire [1:0] alloc_count  = (alloc_en0 ? 2'd1 : 2'd0) + (alloc_en1 ? 2'd1 : 2'd0);

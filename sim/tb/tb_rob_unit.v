@@ -77,9 +77,9 @@ module tb_rob_unit;
         .complete_en1(complete_en1), .complete_tag1(complete_tag1),
         .complete_en2(complete_en2), .complete_tag2(complete_tag2),
         .complete_en3(complete_en3), .complete_tag3(complete_tag3),
-        .retire_valid0(retire_valid0), .retire_has_dest0(retire_has_dest0), .retire_is_fp_dest0(),
+        .retire_valid0(retire_valid0), .retire_has_dest0(retire_has_dest0), .retire_is_fp_dest0(), .retire_tag0(),
         .retire_areg0(retire_areg0), .retire_preg0(retire_preg0), .retire_old_preg0(retire_old_preg0),
-        .retire_valid1(retire_valid1), .retire_has_dest1(retire_has_dest1), .retire_is_fp_dest1(),
+        .retire_valid1(retire_valid1), .retire_has_dest1(retire_has_dest1), .retire_is_fp_dest1(), .retire_tag1(),
         .retire_areg1(retire_areg1), .retire_preg1(retire_preg1), .retire_old_preg1(retire_old_preg1),
         .rob_count(rob_count), .rob_full(rob_full), .rob_empty(rob_empty)
     );
