@@ -417,19 +417,19 @@ MUL/DIV, a real (deliberately narrow) F-extension slice, precise exceptions
 end-to-end; SC/general-AMO/FDIV/FSQRT/FMADD/FLW/FSW/Sv39/interrupts are
 real, explicitly flagged future work, not silently dropped.
 
-Gen6-L (verification tooling) found and root-caused a real, unfixed
-deadlock: `FreeList.v`'s alloc grant is unconditional on `needs_dest`
-alone, not gated by the actual dispatch decision — every cycle dispatch
-stalls for any reason while `needs_dest` is also true silently orphans one
-physical register permanently. A store followed by a WAW-renamed ALU
-instruction in a real sustained loop (≥8 iterations) exhausts the 32-entry
-free pool and hangs dispatch (`bench_sum_array.s` under
-`bench_runner.py --compare-ooo`) — the concrete proof of Gen6-D's own
-"genuinely insufficient for sustained high-occupancy execution" caveat.
-Not fixed yet; see ADR 0048's own Future improvements. Constrained-random
-cross-check (50/50 seeds, `run_random_tests.py --ooo`) and formal ROB
-properties (`sim/formal/rob_formal.sv`, bounded proof) also new this phase.
-123/123 directed suite, zero-warning compile.
+Gen6-L (verification tooling) found and root-caused a real deadlock:
+`FreeList.v`'s alloc grant was unconditional on `needs_dest` alone, not
+gated by the actual dispatch decision — every cycle dispatch stalled for
+any reason while `needs_dest` was also true silently orphaned one physical
+register permanently. **Fixed in Gen6-M** (`docs/adr/0049`):
+`FreeList.v` gained a genuine alloc/commit split — `commit_en0`/
+`commit_en1`. `bench_sum_array.s` (the reproducer, a store + WAW-renamed
+ALU op in a sustained loop) no longer hangs; OOOCore is now measurably
+*faster* than PIPELINED on both benchmark kernels (`bench_runner.py
+--compare-ooo`). Constrained-random cross-check (`run_random_tests.py
+--ooo`) and formal ROB properties (`sim/formal/rob_formal.sv`, bounded
+proof) also new this generation. 123/123 directed suite, zero-warning
+compile.
 
 ---
 
