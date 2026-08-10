@@ -1,4 +1,7 @@
 `include "DCache.v"
+`include "L2Cache.v"
+`include "InstructionMemory.v"
+`include "InstructionMemoryWishboneAdapter.v"
 `include "RamWishboneAdapter.v"
 `include "DataMemoryBRAM.v"
 `include "VictimCache.v"

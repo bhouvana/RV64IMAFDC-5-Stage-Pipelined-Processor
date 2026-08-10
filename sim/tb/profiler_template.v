@@ -45,6 +45,8 @@
 `include "Chooser.v"
 `include "ICache.v"
 `include "DCache.v"
+`include "L2Cache.v"
+`include "InstructionMemoryWishboneAdapter.v"
 `include "VictimCache.v"
 `include "MemoryLatencyModel.v"
 

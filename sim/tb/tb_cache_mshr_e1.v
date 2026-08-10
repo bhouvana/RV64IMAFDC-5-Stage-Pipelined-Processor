@@ -43,6 +43,8 @@
 `include "Btb.v"
 `include "ICache.v"
 `include "DCache.v"
+`include "L2Cache.v"
+`include "InstructionMemoryWishboneAdapter.v"
 `include "VictimCache.v"
 
 // docs/adr/0044-non-blocking-dcache-mshr-phase-e.md. End-to-end directed

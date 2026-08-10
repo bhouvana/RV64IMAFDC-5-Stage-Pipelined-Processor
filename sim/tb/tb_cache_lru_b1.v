@@ -43,6 +43,8 @@
 `include "Btb.v"
 `include "ICache.v"
 `include "DCache.v"
+`include "L2Cache.v"
+`include "InstructionMemoryWishboneAdapter.v"
 `include "VictimCache.v"
 
 // docs/adr/0041-cache-replacement-policy-phase-b.md. End-to-end directed

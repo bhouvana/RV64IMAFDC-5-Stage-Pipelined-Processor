@@ -43,6 +43,8 @@
 `include "Btb.v"
 `include "ICache.v"
 `include "DCache.v"
+`include "L2Cache.v"
+`include "InstructionMemoryWishboneAdapter.v"
 `include "VictimCache.v"
 
 // docs/adr/0025-hpc-performance-csrs.md (Phase J5). CACHE_MODE=1 at
