@@ -54,7 +54,8 @@ def load_words(mem_path):
 def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0, pipeline_profile=0,
             mem_size=128, interrupt=None, branch_predictor=0, mmu=False, cache_mode=0,
             replacement_policy=0, victim_entries=0, mem_latency_i=0, mem_latency_d=0,
-            burst_enable=0, mem_latency_d_burst=0, xlen=32, mshr_entries=1):
+            burst_enable=0, mem_latency_d_burst=0, xlen=32, mshr_entries=1,
+            l2_size=0, l2_ways=4, l2_replacement=0):
     prog_s = os.path.join(work_dir, f"r{seed}.s")
     prog_mem = os.path.join(work_dir, f"r{seed}.mem")
     # Generation 2 (Phase M, docs/adr/0028-rv64-migration-phase-m.md): xlen
@@ -117,6 +118,11 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0,
     # identical +4000 constant bench_runner.py's own cache_mode margin
     # already uses (fence's own whole-cache-flush scan dominates worst-case
     # duration far more than any single miss/fill sequence, MSHR or not).
+    # docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). No separate
+    # margin term for L2 -- a probe-before-evict round trip costs at most a
+    # handful of cycles per eviction, dwarfed by the existing +4000 fence-
+    # flush-scan margin cache_mode already carries, same reasoning
+    # docs/adr/0044's own MSHR margin decision used.
     max_time = (real_n_instrs * 70 + 200) * 10 + (4000 if cache_mode else 0)
     dump_v = os.path.join(work_dir, f"r{seed}.v")
     out_path = os.path.join(work_dir, f"r{seed}.out").replace("\\", "/")
@@ -140,6 +146,9 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0,
               .replace("__REPLACEMENT_POLICY__", str(replacement_policy))
               .replace("__VICTIM_ENTRIES__", str(victim_entries))
               .replace("__MSHR_ENTRIES__", str(mshr_entries))
+              .replace("__L2_SIZE_BYTES__", str(l2_size))
+              .replace("__L2_WAYS__", str(l2_ways))
+              .replace("__L2_REPLACEMENT_POLICY__", str(l2_replacement))
               .replace("__BURST_ENABLE__", str(burst_enable))
               .replace("__MEM_LATENCY_D_BURST__", str(mem_latency_d_burst))
               .replace("__MEM_LATENCY_I__", str(mem_latency_i))
@@ -249,6 +258,17 @@ def main():
                      help="riscvpipeline.v's MSHR_ENTRIES (docs/adr/0044-non-blocking-dcache-mshr-"
                           "phase-e.md): 1=disabled (default, bit-exact), N=that many outstanding "
                           "load misses. Only meaningful under --cache-mode 1")
+    ap.add_argument("--l2-size", type=int, default=0,
+                     help="riscvpipeline.v's L2_SIZE_BYTES (docs/adr/0045-l2-cache-phase-f.md): "
+                          "0=disabled (default, bit-exact), N=a shared, inclusive L2 behind both "
+                          "I$/D$ of that size in bytes. Only meaningful under --cache-mode 1")
+    ap.add_argument("--l2-ways", type=int, default=4,
+                     help="riscvpipeline.v's L2_WAYS (docs/adr/0045-l2-cache-phase-f.md). "
+                          "Only meaningful under --l2-size > 0")
+    ap.add_argument("--l2-replacement", type=int, default=0, choices=[0, 1, 2],
+                     help="riscvpipeline.v's L2_REPLACEMENT_POLICY (docs/adr/0045-l2-cache-"
+                          "phase-f.md): 0=round-robin (default), 1=FIFO, 2=LRU -- independent of "
+                          "--replacement-policy (L1's own). Only meaningful under --l2-size > 0")
     ap.add_argument("--mem-latency-i", type=int, default=0,
                      help="riscvpipeline.v's MEM_LATENCY_I (docs/adr/0024-variable-latency-memory.md): "
                           "extra I-side wait-state cycles, 0=bit-exact default")
@@ -341,7 +361,8 @@ def main():
                               victim_entries=args.victim_entries,
                               burst_enable=args.burst_enable, mem_latency_d_burst=args.mem_latency_d_burst,
                               mem_latency_i=args.mem_latency_i, mem_latency_d=args.mem_latency_d,
-                              xlen=args.xlen, mshr_entries=args.mshr_entries)
+                              xlen=args.xlen, mshr_entries=args.mshr_entries,
+                              l2_size=args.l2_size, l2_ways=args.l2_ways, l2_replacement=args.l2_replacement)
             if ok:
                 passed += 1
                 print(f"pass  seed={seed}")
