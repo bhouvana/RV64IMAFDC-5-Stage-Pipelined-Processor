@@ -100,7 +100,24 @@ module L2Cache #(
     // event wiring yet). Exactly-once-per-real-access, same discipline
     // DCache.v's own access_hit/access_miss already established.
     output                         access_hit,
-    output                         access_miss
+    output                         access_miss,
+
+    // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). Fence's own
+    // whole-cache flush needs to reach L2 too, not just L1 -- a real,
+    // necessary gap found by running the constrained-random harness (not
+    // anticipated in the original design): a dirty write merged into L2 via
+    // an ordinary write-hit (e.g. a DCache.v flush-writeback landing here)
+    // has NO other trigger that ever pushes it further down to backing
+    // memory -- L2 only writes back on its OWN eviction pressure. Without
+    // this port, fence's own architectural guarantee (every prior write is
+    // durably visible afterward) silently breaks the instant L2 is enabled.
+    // Same shape as DCache.v's own flush_all/flush_busy/flush_done -- lines
+    // stay valid/cached, just become clean, not an invalidation. Riscvpipeline.v
+    // sequences this AFTER DCache.v's own flush completes (drain L1 into L2
+    // first, then drain L2 into backing memory).
+    input                          flush_all,
+    output                         flush_busy,
+    output                         flush_done
 );
 
 localparam LINE_WORDS    = LINE_BYTES / 4;
@@ -244,6 +261,7 @@ localparam S_HIT_RD     = 3'd1;
 localparam S_PROBE_WAIT = 3'd2;
 localparam S_WB         = 3'd3;
 localparam S_FILL       = 3'd4;
+localparam S_FLUSH_SCAN = 3'd5;
 
 reg [2:0] state;
 
@@ -271,6 +289,25 @@ reg [LINE_IDX_BITS-1:0] wb_line_r;
 reg [XLEN-1:0]          wb_base_r;     // also this eviction's own probe_addr
 reg                     probe_dirty_r;
 reg [XLEN*LINE_WORDS-1:0] probe_data_r;
+
+// docs/adr/0045-l2-cache-phase-f.md. Fence flush -- mirrors DCache.v's own
+// flush_scan_r/flush_active_r/flush_done_r/wb_return_to_flush_r exactly.
+// Unlike an eviction's own writeback, a flush-driven S_WB pass always uses
+// THIS module's own data (probe_dirty_r forced 0 at flush-scan dispatch,
+// below) -- a flush writes a line back IN PLACE, it never invalidates or
+// pulls data from L1 (lines stay valid/cached, just become clean).
+reg [LINE_IDX_BITS-1:0] flush_scan_r;
+reg                     flush_active_r;
+reg                     flush_done_r;
+reg                     wb_return_to_flush_r;
+wire [SET_BITS-1:0] flush_scan_set;
+generate
+if (SET_BITS == 0) begin : gen_flush_scan_set_fully_assoc
+    assign flush_scan_set = 1'b0;
+end else begin : gen_flush_scan_set_normal
+    assign flush_scan_set = flush_scan_r[LINE_IDX_BITS-1:WAY_BITS];
+end
+endgenerate
 
 wire fill_is_last_word = (fill_word_r == LINE_WORDS-1);
 wire fill_do_merge = miss_is_write_r && (fill_word_r == miss_word_off_r);
@@ -320,6 +357,8 @@ integer reset_i, reset_j;
 always @(posedge clk) begin
     if (~rst) begin
         state <= S_IDLE;
+        flush_active_r <= 1'b0;
+        flush_done_r   <= 1'b0;
         for (reset_i = 0; reset_i < NUM_LINES; reset_i = reset_i + 1) begin
             valid[reset_i] <= 1'b0;
             dirty[reset_i] <= 1'b0;
@@ -331,12 +370,19 @@ always @(posedge clk) begin
         end
     end
     else begin
+        flush_done_r <= 1'b0;   // default: one-cycle pulse, cleared unless set below
+
         if (REPLACEMENT_POLICY == POLICY_LRU && access_hit_calc)
             lru_touch(access_hit_set, access_hit_way);
 
         case (state)
             S_IDLE: begin
-                if (u_cyc && u_stb) begin
+                if (flush_all && !flush_active_r) begin
+                    flush_active_r <= 1'b1;
+                    flush_scan_r   <= {LINE_IDX_BITS{1'b0}};
+                    state <= S_FLUSH_SCAN;
+                end
+                else if (u_cyc && u_stb) begin
                     if (hit) begin
                         if (u_we) begin
                             data_arr[hit_line_idx*LINE_WORDS + word_off] <=
@@ -389,6 +435,7 @@ always @(posedge clk) begin
                     probe_dirty_r <= probe_dirty;
                     probe_data_r  <= probe_data;
                     fill_word_r   <= {WORD_OFF_BITS{1'b0}};
+                    wb_return_to_flush_r <= 1'b0;   // an eviction's own writeback, never a flush pass
                     if (dirty[wb_line_r] || probe_dirty)
                         state <= S_WB;
                     else
@@ -400,12 +447,50 @@ always @(posedge clk) begin
                 if (m_ack) begin
                     if (fill_is_last_word) begin
                         dirty[wb_line_r] <= 1'b0;
-                        fill_word_r <= {WORD_OFF_BITS{1'b0}};
-                        state <= S_FILL;
+                        // docs/adr/0045-l2-cache-phase-f.md. A flush-driven
+                        // pass (wb_return_to_flush_r) writes back IN PLACE
+                        // and returns to scanning -- never falls through to
+                        // S_FILL (there's no miss to service; this state was
+                        // entered from S_FLUSH_SCAN, not S_IDLE's own miss
+                        // dispatch).
+                        if (wb_return_to_flush_r) begin
+                            if (flush_scan_r == NUM_LINES-1) begin
+                                flush_active_r <= 1'b0;
+                                flush_done_r   <= 1'b1;
+                                state <= S_IDLE;
+                            end
+                            else begin
+                                flush_scan_r <= flush_scan_r + 1'b1;
+                                state <= S_FLUSH_SCAN;
+                            end
+                        end
+                        else begin
+                            fill_word_r <= {WORD_OFF_BITS{1'b0}};
+                            state <= S_FILL;
+                        end
                     end
                     else begin
                         fill_word_r <= fill_word_r + 1'b1;
                     end
+                end
+            end
+
+            S_FLUSH_SCAN: begin
+                if (valid[flush_scan_r] && dirty[flush_scan_r]) begin
+                    wb_line_r     <= flush_scan_r;
+                    wb_base_r     <= {tag_arr[flush_scan_r], flush_scan_set, {OFFSET_BITS{1'b0}}};
+                    wb_return_to_flush_r <= 1'b1;
+                    probe_dirty_r <= 1'b0;   // a flush writes back THIS module's own data, never probe data
+                    fill_word_r   <= {WORD_OFF_BITS{1'b0}};
+                    state <= S_WB;
+                end
+                else if (flush_scan_r == NUM_LINES-1) begin
+                    flush_active_r <= 1'b0;
+                    flush_done_r   <= 1'b1;
+                    state <= S_IDLE;
+                end
+                else begin
+                    flush_scan_r <= flush_scan_r + 1'b1;
                 end
             end
 
@@ -446,6 +531,9 @@ assign u_data_i =
 
 assign probe_req  = (state == S_PROBE_WAIT);
 assign probe_addr = wb_base_r;
+
+assign flush_busy = flush_active_r;
+assign flush_done = flush_done_r;
 
 assign m_cyc = (state == S_WB) || (state == S_FILL);
 assign m_stb = m_cyc;

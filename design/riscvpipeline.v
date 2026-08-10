@@ -550,7 +550,12 @@ wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on
                 .m_data_i(l2i_m_data_i), .m_ack(l2i_m_ack),
                 .probe_req(icache_probe_req), .probe_addr(icache_probe_addr), .probe_ack(icache_probe_ack),
                 .probe_dirty(1'b0), .probe_data({(XLEN*(ICACHE_LINE_BYTES/4)){1'b0}}),
-                .access_hit(), .access_miss()
+                .access_hit(), .access_miss(),
+                // docs/adr/0045-l2-cache-phase-f.md. Fire-and-forget, same
+                // trigger as D-side -- I$'s own L2 instance never has
+                // anything dirty (u_we tied 0 above), so nothing ever waits
+                // on its own flush_busy/flush_done specifically.
+                .flush_all(l2d_flush_all), .flush_busy(), .flush_done()
             );
             wire l2i_m_cyc, l2i_m_stb, l2i_m_we;
             wire [XLEN-1:0] l2i_m_addr, l2i_m_data_o;
@@ -1711,8 +1716,13 @@ endgenerate
     // its own first cycle; at the default 0, RamWishboneAdapter still acks
     // writes combinationally same-cycle, so this OR arm is always false --
     // "writes never stall under CACHE_NONE" stays true at the default.
+    // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). fence_complete
+    // (not dcache_flush_done directly) -- see its own declaration below for
+    // why: at L2_SIZE_BYTES==0 these are literally the same wire (bit-exact,
+    // unchanged); at L2_SIZE_BYTES!=0, the pipeline must not release from
+    // fence's own stall until L2's own flush ALSO completes, not just L1's.
     wire mem_access_ready = (CACHE_MODE == CACHE_NONE) ? lsu_ack :
-        (fence_pending_r ? dcache_flush_done : dcache_resp_ready);
+        (fence_pending_r ? fence_complete : dcache_resp_ready);
     wire mem_trigger = (CACHE_MODE == CACHE_NONE) ? (memRead_regem || (memWrite_regem && !lsu_ack)) :
         (memRead_regem || (memWrite_regem && !dcache_resp_ready) || fence_pending_r);
     reg mem_stall_done_r;
@@ -2909,7 +2919,7 @@ end
     reg fence_pending_r;
     always @(posedge clk) begin
         if (~start) fence_pending_r <= 1'b0;
-        else if (dcache_flush_done) fence_pending_r <= 1'b0;
+        else if (fence_complete) fence_pending_r <= 1'b0;
         else if (CACHE_MODE != CACHE_NONE && fence_real && !reg2_hold) fence_pending_r <= 1'b1;
     end
     // docs/adr/0023-caches.md (Phase G7). A real bug found by running MMU+
@@ -2943,6 +2953,43 @@ end
         if (~start || !fence_pending_r) fence_flush_started_r <= 1'b0;
         else if (dcache_flush_busy) fence_flush_started_r <= 1'b1;
     end
+
+    // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). A real,
+    // necessary gap found by running the constrained-random harness (not
+    // anticipated in the original design): a dirty write merged into L2
+    // (e.g. via an ordinary D$ flush-writeback) has no OTHER trigger that
+    // ever pushes it further down to backing memory -- fence's own
+    // architectural guarantee (every prior write durably visible after)
+    // silently broke the instant L2 was enabled. Fixed by sequencing a
+    // SECOND flush stage, after DCache's own completes: drain L1 into L2
+    // first (unchanged, existing logic above), then drain L2 into backing
+    // memory. `fence_complete` (not `dcache_flush_done` directly) is what
+    // actually clears fence_pending_r/releases the pipeline stall now --
+    // at L2_SIZE_BYTES==0 this reduces to the exact pre-Phase-F single-
+    // stage behavior, bit-identical, via a `generate if`. Same "distinguish
+    // fresh from repeat" latch shape fence_flush_started_r (above) already
+    // established for DCache's own flush, extended one more stage.
+    wire fence_complete;
+    generate
+    if (L2_SIZE_BYTES == 0) begin : gen_fence_l2_disabled
+        assign fence_complete = dcache_flush_done;
+        assign l2d_flush_all  = 1'b0;
+    end else begin : gen_fence_l2_enabled
+        reg l2_flush_pending_r;
+        reg l2_flush_started_r;
+        always @(posedge clk) begin
+            if (~start) l2_flush_pending_r <= 1'b0;
+            else if (l2d_flush_done) l2_flush_pending_r <= 1'b0;
+            else if (dcache_flush_done) l2_flush_pending_r <= 1'b1;
+        end
+        always @(posedge clk) begin
+            if (~start || !l2_flush_pending_r) l2_flush_started_r <= 1'b0;
+            else if (l2d_flush_busy) l2_flush_started_r <= 1'b1;
+        end
+        assign l2d_flush_all  = l2_flush_pending_r && !l2_flush_started_r;
+        assign fence_complete = l2d_flush_done;
+    end
+    endgenerate
 
     // -- Shared Ptw.v: exactly one instance, arbitrated between the two
     // requesters above. D-side always wins when both are pending (older
@@ -3104,6 +3151,12 @@ end
     // ready can't pulse while its own request is masked), correctly
     // holding reg3 until Ptw.v frees the bus.
     wire dcache_resp_ready, dcache_flush_busy, dcache_flush_done;
+    // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). D-side L2's
+    // own flush port -- driven/consumed by the fence-sequencing logic below
+    // (l2d_flush_all trigger declared there; l2d_flush_busy/done assigned
+    // inside gen_dcache_writeback's own L2 splice, both branches, further
+    // down). Permanently unused (tied 0) at L2_SIZE_BYTES==0.
+    wire l2d_flush_all, l2d_flush_busy, l2d_flush_done;
     wire [XLEN-1:0] dcache_resp_rdata;
     wire dcache_m_cyc, dcache_m_stb, dcache_m_we;
     wire [XLEN-1:0] dcache_m_addr, dcache_m_data_o;
@@ -3229,7 +3282,11 @@ end
                 .m_data_i(readData), .m_ack(lsu_ack),
                 .probe_req(dcache_probe_req), .probe_addr(dcache_probe_addr), .probe_ack(dcache_probe_ack),
                 .probe_dirty(dcache_probe_dirty), .probe_data(dcache_probe_data),
-                .access_hit(), .access_miss()
+                .access_hit(), .access_miss(),
+                // docs/adr/0045-l2-cache-phase-f.md. Fence's own second
+                // flush stage (l2d_flush_all, sequenced after DCache's own
+                // flush completes -- see its declaration near fence_pending_r).
+                .flush_all(l2d_flush_all), .flush_busy(l2d_flush_busy), .flush_done(l2d_flush_done)
             );
             // L2's own downstream traffic never bursts this phase (deferred
             // -- L2Cache.v's own header/ADR Future improvements) -- DCache.v's

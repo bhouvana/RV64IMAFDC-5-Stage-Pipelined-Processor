@@ -157,6 +157,33 @@ module tb_cache_l2_f1;
         check_reg(9, 32'd999, dut_timing_off.m_Register.regs[9], "timing_off x9 (dirty survives D\$ eviction, full RAM round trip)");
         check_reg(10, 32'd111, dut_timing_off.m_Register.regs[10], "timing_off x10 (reached the end)");
 
+        // docs/adr/0045-l2-cache-phase-f.md. A real, necessary gap found by
+        // running the constrained-random harness AFTER this test's own
+        // register-only checks above all already passed: fence's own flush
+        // never reached L2 at all in the original design -- a dirty write
+        // merged into L2 (e.g. via this exact program's own D$ eviction/
+        // flush-writeback) had no further trigger ever pushing it down to
+        // backing RAM, so it stayed silently stuck in L2 forever, invisible
+        // to anything reading backing memory directly. This test's own
+        // x9 register checks above never caught it (x9 is loaded straight
+        // through the cache hierarchy, never touching backing RAM
+        // directly) -- checking backing RAM itself, post-fence, is the
+        // real, necessary proof and stays here permanently to guard against
+        // this exact regression class.
+        total_checks = total_checks + 1;
+        if (dut_correct_on.m_DataMemory.m_ram.data_memory[0] !== 8'hE7) begin
+            total_fails = total_fails + 1;
+            $display("  FAIL  correct_on backing RAM addr0 byte0 = 0x%02h, expected 0xe7 (999's own low byte, fence must flush L2 too)",
+                dut_correct_on.m_DataMemory.m_ram.data_memory[0]);
+        end else $display("  pass  correct_on backing RAM addr0 byte0 = 0xe7 (fence flushed L2 all the way to backing RAM)");
+
+        total_checks = total_checks + 1;
+        if (dut_timing_on.m_DataMemory.m_ram.data_memory[0] !== 8'hE7) begin
+            total_fails = total_fails + 1;
+            $display("  FAIL  timing_on backing RAM addr0 byte0 = 0x%02h, expected 0xe7",
+                dut_timing_on.m_DataMemory.m_ram.data_memory[0]);
+        end else $display("  pass  timing_on backing RAM addr0 byte0 = 0xe7 (fence flushed L2 all the way to backing RAM)");
+
         // The real, measurable win: L2 absorbing what D$ evicted (timing_on)
         // must finish in FEWER cycles than no L2 at all (timing_off) -- the
         // reload of addr0 is a real L2 hit instead of a full, slow round

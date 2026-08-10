@@ -86,7 +86,8 @@ module tb_l2cache_unit;
         .m_sel(m_sel), .m_funct3(m_funct3), .m_data_i(m_data_i), .m_ack(m_ack),
         .probe_req(probe_req), .probe_addr(probe_addr), .probe_ack(probe_ack),
         .probe_dirty(probe_dirty), .probe_data(probe_data),
-        .access_hit(access_hit), .access_miss(access_miss)
+        .access_hit(access_hit), .access_miss(access_miss),
+        .flush_all(1'b0), .flush_busy(), .flush_done()
     );
 
     reg rst_ram = 0;
@@ -282,7 +283,8 @@ module tb_l2cache_unit;
         .m_sel(m_sel_ro), .m_funct3(m_funct3_ro), .m_data_i(m_data_i_ro), .m_ack(m_ack_ro),
         .probe_req(probe_req_ro), .probe_addr(probe_addr_ro), .probe_ack(1'b1),
         .probe_dirty(1'b0), .probe_data(128'h0),
-        .access_hit(), .access_miss()
+        .access_hit(), .access_miss(),
+        .flush_all(1'b0), .flush_busy(), .flush_done()
     );
     RamWishboneAdapter #(.SIZE_BYTES(256), .XLEN(32)) m_ram_adapter_ro(
         .clk(clk), .rst(rst_ro),
