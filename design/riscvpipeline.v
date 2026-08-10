@@ -1857,9 +1857,35 @@ endgenerate
     // The fix uses regWrite/inst_regfd[11:7] -- the plain, combinational
     // Control.v-decoded signals for THIS cycle's inst_regfd, the exact
     // same wires reg2's own .regWrite/.writeReg input ports consume.
+    // A real bug found by running the constrained-random harness (MMU+MSHR
+    // combo, first hit on a genuinely new seed long after Phase E's own
+    // sweep closed clean -- latent since Phase E, not a regression any
+    // later phase introduced, confirmed by bisecting to Phase E's own
+    // closing commit before assuming otherwise): scoreboard_pending_mask
+    // is Scoreboard.v's own REGISTERED pending[] array -- alloc_valid
+    // (dcache_mshr_accept) sets pending[alloc_reg] via a non-blocking
+    // assignment, which only becomes visible the FOLLOWING cycle. The
+    // instruction immediately behind the one that just went non-blocking
+    // is in decode THIS SAME cycle -- if it happens to read the exact
+    // register that just got accepted, it sees the stale (not-yet-set)
+    // mask and sails through unstalled, reading garbage (observed directly:
+    // a queued `lbu`'s own destination register briefly held whatever the
+    // page-table-walker's own last bus-read value happened to be, purely
+    // by coincidence of physical proximity in the register file's own
+    // reset-state timeline -- not itself the bug, just what made the race
+    // visible). Fixed by ALSO checking THIS cycle's own fresh allocation
+    // directly and combinationally, mirroring the registered check's exact
+    // shape (RAW on either source, WAW on the destination) rather than
+    // waiting for the registered mask to catch up one cycle later. Same
+    // `!= 0` exclusion Scoreboard.v's own alloc path already uses -- a
+    // load to x0 is architecturally void, never worth stalling for.
     wire scoreboard_stall = scoreboard_pending_mask[inst_regfd[19:15]] |
                              scoreboard_pending_mask[inst_regfd[24:20]] |
-                             (regWrite && scoreboard_pending_mask[inst_regfd[11:7]]);
+                             (regWrite && scoreboard_pending_mask[inst_regfd[11:7]]) |
+                             (dcache_mshr_accept && (write_to_Reg_regem != {REG_ADDR_WIDTH{1'b0}}) &&
+                              ((write_to_Reg_regem == inst_regfd[19:15]) |
+                               (write_to_Reg_regem == inst_regfd[24:20]) |
+                               (regWrite && (write_to_Reg_regem == inst_regfd[11:7]))));
 
     // docs/adr/00NN-mmu-sv32.md (Phase F5): itlb_miss/dtlb_miss are defined
     // in the MMU translation block below (forward-referenced here).
