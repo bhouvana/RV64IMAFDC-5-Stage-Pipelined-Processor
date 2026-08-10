@@ -72,7 +72,15 @@ module ICache #(
     // private InstructionMemory instance is not even instantiated in this
     // case (generate-gated, mirrors VICTIM_ENTRIES==0's own "don't
     // instantiate what isn't used" discipline).
-    parameter L2_ENABLE = 0
+    parameter L2_ENABLE = 0,
+    // Generation 4, Phase G (docs/adr/0046-hardware-prefetchers-phase-g.md).
+    // 0 (default, PF_OFF) = disabled, bit-exact with pre-Phase-G behavior.
+    // Only meaningful when L2_ENABLE=1 -- under L2_ENABLE=0 there's no real
+    // miss latency to hide (the private InstructionMemory instance is
+    // always-combinational), so prefetching there would only cost FSM-busy
+    // cycles for no benefit. Documented no-op otherwise, same "meaningless
+    // without X" convention `--compare-l2`/`--compare-burst` already use.
+    parameter PREFETCH_MODE = 0
 )(
     input clk,
     input rst,
@@ -120,6 +128,12 @@ localparam WAY_BITS     = $clog2(WAYS);
 localparam POLICY_ROUND_ROBIN = 0;
 localparam POLICY_FIFO        = 1;
 localparam POLICY_LRU         = 2;
+
+// PREFETCH_MODE values (docs/adr/0046) -- same enum DCache.v's own copy uses.
+localparam PF_OFF       = 0;
+localparam PF_NEXT_LINE = 1;
+localparam PF_STRIDE    = 2;
+localparam PF_STREAM    = 3;
 
 wire [WORD_OFF_BITS-1:0] word_off = readAddr[OFFSET_BITS-1:2];
 // docs/adr/0041. Fixed: a fully-associative (1-set, WAYS==NUM_LINES)
@@ -216,6 +230,60 @@ wire [LINE_IDX_BITS-1:0] probe_found_line = probe_lineidx_acc[WAYS];
 // gating this on state==S_IDLE), unconditionally (found or not) -- mirrors
 // DCache.v's own probe_ack precedent exactly.
 assign probe_ack = probe_req;
+
+// docs/adr/0046-hardware-prefetchers-phase-g.md (Generation 4, Phase G).
+// Fires the predictor on every genuine backing-store miss (the S_IDLE
+// `!hit_main && !vc_lookup_hit` fork below -- a real bus-triggering miss,
+// not a victim-buffer promote). See Prefetcher.v's own header for why this
+// is a single-global-entry predictor, not a PC-indexed table.
+wire icache_pf_update_valid = (state == S_IDLE) && !hit_main && !vc_lookup_hit;
+wire [XLEN-1:0] icache_pf_update_addr = {readAddr[XLEN-1:OFFSET_BITS], {OFFSET_BITS{1'b0}}};
+wire pf_valid_w;
+wire [XLEN-1:0] pf_addr_w;
+Prefetcher #(.XLEN(XLEN), .LINE_BYTES(LINE_BYTES), .MODE(PREFETCH_MODE)) m_prefetcher(
+    .clk(clk), .rst(rst),
+    .update_valid(icache_pf_update_valid),
+    .update_addr(icache_pf_update_addr),
+    .pf_valid(pf_valid_w), .pf_addr(pf_addr_w)
+);
+
+// Same second, independent tag/set decode + N-way compare the probe port
+// above already establishes, mirrored against the PREDICTED address.
+wire [SET_BITS-1:0] pf_set_idx;
+generate
+if (SET_BITS == 0) begin : gen_pf_set_idx_fully_assoc
+    assign pf_set_idx = 1'b0;
+end else begin : gen_pf_set_idx_normal
+    assign pf_set_idx = pf_addr_w[OFFSET_BITS+SET_BITS-1:OFFSET_BITS];
+end
+endgenerate
+wire [TAG_BITS-1:0] pf_tag = pf_addr_w[XLEN-1:OFFSET_BITS+SET_BITS];
+
+wire [WAYS-1:0] pf_way_hit;
+generate
+    for (gw = 0; gw < WAYS; gw = gw + 1) begin : gen_pf_compare
+        assign pf_way_hit[gw] = valid[pf_set_idx*WAYS + gw] && (tag_arr[pf_set_idx*WAYS + gw] == pf_tag);
+    end
+endgenerate
+wire pf_found = |pf_way_hit;
+
+// Victim-way choice for the PREDICTED set -- same POLICY_LRU/round-robin
+// choice victim_target_way already makes for readAddr's own set, mirrored
+// for pf_set_idx. No dirty guard needed -- I$ has no dirty bit, any
+// currently-resident line is safe to evict.
+wire [WAYS-1:0]     pf_is_lru_way;
+wire [WAY_BITS-1:0] pf_lru_way_acc [0:WAYS];
+assign pf_lru_way_acc[0] = {WAY_BITS{1'b0}};
+generate
+    for (gw = 0; gw < WAYS; gw = gw + 1) begin : gen_pf_lru_victim
+        assign pf_is_lru_way[gw]    = (age[pf_set_idx][gw] == WAYS-1);
+        assign pf_lru_way_acc[gw+1] = pf_lru_way_acc[gw] | (pf_is_lru_way[gw] ? gw[WAY_BITS-1:0] : {WAY_BITS{1'b0}});
+    end
+endgenerate
+wire [WAY_BITS-1:0] pf_victim_way = (REPLACEMENT_POLICY == POLICY_LRU) ? pf_lru_way_acc[WAYS] : victim[pf_set_idx];
+
+wire prefetch_fire = (PREFETCH_MODE != PF_OFF) && L2_ENABLE && pf_valid_w && !pf_found;
+
 // docs/adr/0042. `hit` (the module's own external port) now also reflects
 // a victim-buffer promote hit -- see the victim-cache block below for
 // vc_lookup_hit. `hit_main` (main-array-only) stays the name every
@@ -500,6 +568,23 @@ always @(posedge clk) begin
                         busy_r      <= 1'b1;
                         state       <= S_FILL;
                     end
+                end
+                // docs/adr/0046-hardware-prefetchers-phase-g.md (Generation
+                // 4, Phase G). Only reached when hit_main is true (a real
+                // hit this cycle, no promote in progress) -- a genuinely
+                // idle S_IDLE cycle. Reuses the SAME S_FILL completion logic
+                // below verbatim: the array-commit (data_arr/valid/tag_arr/
+                // victim/age) and done_r pulse are correct and harmless for
+                // a prefetch fill too (busy_r/done_r are proven-dead wires
+                // externally, see docs/adr/0046's own Design section).
+                else if (prefetch_fire) begin
+                    fill_set_r  <= pf_set_idx;
+                    fill_tag_r  <= pf_tag;
+                    fill_way_r  <= pf_victim_way;
+                    fill_base_r <= pf_addr_w;
+                    fill_word_r <= {WORD_OFF_BITS{1'b0}};
+                    busy_r      <= 1'b1;
+                    state       <= S_FILL;
                 end
             end
 
