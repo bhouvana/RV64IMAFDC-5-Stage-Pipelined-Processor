@@ -71,7 +71,16 @@ module ICache #(
     output     [XLEN-1:0] inst,       // valid when hit
     output                hit,        // combinational: does readAddr hit this cycle
     output                busy,       // a line fill is in progress
-    output                done        // one-cycle pulse: a fill just completed
+    output                done,       // one-cycle pulse: a fill just completed
+
+    // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). Inclusion
+    // probe responder -- same shape/precedent as DCache.v's own copy, but
+    // simpler: I$ is read-only, nothing to pull back, so no probe_dirty/
+    // probe_data ports exist here at all. Permanently dark when a caller
+    // ties probe_req=0 (the default, every existing testbench).
+    input                 probe_req,
+    input      [XLEN-1:0] probe_addr,
+    output                probe_ack
 );
 
 localparam LINE_WORDS   = LINE_BYTES / 4;
@@ -153,6 +162,35 @@ endgenerate
 
 wire hit_main = |way_hit;
 wire [WAY_BITS-1:0] hit_way_idx = hit_way_acc[WAYS];
+
+// docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). Same second,
+// independent tag/set decode + N-way compare DCache.v's own copy uses --
+// see its header comment for the full rationale (a probe can target a
+// completely different address than whatever the main FSM is servicing).
+localparam LINE_IDX_BITS = SET_BITS + WAY_BITS;
+wire [SET_BITS-1:0] probe_set_idx;
+generate
+if (SET_BITS == 0) begin : gen_probe_set_idx_fully_assoc
+    assign probe_set_idx = {SET_BITS{1'b0}};
+end else begin : gen_probe_set_idx_normal
+    assign probe_set_idx = probe_addr[OFFSET_BITS+SET_BITS-1:OFFSET_BITS];
+end
+endgenerate
+wire [TAG_BITS-1:0] probe_tag = probe_addr[XLEN-1:OFFSET_BITS+SET_BITS];
+wire [WAYS-1:0]          probe_way_hit;
+wire [LINE_IDX_BITS-1:0] probe_lineidx_acc[0:WAYS];
+assign probe_lineidx_acc[0] = {LINE_IDX_BITS{1'b0}};
+generate
+    for (gw = 0; gw < WAYS; gw = gw + 1) begin : gen_probe_compare
+        assign probe_way_hit[gw] = valid[probe_set_idx*WAYS + gw] && (tag_arr[probe_set_idx*WAYS + gw] == probe_tag);
+        assign probe_lineidx_acc[gw+1] = probe_lineidx_acc[gw] | (probe_way_hit[gw] ? (probe_set_idx*WAYS + gw) : {LINE_IDX_BITS{1'b0}});
+    end
+endgenerate
+wire probe_found = |probe_way_hit;
+wire [LINE_IDX_BITS-1:0] probe_found_line = probe_lineidx_acc[WAYS];
+// Combinational, same S_IDLE cycle, unconditionally (found or not) --
+// mirrors DCache.v's own probe_ack precedent exactly.
+assign probe_ack = (state == S_IDLE) && probe_req;
 // docs/adr/0042. `hit` (the module's own external port) now also reflects
 // a victim-buffer promote hit -- see the victim-cache block below for
 // vc_lookup_hit. `hit_main` (main-array-only) stays the name every
@@ -353,7 +391,17 @@ always @(posedge clk) begin
 
         case (state)
             S_IDLE: begin
-                if (!hit_main) begin
+                // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F).
+                // Strict first priority, same rationale as DCache.v's own
+                // copy -- a probe is answered (and, if found, invalidated)
+                // THIS cycle; a real fetch simply resolves the following
+                // cycle instead. Permanently unreachable when the caller
+                // never asserts probe_req (L2 disabled, the default).
+                if (probe_req) begin
+                    if (probe_found)
+                        valid[probe_found_line] <= 1'b0;
+                end
+                else if (!hit_main) begin
                     if (vc_lookup_hit) begin
                         // docs/adr/0042. Promote: commit the victim
                         // buffer's own line straight into the main array
