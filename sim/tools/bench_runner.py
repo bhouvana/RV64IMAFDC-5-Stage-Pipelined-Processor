@@ -132,7 +132,7 @@ def load_words(mem_path):
 def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_strategy=0, pipeline_profile=0,
               branch_predictor=0, cache_mode=0, replacement_policy=0, mem_latency_i=0, mem_latency_d=0,
               victim_entries=0, burst_enable=0, mem_latency_d_burst=0, xlen=32, mshr_entries=1,
-              l2_size=0, l2_ways=4, l2_replacement=0):
+              l2_size=0, l2_ways=4, l2_replacement=0, prefetch_mode=0):
     here = os.path.dirname(os.path.abspath(__file__))
     prog_mem = os.path.join(work_dir, f"{name}.mem")
     asm_py = os.path.join(here, "asm.py")
@@ -175,7 +175,7 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
     max_time = (instrs * (60 + 2 * (mem_latency_i + mem_latency_d)) + 500) * 10 + (4000 if cache_mode else 0)
     tag = (f"{name}_hs{hazard_strategy}_p{pipeline_profile}_bp{branch_predictor}_cm{cache_mode}"
            f"_rp{replacement_policy}_ve{victim_entries}_be{burst_enable}_ldb{mem_latency_d_burst}"
-           f"_li{mem_latency_i}_ld{mem_latency_d}_me{mshr_entries}_l2{l2_size}")
+           f"_li{mem_latency_i}_ld{mem_latency_d}_me{mshr_entries}_l2{l2_size}_pf{prefetch_mode}")
     dump_v = os.path.join(work_dir, f"{tag}.v")
     out_path = os.path.join(work_dir, f"{tag}.out").replace("\\", "/")
     init_file_rel = os.path.relpath(prog_mem, start=os.getcwd()).replace("\\", "/")
@@ -199,7 +199,8 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
               .replace("__MEM_LATENCY_D_BURST__", str(mem_latency_d_burst))
               .replace("__XLEN__", str(xlen))
               .replace("__MEM_LATENCY_I__", str(mem_latency_i))
-              .replace("__MEM_LATENCY_D__", str(mem_latency_d)))
+              .replace("__MEM_LATENCY_D__", str(mem_latency_d))
+              .replace("__PREFETCH_MODE__", str(prefetch_mode)))
     with open(dump_v, "w") as f:
         f.write(tpl)
 
@@ -276,6 +277,11 @@ def main():
     ap.add_argument("--l2-replacement", type=int, default=0, choices=[0, 1, 2],
                      help="riscvpipeline.v's L2_REPLACEMENT_POLICY (docs/adr/0045-l2-cache-phase-f.md): "
                           "0=round-robin (default), 1=FIFO, 2=LRU. Only meaningful under --l2-size > 0")
+    ap.add_argument("--prefetch-mode", type=int, default=0, choices=[0, 1, 2, 3],
+                     help="riscvpipeline.v's PREFETCH_MODE (docs/adr/0046-hardware-prefetchers-phase-g.md): "
+                          "0=disabled (default), 1=next-line, 2=stride, 3=stream. Only meaningful under "
+                          "--cache-mode 1; D$ prefetching also needs --mshr-entries > 1, I$ prefetching "
+                          "also needs --l2-size > 0")
     compare = ap.add_mutually_exclusive_group()
     compare.add_argument("--compare-strategies", action="store_true",
                           help="run every benchmark under both hazard strategies "
@@ -320,6 +326,12 @@ def main():
                                "--pipeline-profile/--branch-predictor/--replacement-policy/--l2-ways/"
                                "--l2-replacement, forced --cache-mode 1 since the parameter is a no-op "
                                "otherwise) and report the delta")
+    compare.add_argument("--compare-prefetch", action="store_true",
+                          help="run every benchmark at PREFETCH_MODE=0 (disabled) vs. whatever "
+                               "--prefetch-mode was passed (defaults to 1/next-line here if not set) "
+                               "(at --hazard-strategy/--pipeline-profile/--branch-predictor/"
+                               "--replacement-policy, forced --cache-mode 1 and --mshr-entries 2 since "
+                               "D$ prefetching is a no-op otherwise) and report the delta")
     args = ap.parse_args()
 
     if args.compare_latency and args.mem_latency_i == 0 and args.mem_latency_d == 0:
@@ -339,6 +351,12 @@ def main():
         args.cache_mode = 1
         if args.l2_size == 0:
             args.l2_size = 8192
+    if args.compare_prefetch:
+        args.cache_mode = 1
+        if args.mshr_entries <= 1:
+            args.mshr_entries = 2
+        if args.prefetch_mode == 0:
+            args.prefetch_mode = 1
 
     here = os.path.dirname(os.path.abspath(__file__))
     template = os.path.join(here, "..", "tb", "bench_template.v")
@@ -361,73 +379,91 @@ def main():
         keys = (0, 1)
         pairs = [(s, args.pipeline_profile, args.branch_predictor, args.cache_mode,
                   args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
-                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, args.l2_size) for s in keys]
+                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, args.l2_size,
+                  args.prefetch_mode) for s in keys]
     elif args.compare_profiles:
         axis, axis_label = "profile", "PIPELINE_PROFILE"
         keys = (0, 1)
         pairs = [(args.hazard_strategy, p, args.branch_predictor, args.cache_mode,
                   args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
-                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, args.l2_size) for p in keys]
+                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, args.l2_size,
+                  args.prefetch_mode) for p in keys]
     elif args.compare_predictors:
         axis, axis_label = "predictor", "BRANCH_PREDICTOR"
         keys = (0, 1, 2, 3)   # Generation 4, Phase A (docs/adr/0040): GShare + tournament joined the axis
         pairs = [(args.hazard_strategy, args.pipeline_profile, bp, args.cache_mode,
                   args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
-                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, args.l2_size) for bp in keys]
+                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, args.l2_size,
+                  args.prefetch_mode) for bp in keys]
     elif args.compare_cache:
         axis, axis_label = "cache", "CACHE_MODE"
         keys = (0, 1)
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, cm,
                   args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
-                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, args.l2_size) for cm in keys]
+                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, args.l2_size,
+                  args.prefetch_mode) for cm in keys]
     elif args.compare_latency:
         axis, axis_label = "latency", "MEM_LATENCY_I/D"
         keys = (0, 1)
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
                   args.replacement_policy, li, ld, args.victim_entries, args.burst_enable, args.mem_latency_d_burst,
-                  args.mshr_entries, args.l2_size)
+                  args.mshr_entries, args.l2_size, args.prefetch_mode)
                  for li, ld in ((0, 0), (args.mem_latency_i, args.mem_latency_d))]
     elif args.compare_replacement:
         axis, axis_label = "replacement", "REPLACEMENT_POLICY"
         keys = (0, 1, 2)
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
                   rp, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
-                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, args.l2_size) for rp in keys]
+                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, args.l2_size,
+                  args.prefetch_mode) for rp in keys]
     elif args.compare_victim_cache:
         axis, axis_label = "victim", "VICTIM_ENTRIES"
         keys = (0, 4)
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
                   args.replacement_policy, args.mem_latency_i, args.mem_latency_d, ve,
-                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, args.l2_size) for ve in keys]
+                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, args.l2_size,
+                  args.prefetch_mode) for ve in keys]
     elif args.compare_burst:
         axis, axis_label = "burst", "MEM_LATENCY_D_BURST"
         keys = (0, 1)   # 0=no discount (MEM_LATENCY_D_BURST==MEM_LATENCY_D), 1=full discount (0)
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
                   args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
-                  args.burst_enable, ldb, args.mshr_entries, args.l2_size) for ldb in (args.mem_latency_d, 0)]
+                  args.burst_enable, ldb, args.mshr_entries, args.l2_size,
+                  args.prefetch_mode) for ldb in (args.mem_latency_d, 0)]
     elif args.compare_mshr:
         axis, axis_label = "mshr", "MSHR_ENTRIES"
         keys = (1, 2, 4)
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
                   args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
-                  args.burst_enable, args.mem_latency_d_burst, me, args.l2_size) for me in keys]
+                  args.burst_enable, args.mem_latency_d_burst, me, args.l2_size,
+                  args.prefetch_mode) for me in keys]
     elif args.compare_l2:
         axis, axis_label = "l2", "L2_SIZE_BYTES"
         keys = (0, args.l2_size)
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
                   args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
-                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, l2) for l2 in keys]
+                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, l2,
+                  args.prefetch_mode) for l2 in keys]
+    elif args.compare_prefetch:
+        axis, axis_label = "prefetch", "PREFETCH_MODE"
+        keys = (0, args.prefetch_mode)
+        pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
+                  args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
+                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, args.l2_size,
+                  pf) for pf in keys]
     else:
         axis, axis_label = None, None
         keys = (args.hazard_strategy,)  # single run, keyed arbitrarily by hazard_strategy
         pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
                   args.replacement_policy, args.mem_latency_i, args.mem_latency_d, args.victim_entries,
-                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, args.l2_size)]
+                  args.burst_enable, args.mem_latency_d_burst, args.mshr_entries, args.l2_size,
+                  args.prefetch_mode)]
 
     all_results = {k: [] for k in keys}
     with tempfile.TemporaryDirectory() as work_dir:
         for key, (strategy, profile, predictor, cache_mode, replacement_policy, mem_latency_i, mem_latency_d,
-                  victim_entries, burst_enable, mem_latency_d_burst, mshr_entries, l2_size) in zip(keys, pairs):
+                  victim_entries, burst_enable, mem_latency_d_burst, mshr_entries, l2_size,
+                  prefetch_mode) in zip(keys, pairs):
             if axis == "strategy":
                 print(f"--- HAZARD_STRATEGY={strategy} ({'forwarding' if strategy == 0 else 'stall-only'}) ---")
             elif axis == "profile":
@@ -458,6 +494,9 @@ def main():
             elif axis == "l2":
                 print(f"--- L2_SIZE_BYTES={l2_size} "
                       f"({'disabled' if l2_size == 0 else f'{l2_size} bytes, L2_WAYS={args.l2_ways}'}) ---")
+            elif axis == "prefetch":
+                prefetch_names = {0: "disabled", 1: "PF_NEXT_LINE", 2: "PF_STRIDE", 3: "PF_STREAM"}
+                print(f"--- PREFETCH_MODE={prefetch_mode} ({prefetch_names[prefetch_mode]}) ---")
             for prog_s in progs:
                 name = os.path.splitext(os.path.basename(prog_s))[0]
                 mem_size = MEM_SIZE_OVERRIDES.get(name, 128)
@@ -465,7 +504,8 @@ def main():
                                          strategy, profile, predictor, cache_mode, replacement_policy,
                                          mem_latency_i, mem_latency_d, victim_entries,
                                          burst_enable, mem_latency_d_burst, mshr_entries=mshr_entries,
-                                         l2_size=l2_size, l2_ways=args.l2_ways, l2_replacement=args.l2_replacement)
+                                         l2_size=l2_size, l2_ways=args.l2_ways, l2_replacement=args.l2_replacement,
+                                         prefetch_mode=prefetch_mode)
                 if err:
                     print(f"FAIL  {name}: {err}")
                     all_results[key].append((name, None))
@@ -501,6 +541,9 @@ def main():
             "burst": {0: "no discount (MEM_LATENCY_D_BURST=MEM_LATENCY_D)", 1: "full discount (MEM_LATENCY_D_BURST=0)"},
             "mshr": {1: "MSHR_ENTRIES=1 (disabled)", 2: "MSHR_ENTRIES=2", 4: "MSHR_ENTRIES=4"},
             "l2": {0: "L2_SIZE_BYTES=0 (disabled)", args.l2_size: f"L2_SIZE_BYTES={args.l2_size}"},
+            "prefetch": {0: "PREFETCH_MODE=0 (disabled)",
+                         args.prefetch_mode: f"PREFETCH_MODE={args.prefetch_mode} "
+                                              f"({['disabled', 'PF_NEXT_LINE', 'PF_STRIDE', 'PF_STREAM'][args.prefetch_mode]})"},
         }
         baseline_key = keys[0]
         by_name_baseline = dict(all_results[baseline_key])

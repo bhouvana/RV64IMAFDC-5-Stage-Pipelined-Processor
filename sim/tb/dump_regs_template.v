@@ -90,7 +90,7 @@ module dump_regs;
                 .L2_REPLACEMENT_POLICY(__L2_REPLACEMENT_POLICY__),
                 .BURST_ENABLE(__BURST_ENABLE__), .MEM_LATENCY_D_BURST(__MEM_LATENCY_D_BURST__),
                 .MEM_LATENCY_I(__MEM_LATENCY_I__), .MEM_LATENCY_D(__MEM_LATENCY_D__),
-                .XLEN(__XLEN__))
+                .XLEN(__XLEN__), .PREFETCH_MODE(__PREFETCH_MODE__))
                 dut(.clk(clk), .start(start), .uart_rx(1'b1));
 
     always #5 clk = ~clk;

@@ -55,7 +55,7 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0,
             mem_size=128, interrupt=None, branch_predictor=0, mmu=False, cache_mode=0,
             replacement_policy=0, victim_entries=0, mem_latency_i=0, mem_latency_d=0,
             burst_enable=0, mem_latency_d_burst=0, xlen=32, mshr_entries=1,
-            l2_size=0, l2_ways=4, l2_replacement=0):
+            l2_size=0, l2_ways=4, l2_replacement=0, prefetch_mode=0):
     prog_s = os.path.join(work_dir, f"r{seed}.s")
     prog_mem = os.path.join(work_dir, f"r{seed}.mem")
     # Generation 2 (Phase M, docs/adr/0028-rv64-migration-phase-m.md): xlen
@@ -154,6 +154,7 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0,
               .replace("__MEM_LATENCY_I__", str(mem_latency_i))
               .replace("__MEM_LATENCY_D__", str(mem_latency_d))
               .replace("__XLEN__", str(xlen))
+              .replace("__PREFETCH_MODE__", str(prefetch_mode))
               .replace("__UART_STIMULUS__", uart_stimulus))
     with open(dump_v, "w") as f:
         f.write(tpl)
@@ -269,6 +270,11 @@ def main():
                      help="riscvpipeline.v's L2_REPLACEMENT_POLICY (docs/adr/0045-l2-cache-"
                           "phase-f.md): 0=round-robin (default), 1=FIFO, 2=LRU -- independent of "
                           "--replacement-policy (L1's own). Only meaningful under --l2-size > 0")
+    ap.add_argument("--prefetch-mode", type=int, default=0, choices=[0, 1, 2, 3],
+                     help="riscvpipeline.v's PREFETCH_MODE (docs/adr/0046-hardware-prefetchers-"
+                          "phase-g.md): 0=disabled (default, bit-exact), 1=next-line, 2=stride, "
+                          "3=stream. Only meaningful under --cache-mode 1; D$ prefetching also "
+                          "needs --mshr-entries > 1, I$ prefetching also needs --l2-size > 0")
     ap.add_argument("--mem-latency-i", type=int, default=0,
                      help="riscvpipeline.v's MEM_LATENCY_I (docs/adr/0024-variable-latency-memory.md): "
                           "extra I-side wait-state cycles, 0=bit-exact default")
@@ -362,7 +368,8 @@ def main():
                               burst_enable=args.burst_enable, mem_latency_d_burst=args.mem_latency_d_burst,
                               mem_latency_i=args.mem_latency_i, mem_latency_d=args.mem_latency_d,
                               xlen=args.xlen, mshr_entries=args.mshr_entries,
-                              l2_size=args.l2_size, l2_ways=args.l2_ways, l2_replacement=args.l2_replacement)
+                              l2_size=args.l2_size, l2_ways=args.l2_ways, l2_replacement=args.l2_replacement,
+                              prefetch_mode=args.prefetch_mode)
             if ok:
                 passed += 1
                 print(f"pass  seed={seed}")
