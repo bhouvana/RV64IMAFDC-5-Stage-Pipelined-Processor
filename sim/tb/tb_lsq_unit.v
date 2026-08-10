@@ -100,23 +100,26 @@ module tb_lsq_unit;
         .disp_base_preg0(disp_base_preg0), .disp_base_ready0(disp_base_ready0),
         .disp_imm0(disp_imm0), .disp_funct3_0(disp_funct3_0),
         .disp_store_data_preg0(disp_store_data_preg0), .disp_store_data_ready0(disp_store_data_ready0),
-        .disp_dest_preg0(disp_dest_preg0), .disp_rob_tag0(disp_rob_tag0),
+        .disp_dest_preg0(disp_dest_preg0), .disp_rob_tag0(disp_rob_tag0), .disp_pc0(64'd0),
         .disp_en1(1'b0), .disp_op_type1(2'd0), .disp_amo_op1(5'd0),
         .disp_base_preg1(6'd0), .disp_base_ready1(1'b0),
         .disp_imm1(64'd0), .disp_funct3_1(3'd0),
         .disp_store_data_preg1(6'd0), .disp_store_data_ready1(1'b0),
-        .disp_dest_preg1(6'd0), .disp_rob_tag1(4'd0),
+        .disp_dest_preg1(6'd0), .disp_rob_tag1(4'd0), .disp_pc1(64'd0),
         .cdb_valid0(cdb_valid0), .cdb_preg0(cdb_preg0),
         .cdb_valid1(cdb_valid1), .cdb_preg1(cdb_preg1),
         .cdb_valid2(cdb_valid2), .cdb_preg2(cdb_preg2),
         .head_base_preg(head_base_preg), .head_store_data_preg(head_store_data_preg),
         .mem_base_value(mem_base_value), .mem_store_data_value(mem_store_data_value),
+        .mem_stall_ext(1'b0),   // Gen6-P2 (docs/adr/0053): no external stall in this standalone unit test
+        .force_retire_ext(1'b0),
         .mem_memRead(mem_memRead), .mem_memWrite(mem_memWrite),
         .mem_address(mem_address), .mem_writeData(mem_writeData), .mem_funct3(mem_funct3),
         .mem_readData(mem_readData),
         .complete_valid(complete_valid), .complete_is_load(complete_is_load),
         .complete_dest_preg(complete_dest_preg), .complete_data(complete_data),
         .complete_rob_tag(complete_rob_tag),
+        .head_want_access(), .head_want_write(), .head_rob_tag(), .head_pc(),
         .lsq_count(lsq_count), .lsq_full(lsq_full)
     );
 

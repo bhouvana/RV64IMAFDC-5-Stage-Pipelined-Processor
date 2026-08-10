@@ -19,13 +19,14 @@
 `include "Tlb39.v"
 `include "Ptw39.v"
 
-// Generation 6, Gen6-O (docs/adr/0051). OOOCore.v's own first lui/auipc
-// test -- proves the new use_forced_a0/forced_a_value0 payload mechanism
-// (docs/adr/0051's own Design section) end to end: lui's rd = 0+imm,
-// auipc's rd = this instruction's own captured PC + imm, both via the
-// SAME RS_ALU/ALU.v pipeline every other ALU op already uses, just with
-// operand A forced instead of PRF-read.
-module tb_ooocore_lui_auipc_o1;
+// Generation 6, Gen6-P2b (docs/adr/0053). OOOCore.v's own first LIVE Sv39
+// translation test: a real gigapage identity mapping, mret into the
+// translated region, and a marker instruction proving the translated
+// fetch actually landed at the right physical address -- not just that
+// Tlb39.v/Ptw39.v elaborate cleanly (Gen6-P2a already proved that with
+// zero behavior change; this proves the NEW behavior itself, for
+// sim/programs/ooocore_mmu_p2b.s).
+module tb_ooocore_mmu_p2b;
     reg clk = 0;
     always #5 clk = ~clk;
 
@@ -56,7 +57,7 @@ module tb_ooocore_lui_auipc_o1;
     OOOCore #(
         .XLEN(64), .NUM_AREGS(32), .NUM_PREGS(64),
         .ROB_ENTRIES(16), .RS_ALU_ENTRIES(8),
-        .IMEM_SIZE_BYTES(128), .IMEM_INIT_FILE("sim/programs/ooocore_lui_auipc_o1.mem"),
+        .IMEM_SIZE_BYTES(128), .IMEM_INIT_FILE("sim/programs/ooocore_mmu_p2b.mem"),
         .DMEM_SIZE_BYTES(256)
     ) dut (.clk(clk), .rst(rst), .mailbox_readData(64'b0));
 
@@ -65,16 +66,17 @@ module tb_ooocore_lui_auipc_o1;
         @(posedge clk); rst <= 0;
         @(posedge clk); rst <= 1;
 
-        for (i = 0; i < 200; i = i + 1)
+        for (i = 0; i < 400; i = i + 1)
             @(posedge clk);
         #1;
 
-        check_areg(5'd1, 64'h1000, "x1 = lui x1,0x1 = 0x1000");
-        check_areg(5'd2, 64'h1004, "x2 = auipc x2,0x1 at pc=4 = 0x1004");
-        check_areg(5'd3, 64'h1000, "x3 = addi x3,x1,0 -- proves RS wakeup saw lui's own real completion");
+        check_areg(5'd1, 64'h1B, "x1 = 0x1B (gigapage leaf PTE)");
+        check_areg(5'd3, 64'h8000000000000000, "x3 = satp value (MODE=Sv39, PPN=0)");
+        check_areg(5'd4, 64'd36, "x4 = 36 (VA written to mepc)");
+        check_areg(5'd10, 64'd111, "x10 = 111 -- the marker instruction, only reachable via a REAL translated fetch landing at PA 36");
 
-        if (fails == 0) $display("PASS  ooocore_lui_auipc_o1 (%0d checks)", checks);
-        else $display("FAIL  ooocore_lui_auipc_o1 (%0d/%0d checks failed)", fails, checks);
+        if (fails == 0) $display("PASS  ooocore_mmu_p2b (%0d checks)", checks);
+        else $display("FAIL  ooocore_mmu_p2b (%0d/%0d checks failed)", fails, checks);
         $finish;
     end
 endmodule

@@ -16,6 +16,8 @@
 `include "Bht.v"
 `include "Btb.v"
 `include "CSR.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // Generation 6, Gen6-F. OOOCore.v's first MUL/DIV end-to-end test.
 // MUL/MULH/MULHSU/MULHU flow through the pre-existing RS_ALU/ALU.v path

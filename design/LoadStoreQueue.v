@@ -78,6 +78,13 @@ module LoadStoreQueue #(
     input  wire                    disp_store_data_ready0,
     input  wire [PREG_BITS-1:0]    disp_dest_preg0,     // loads/sc/amo_rmw
     input  wire [ROB_IDX_BITS-1:0] disp_rob_tag0,
+    // Gen6-P2 (docs/adr/0053): the dispatching instruction's own PC --
+    // needed ONLY so a D-side page fault (discovered well after dispatch,
+    // once this entry finally reaches the head) can still supply the
+    // real faulting PC to CSR.v's own trap_pc (mepc), the exact same
+    // value trap_inflight_pc_r already latches for a dispatch-time-known
+    // trap. Nothing else in this module ever reads it.
+    input  wire [XLEN-1:0]         disp_pc0,
 
     input  wire                    disp_en1,
     input  wire [1:0]              disp_op_type1,
@@ -90,6 +97,7 @@ module LoadStoreQueue #(
     input  wire                    disp_store_data_ready1,
     input  wire [PREG_BITS-1:0]    disp_dest_preg1,
     input  wire [ROB_IDX_BITS-1:0] disp_rob_tag1,
+    input  wire [XLEN-1:0]         disp_pc1,   // Gen6-P2: see disp_pc0's own comment; slot1 never actually dispatches into this queue (OOOCore.v ties it off), kept for symmetry
 
     // CDB snoop -- wakes a not-yet-ready base/store-data operand, same
     // shape as ReservationStation.v's own wakeup.
@@ -108,6 +116,34 @@ module LoadStoreQueue #(
     output wire [PREG_BITS-1:0]    head_store_data_preg,
     input  wire [XLEN-1:0]         mem_base_value,
     input  wire [XLEN-1:0]         mem_store_data_value,
+
+    // Gen6-P2 (docs/adr/0053): external freeze, held by the caller for as
+    // long as the head's own virtual address hasn't finished translating
+    // (an ITLB/DTLB miss mid-walk, or simply the shared physical-memory
+    // port being on loan to Ptw39 for an UNRELATED walk -- OOOCore.v's own
+    // MMU section owns the exact condition; this module just needs to not
+    // issue a real access while it's held, same "stall-and-wait" shape
+    // trap_inflight_valid_r/jr_inflight_valid_r already use elsewhere in
+    // OOOCore.v). Purely additive: tied 0 by every pre-existing caller/
+    // testbench, bit-exact with this module's own pre-Gen6-P2 behavior.
+    input  wire                    mem_stall_ext,
+
+    // Gen6-P2: a one-cycle pulse from the caller -- "silently retire the
+    // head NOW, without ever touching memory." A genuine DTLB page fault
+    // means mem_stall_ext will hold this entry frozen FOREVER (ls_hit can
+    // never become true for a translation that's already known to fault),
+    // so nothing about this module's own normal head_ready/mem_pending_r
+    // path could ever retire it -- left unhandled, the LSQ would stay
+    // permanently "occupied" by one phantom entry even after the fault's
+    // own trap has redirected execution entirely away from it, eventually
+    // deadlocking (lsq_full) once real, unrelated LATER instructions fill
+    // the remaining entries. The caller's own MMU section is what
+    // actually detects the fault and reports it to the ROB/trap machinery
+    // (a SEPARATE, already-latched mechanism -- see OOOCore.v's own
+    // dside_fault_pulse) -- this pulse is purely this module's own
+    // internal bookkeeping cleanup, decoupled from complete_valid on
+    // purpose (nothing external needs to react to it a second time).
+    input  wire                    force_retire_ext,
 
     // Memory port -- DataMemoryBRAM.v directly.
     output wire                    mem_memRead,
@@ -128,6 +164,19 @@ module LoadStoreQueue #(
     output wire [PREG_BITS-1:0]    complete_dest_preg,
     output wire [XLEN-1:0]         complete_data,
     output wire [ROB_IDX_BITS-1:0] complete_rob_tag,
+
+    // Gen6-P2 (docs/adr/0053): the head's own PRE-STALL readiness --
+    // "would this cycle issue a real access, if mem_stall_ext weren't
+    // held" -- plus its rob_tag/PC, unconditionally valid whenever
+    // head_present (not gated by mem_pending_r the way complete_* is).
+    // The caller's own MMU section needs all four to run a DTLB query
+    // and, on a fault, inject a synthetic ROB completion + trap using
+    // this exact entry's own identity, since a permanently-stalled head
+    // never asserts complete_valid on its own.
+    output wire                    head_want_access,
+    output wire                    head_want_write,
+    output wire [ROB_IDX_BITS-1:0] head_rob_tag,
+    output wire [XLEN-1:0]         head_pc,
 
     output wire [CNT_BITS-1:0]     lsq_count,
     output wire                    lsq_full
@@ -152,6 +201,7 @@ reg [PREG_BITS-1:0]    e_store_data_preg [0:LSQ_ENTRIES-1];
 reg                    e_store_data_ready [0:LSQ_ENTRIES-1];
 reg [PREG_BITS-1:0]    e_dest_preg      [0:LSQ_ENTRIES-1];
 reg [ROB_IDX_BITS-1:0] e_rob_tag        [0:LSQ_ENTRIES-1];
+reg [XLEN-1:0]         e_pc             [0:LSQ_ENTRIES-1];   // Gen6-P2: see disp_pc0's own comment
 
 reg [CNT_BITS-1:0]     count_r;
 reg [LSQ_IDX_BITS-1:0] head_r, tail_r;
@@ -205,9 +255,20 @@ wire head_needs_data  = head_is_store || head_is_sc || head_is_amo;
 wire head_wants_read  = head_is_load || (head_is_amo && !amo_need_write_r);
 wire head_wants_write = head_is_store || head_is_sc || (head_is_amo && amo_need_write_r);
 
-wire head_ready = head_present && !mem_pending_r
+// Gen6-P2: head_want_access is head_ready's own pre-stall condition,
+// exposed so the caller's MMU section can run a DTLB query and inject a
+// synthetic completion/trap on a fault -- a permanently-stalled entry
+// (mem_stall_ext held forever once a real DTLB fault is latched) never
+// asserts complete_valid on its own, so the caller needs its own signal
+// to know "the head WOULD be issuing right now."
+assign head_want_access = head_present && !mem_pending_r
                  && e_base_ready[head_r]
                  && (!head_needs_data || e_store_data_ready[head_r]);
+assign head_want_write  = head_wants_write;
+assign head_rob_tag     = e_rob_tag[head_r];
+assign head_pc          = e_pc[head_r];
+
+wire head_ready = head_want_access && !mem_stall_ext;
 
 wire [XLEN-1:0] head_addr = mem_base_value + e_imm[head_r];
 
@@ -312,7 +373,20 @@ always @(posedge clk) begin
         // retire the entry -- it captures the old value and flips into
         // phase 2 (write) instead, re-triggering head_ready/mem_pending_r
         // for the SAME entry.
-        if (head_ready)
+        // Gen6-P2: force_retire_ext takes priority over the ordinary
+        // head_ready/mem_pending_r path -- mutually exclusive by
+        // construction anyway (the caller only ever pulses this while
+        // mem_stall_ext has been holding head_ready false, so
+        // mem_pending_r is guaranteed 0 here), but checked first for
+        // clarity. Silently retires -- no memory touched, no
+        // complete_valid pulse (the caller already informed the ROB via
+        // its own separate synthetic-completion mechanism).
+        if (force_retire_ext) begin
+            e_valid[head_r]   <= 1'b0;
+            head_r            <= wrap_add(head_r, 2'd1);
+            amo_need_write_r  <= 1'b0;
+        end
+        else if (head_ready)
             mem_pending_r <= 1'b1;
         else if (mem_pending_r) begin
             mem_pending_r <= 1'b0;
@@ -346,6 +420,7 @@ always @(posedge clk) begin
             e_store_data_ready[tail_r]  <= disp_store_data_ready0;
             e_dest_preg[tail_r]         <= disp_dest_preg0;
             e_rob_tag[tail_r]           <= disp_rob_tag0;
+            e_pc[tail_r]                <= disp_pc0;
         end
         if (disp_en1) begin
             e_valid[tail1_idx]             <= 1'b1;
@@ -359,16 +434,19 @@ always @(posedge clk) begin
             e_store_data_ready[tail1_idx]  <= disp_store_data_ready1;
             e_dest_preg[tail1_idx]         <= disp_dest_preg1;
             e_rob_tag[tail1_idx]           <= disp_rob_tag1;
+            e_pc[tail1_idx]                <= disp_pc1;
         end
         if (disp_count != 2'd0)
             tail_r <= wrap_add(tail_r, disp_count);
 
         // Single, unified occupancy update -- complete_valid (==
-        // mem_pending_r) is this cycle's own retire, disp_count is this
-        // cycle's own dispatch; both can happen the same cycle (a
-        // completing head and a fresh tail append never touch the same
-        // entry, so there's no ordering hazard between them).
-        count_r <= count_r - (complete_valid ? 2'd1 : 2'd0) + disp_count;
+        // mem_pending_r) OR force_retire_ext (Gen6-P2's own silent
+        // retire, mutually exclusive with complete_valid by construction)
+        // is this cycle's own retire, disp_count is this cycle's own
+        // dispatch; both can happen the same cycle (a completing head and
+        // a fresh tail append never touch the same entry, so there's no
+        // ordering hazard between them).
+        count_r <= count_r - ((complete_valid || force_retire_ext) ? 2'd1 : 2'd0) + disp_count;
     end
 end
 

@@ -491,6 +491,41 @@ SC/AMO-RMW wrongly stay dual-issue-eligible. `tb_lsq_unit.v` 31/31 (new
 SC/AMOADD cases); new `tb_ooocore_amo_p1.v` 5/5, proving the decode
 routing end to end. 130/130 directed suite, zero-warning compile.
 
+**Gen6-P2 (`docs/adr/0053`): Sv39 MMU in OOOCore.v.** Second sub-phase of
+the backlog. Reuses `Tlb39.v`/`Ptw39.v` (`docs/adr/0032`) completely
+unmodified — integration, not new translation-hardware design. A real
+research finding closed a structural worry before any RTL: OOOCore.v's
+own I-side/D-side memory are already numerically unified the same way
+PIPELINED's are (page tables live in ordinary D-side memory, built at
+runtime, since `m_DMem` never gets a `DATA_INIT_FILE` anyway). I-side
+translation folds into Gen6-I's existing dispatch-time trap machinery
+unmodified (an ITLB fault is fully known before dispatch); D-side needed
+genuinely new late-injection plumbing (`LoadStoreQueue.v` gained
+`head_want_access`/`head_want_write`/`head_rob_tag`/`head_pc` outputs and
+a `force_retire_ext` input), since a faulting load/store was already
+dispatched, its `rob_tag` already allocated, well before its translation
+resolves. Found and fixed four real deadlock/correctness gaps by design,
+before writing any test: a permanently-stalled LSQ head never signals ROB
+completion on its own (fixed with a synthetic completion pulse into the
+ROB's existing `complete_en1` port, decoupled from the real
+`lsq_complete_valid`); that entry also never actually LEAVES the LSQ
+(`force_retire_ext` — the one genuinely new interlock this phase added,
+without it the whole LSQ eventually deadlocks once later instructions
+fill the remaining entries); a faulting load's own destination would
+otherwise commit into the architecture register file on retire (gated
+`!dside_trap_resolve` into the integer RAT/FreeList commit path); and a
+younger store could actually write memory before an older, still-
+unresolved load's own fault is discovered (Gen6-E's stores commit on
+issue, not retire — fixed by folding `dtlb_stall`/`dside_fault_valid_r`
+into `dispatch_stall`). Dual-issue excluded while translation is live
+(real, deliberate scope cut, same category as every other Gen6-K
+exclusion). `tb_ooocore_mmu_p2b.v` (I-side, a real gigapage identity
+mapping) 4/4 first run; `tb_ooocore_mmu_p2d.v` (D-side fault +
+no-deadlock proof) 5/5 after fixing a real test-program bug (a
+read+execute-only PTE that made the test's own "recovery" code
+illegitimately fault too — found by direct cycle tracing, not guessed).
+132/132 directed suite, zero-warning compile.
+
 ---
 
 ## Generation 7 — Vector Processing (v7.0)

@@ -1,6 +1,7 @@
 `default_nettype none
 
 `include "riscv_defs.vh"
+`include "wb_defs.vh"   // Gen6-P2 (docs/adr/0053): WB_SEL_WIDTH, for Ptw39's own m_sel port
 
 // No `include for the design/*.v modules instantiated below (Control.v,
 // ALUCtrl.v, ImmGen.v, ALU.v, InstructionMemory.v, RegisterAliasTable.v,
@@ -107,16 +108,40 @@ module OOOCore #(
 );
 
 // ==========================================================================
-// Fetch (combinational read at pc_r; no cache/MMU yet -- Gen6-D scope)
+// Fetch (combinational read at pc_r; no cache yet -- Gen6-D scope. Gen6-P2
+// (docs/adr/0053) added Sv39 translation -- itlb_hit/itlb_ppn/translate_enable
+// are forward-referenced here, defined in the MMU section further down
+// (same "declared where naturally consumed, wired up where naturally
+// produced" convention every other Gen6-* forward reference in this file
+// already uses).
 // ==========================================================================
 reg [XLEN-1:0] pc_r;
 
+// Gen6-P2: translated physical fetch address when translation is live and
+// the ITLB actually hit; the raw VA otherwise (both the "MMU off" case and
+// the "still resolving" case -- itlb_hit reads a stale/never-filled entry
+// as a structural miss, same X-avoidance reasoning docs/adr/0032's own P3
+// imem_phys_addr comment already established for PIPELINED).
+wire [XLEN-1:0] imem_phys_addr = (translate_enable && itlb_hit) ?
+    {itlb_ppn[19:0], pc_r[11:0]} : pc_r;
+
 wire [XLEN-1:0] inst_full;
 InstructionMemory #(.INIT_FILE(IMEM_INIT_FILE), .SIZE_BYTES(IMEM_SIZE_BYTES), .XLEN(XLEN)) m_IMem(
-    .readAddr(pc_r),
+    .readAddr(imem_phys_addr),
     .inst(inst_full)
 );
-wire [31:0] inst_word = inst_full[31:0];   // instructions are always a
+// Gen6-P2: forced to a real, safe, already-established "illegal
+// instruction" encoding (all-zero, InstructionMemory.v's own documented
+// out-of-bounds convention) for as long as translation hasn't actually
+// resolved to a hit -- covers both an in-progress walk (itlb_miss, still
+// stalling dispatch below) and a walk that just concluded with a fault
+// (itlb_hit stays 0; Tlb39.v only ever fills on a successful walk). This
+// is what lets itlb_fault_this_cycle (below) reuse Gen6-I's existing
+// illegal-instruction trap machinery completely unmodified -- every other
+// decode wire (needs_dest, is_mem_op, ...) falls out safely 0 for free,
+// the same way a real out-of-bounds fetch already does.
+wire [31:0] inst_word = (translate_enable && !itlb_hit) ? 32'b0 : inst_full[31:0];
+                                            // instructions are always a
                                             // 32-bit word here -- Gen6-D
                                             // doesn't support RVC yet.
 
@@ -231,7 +256,21 @@ wire is_branch = branch_c;
 // retire-boundary injection point; the MMU touches fetch AND
 // LoadStoreQueue.v's own address path).
 wire has_exception = illegalOpcode_c || isEcall_c;
-wire is_trap_related = has_exception || isMret_c;
+// Gen6-P2 (docs/adr/0053): an ITLB fault fits this SAME dispatch-time-only
+// trap shape unmodified -- unlike a D-side page fault (discovered only
+// once the LSQ's already-dispatched head entry gets to it, needing new
+// late-injection plumbing, see the MMU section below), a fetch-side fault
+// is fully resolved BEFORE dispatch even happens (itlb_miss below blocks
+// dispatch_stall for the walk's whole duration; is_trap_related only ever
+// sees the SAME cycle the walk concludes, exactly mirroring has_exception's
+// own "known combinationally, before dispatch" shape). itlb_fault_this_cycle/
+// sfence_priv_violation forward-referenced from the MMU section further
+// down -- an unauthorized (U-mode) sfence.vma needs no dedicated cause
+// selection below: it naturally falls to trap_inflight_cause_r's own
+// ternary default (MCAUSE_ILLEGAL_INSTRUCTION), exactly matching real
+// RISC-V behavior (same treatment docs/adr/0032's own sfence_priv_violation
+// already established for PIPELINED).
+wire is_trap_related = has_exception || isMret_c || itlb_fault_this_cycle || sfence_priv_violation;
 
 // ==========================================================================
 // Gen6-O (docs/adr/0051): lui/auipc/jal/jalr/csrrX. jump_c/jalr_c/lui_c/
@@ -519,7 +558,16 @@ wire slot0_is_plain_alu = !is_mem_op && !is_div_op && !is_fp_op && !is_branch &&
 // the identical reason slot0's own versions weren't before this phase.
 wire is_lui_auipc_jal_jalr_csr_1 = lui_c_1 || auipc_c_1 || jump_c_1 || jalr_c_1 || isCsr_c_1;
 wire slot1_is_plain_alu = !is_mem_op_1 && !is_div_op_1 && !is_fp_op_1 && !is_branch_1 && !is_trap_related_1 && !is_lui_auipc_jal_jalr_csr_1;
-wire try_dual_issue = slot0_is_plain_alu && slot1_is_plain_alu;
+// Gen6-P2 (docs/adr/0053): real, deliberate scope cut, same category as
+// every other Gen6-K exclusion above -- dual-issue and live Sv39
+// translation don't coexist this phase. m_IMem1's own speculative fetch
+// at pc_r+4 stays untranslated regardless (harmless: slot1 never actually
+// dispatches while translate_enable is 1, so nothing downstream ever
+// consumes inst_word1 that cycle -- an unused speculative fetch producing
+// an arbitrary byte value is not a correctness or security issue). Real
+// future work if profiling ever shows this mattering on an MMU-heavy
+// dual-issue-capable workload.
+wire try_dual_issue = slot0_is_plain_alu && slot1_is_plain_alu && !translate_enable;
 
 // Same-fetch-bundle RAW bypass -- the one genuinely new correctness-
 // critical piece (found while SCOPING this phase, not mid-RTL): if
@@ -644,8 +692,70 @@ wire dispatch_stall = rob_full
                                                   // jal's decode-time-known
                                                   // one -- see jr_inflight's
                                                   // own section below)
-                      || csr_inflight_valid_r;   // Gen6-O5: same scope cut,
+                      || csr_inflight_valid_r    // Gen6-O5: same scope cut,
                                                   // for csrrw/csrrs/csrrc(+i)
+                      || itlb_miss               // Gen6-P2 (docs/adr/0053):
+                                                  // same shape again -- a
+                                                  // walk in progress (or one
+                                                  // cycle from IT resolving
+                                                  // successfully) holds pc_r
+                                                  // still (see the PC-advance
+                                                  // block's own do_dispatch
+                                                  // gate); a walk resolving
+                                                  // with a FAULT is
+                                                  // deliberately excluded
+                                                  // (itlb_miss's own
+                                                  // definition below), so
+                                                  // dispatch proceeds that
+                                                  // one cycle and
+                                                  // is_trap_related picks it
+                                                  // up instead.
+                      || dtlb_stall              // Gen6-P2: a REAL, load-
+                                                  // bearing addition, not
+                                                  // just symmetry with
+                                                  // itlb_miss -- unlike
+                                                  // RS_ALU results (never
+                                                  // architecturally visible
+                                                  // until RETIRE), this
+                                                  // LSQ's own stores commit
+                                                  // to real memory the
+                                                  // moment they ISSUE, not
+                                                  // gated on retirement at
+                                                  // all (Gen6-E's own
+                                                  // design). Without this,
+                                                  // a YOUNGER store dispatched
+                                                  // while an OLDER load's own
+                                                  // DTLB translation is still
+                                                  // unresolved could actually
+                                                  // WRITE memory before the
+                                                  // older instruction's own
+                                                  // fault is even discovered
+                                                  // -- a genuine precise-
+                                                  // exception violation this
+                                                  // phase's own design pass
+                                                  // caught before writing any
+                                                  // test for it (the same
+                                                  // "trace the real
+                                                  // consequence, don't just
+                                                  // pattern-match the
+                                                  // existing itlb_miss shape"
+                                                  // discipline this project
+                                                  // already used for Gen6-P1's
+                                                  // own complete_is_load fix).
+                      || dside_fault_valid_r;    // Gen6-P2: same reasoning,
+                                                  // held through to the
+                                                  // fault's own eventual
+                                                  // retire/redirect -- once
+                                                  // dtlb_page_fault first
+                                                  // fires, dtlb_stall alone
+                                                  // would otherwise drop
+                                                  // (dtlb_needed goes false
+                                                  // once force_retire_ext
+                                                  // has cleared the LSQ's own
+                                                  // head), letting dispatch
+                                                  // resume prematurely,
+                                                  // BEFORE the trap has
+                                                  // actually redirected.
 wire do_dispatch     = !dispatch_stall;
 
 // Gen6-K: room for a SECOND dispatch this cycle, checked independently
@@ -675,7 +785,21 @@ FreeList #(.NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS)) m_FreeList(
     // Gen6-H: gated !is_fp_dest -- a float-destination entry's own
     // old_preg lives in the FLOAT preg space, and must be reclaimed by
     // FreeList_Float below instead, never this (integer) FreeList.
-    .free_en0(rob_retire_valid0 && rob_retire_has_dest0 && !rob_retire_is_fp_dest0), .free_preg0(rob_retire_old_preg0),
+    // Gen6-P2 (docs/adr/0053): !dside_trap_resolve -- a D-side-page-faulting
+    // load/store still gets an ordinary needs_dest=1 ROB entry (see the
+    // MMU section's own synthetic-completion comment), but architecturally
+    // a faulting instruction has NO effect: its destination must never
+    // actually commit (which would both corrupt the arch register with a
+    // never-really-loaded value AND free the OLD preg while the RAT
+    // mapping stubbornly still points to it, corrupting a live value --
+    // a real bug caught by design, before writing any test for it, by
+    // re-deriving what "commit" is actually supposed to mean for a
+    // trapping retire, the same discipline Gen6-P1's own complete_is_load
+    // fix used). dside_trap_resolve is FP-irrelevant (a D-side fault is
+    // always an integer-dest load/store/AMO in this core's current
+    // scope, never an flw) -- only these two (integer) instances need
+    // the gate, not m_FreeList_Float/m_RAT_Float below.
+    .free_en0(rob_retire_valid0 && rob_retire_has_dest0 && !rob_retire_is_fp_dest0 && !dside_trap_resolve), .free_preg0(rob_retire_old_preg0),
     .free_en1(rob_retire_valid1 && rob_retire_has_dest1 && !rob_retire_is_fp_dest1), .free_preg1(rob_retire_old_preg1),
     .free_count(fl_free_count)
 );
@@ -686,7 +810,7 @@ RegisterAliasTable #(.NUM_AREGS(NUM_AREGS), .NUM_PREGS(NUM_PREGS)) m_RAT(
     .rpreg0(rat_rpreg0), .rpreg1(rat_rpreg1), .rpreg2(rat_rpreg2), .rpreg3(rat_rpreg3),
     .wen0(do_dispatch && needs_dest), .waddr0(rd_areg), .wpreg0(fl_alloc_preg0), .old_preg0(rat_old_preg0),
     .wen1(do_dispatch_slot1 && needs_dest_1), .waddr1(rd_areg_1), .wpreg1(fl_alloc_preg1), .old_preg1(rat_old_preg1),
-    .cwen0(rob_retire_valid0 && rob_retire_has_dest0 && !rob_retire_is_fp_dest0), .cwaddr0(rob_retire_areg0), .cwpreg0(rob_retire_preg0),
+    .cwen0(rob_retire_valid0 && rob_retire_has_dest0 && !rob_retire_is_fp_dest0 && !dside_trap_resolve), .cwaddr0(rob_retire_areg0), .cwpreg0(rob_retire_preg0),
     .cwen1(rob_retire_valid1 && rob_retire_has_dest1 && !rob_retire_is_fp_dest1), .cwaddr1(rob_retire_areg1), .cwpreg1(rob_retire_preg1),
     .restore_en(1'b0)   // Gen6-G adds real speculation/squash; nothing to
                           // restore yet since nothing speculative can be
@@ -766,7 +890,18 @@ ReorderBuffer #(.ROB_ENTRIES(ROB_ENTRIES), .AREG_BITS(AREG_BITS), .PREG_BITS(PRE
     .alloc_areg1(rd_areg_1), .alloc_preg1(needs_dest_1 ? fl_alloc_preg1 : {PREG_BITS{1'b0}}),
     .alloc_old_preg1(rat_old_preg1), .alloc_tag1(rob_alloc_tag1),
     .complete_en0(issue_valid), .complete_tag0(issue_rob_tag),
-    .complete_en1(lsq_complete_valid), .complete_tag1(lsq_complete_rob_tag),
+    // Gen6-P2 (docs/adr/0053): dside_fault_pulse (MMU section, forward-
+    // referenced) injects a SYNTHETIC one-cycle completion carrying
+    // head_rob_tag -- a permanently-DTLB-faulted head never asserts
+    // lsq_complete_valid on its own (mem_stall_ext holds it frozen
+    // forever), so without this the ROB's own "done" bit for that entry
+    // would never set and dside_trap_resolve could never fire, a real
+    // deadlock caught by design before writing any RTL for it, not found
+    // by running. Does NOT touch lsq_complete_valid itself -- see that
+    // wire's own comment for why the PRF CDB write correctly stays gated
+    // on the real signal alone.
+    .complete_en1(lsq_complete_valid || dside_fault_pulse),
+    .complete_tag1(dside_fault_pulse ? lsq_head_rob_tag : lsq_complete_rob_tag),
     .complete_en2(div_complete_valid), .complete_tag2(div_complete_rob_tag),
     .complete_en3(falu_complete_valid), .complete_tag3(falu_complete_rob_tag),
     .retire_valid0(rob_retire_valid0), .retire_has_dest0(rob_retire_has_dest0), .retire_is_fp_dest0(rob_retire_is_fp_dest0),
@@ -798,9 +933,57 @@ reg [XLEN-1:0]          trap_inflight_pc_r;
 reg [31:0]              trap_inflight_cause_r;
 reg [ROB_IDX_BITS-1:0]  trap_inflight_rob_tag_r;
 
-wire trap_resolve = rob_retire_valid0 && trap_inflight_valid_r && (rob_retire_tag0 == trap_inflight_rob_tag_r);
-wire csr_trap_taken = trap_resolve && !trap_inflight_is_mret_r;
-wire csr_mret_taken = trap_resolve && trap_inflight_is_mret_r;
+// Gen6-P2 (docs/adr/0053): a D-side (LSQ) page fault does NOT fit the
+// dispatch-time-only shape above -- the faulting entry was already
+// dispatched, its own rob_tag already allocated, well before its own
+// translation resolves (this can be many cycles later, once the LSQ's
+// strictly-in-order head finally reaches it). Latched separately, the
+// cycle dtlb_page_fault (MMU section) first fires, using the LSQ's own
+// head_rob_tag/head_pc (LoadStoreQueue.v's own new Gen6-P2 outputs) --
+// resolved against retire exactly like trap_inflight_rob_tag_r is, just
+// via a second, independent comparison (dside_trap_resolve below;
+// mutually exclusive with trap_resolve by construction, since a single
+// ROB entry can never be tracked by both mechanisms at once -- one is
+// set at dispatch for illegal/ecall/mret/itlb-fault, the other only ever
+// for a LSQ entry that was a legitimate memory op at dispatch time).
+reg                     dside_fault_valid_r;
+reg [XLEN-1:0]          dside_fault_pc_r;
+reg [31:0]              dside_fault_cause_r;
+reg [ROB_IDX_BITS-1:0]  dside_fault_rob_tag_r;
+
+always @(posedge clk) begin
+    if (~rst) dside_fault_valid_r <= 1'b0;
+    else if (dtlb_page_fault && !dside_fault_valid_r) begin
+        dside_fault_valid_r   <= 1'b1;
+        dside_fault_pc_r      <= lsq_head_pc;
+        dside_fault_cause_r   <= lsq_head_want_write ? `MCAUSE_STORE_PAGE_FAULT : `MCAUSE_LOAD_PAGE_FAULT;
+        dside_fault_rob_tag_r <= lsq_head_rob_tag;
+    end
+    else if (dside_trap_resolve) dside_fault_valid_r <= 1'b0;
+end
+// A permanently-DTLB-faulted head never asserts lsq_complete_valid on its
+// own (mem_stall_ext, driven by dtlb_stall, holds it frozen forever once
+// ls_hit can never become true) -- ReorderBuffer.v's own "done" bit for
+// this entry needs a SYNTHETIC completion instead, injected via the
+// SAME complete_en1/complete_tag1 port lsq_complete_valid already uses
+// (see that instantiation further down), one cycle only (the same edge
+// dside_fault_valid_r itself latches), carrying head_rob_tag instead of
+// whatever lsq_complete_rob_tag happens to hold that unrelated cycle.
+// Crucially this does NOT touch lsq_complete_valid itself, so
+// PhysicalRegisterFile.v's own CDB writeback (wen1, gated on the REAL
+// lsq_complete_valid) correctly never fires -- a faulting load must
+// never actually write any value into its destination preg.
+wire dside_fault_pulse = dtlb_page_fault && !dside_fault_valid_r;
+wire dside_trap_resolve = rob_retire_valid0 && dside_fault_valid_r && (rob_retire_tag0 == dside_fault_rob_tag_r);
+
+wire trap_resolve_dispatch = rob_retire_valid0 && trap_inflight_valid_r && (rob_retire_tag0 == trap_inflight_rob_tag_r);
+wire trap_resolve = trap_resolve_dispatch || dside_trap_resolve;
+wire csr_trap_taken = trap_resolve && !(trap_resolve_dispatch && trap_inflight_is_mret_r);
+wire csr_mret_taken = trap_resolve_dispatch && trap_inflight_is_mret_r;
+// A D-side fault is never an mret, so widening csr_trap_taken/csr_mret_taken
+// this way is unambiguous: dside_trap_resolve alone always means
+// csr_trap_taken (never csr_mret_taken), exactly like every other real
+// exception cause already handled through trap_resolve_dispatch.
 
 always @(posedge clk) begin
     if (~rst) begin
@@ -811,10 +994,17 @@ always @(posedge clk) begin
             trap_inflight_valid_r   <= 1'b1;
             trap_inflight_is_mret_r <= isMret_c;
             trap_inflight_pc_r      <= pc_r;
-            trap_inflight_cause_r   <= isEcall_c ? `MCAUSE_ECALL_FROM_M : `MCAUSE_ILLEGAL_INSTRUCTION;
+            // Gen6-P2: itlb_fault_this_cycle checked FIRST -- inst_word was
+            // already forced to the all-zero "illegal" encoding for this
+            // exact cycle (see the fetch section), so has_exception/
+            // isEcall_c may ALSO spuriously read true off that forced
+            // value; the real cause must win regardless of what garbage
+            // bits would otherwise have decoded as.
+            trap_inflight_cause_r   <= itlb_fault_this_cycle ? `MCAUSE_INSTRUCTION_PAGE_FAULT :
+                                        isEcall_c ? `MCAUSE_ECALL_FROM_M : `MCAUSE_ILLEGAL_INSTRUCTION;
             trap_inflight_rob_tag_r <= rob_alloc_tag0;
         end
-        else if (trap_resolve) begin
+        else if (trap_resolve_dispatch) begin
             trap_inflight_valid_r <= 1'b0;
         end
     end
@@ -902,8 +1092,13 @@ CSR #(.XLEN(XLEN)) m_CSR(
     .csr_write_en(csr_write_fire),
     .csr_addr(csr_write_fire ? csr_inflight_addr_r : imm_d[11:0]),
     .csr_op(csr_inflight_op_r), .csr_wdata(csr_wdata_final), .csr_rdata(csr_old_value_captured),
-    .trap_taken(csr_trap_taken), .trap_pc(trap_inflight_pc_r),
-    .trap_cause({{(XLEN-32){1'b0}}, trap_inflight_cause_r}), .trap_is_interrupt(1'b0),
+    // Gen6-P2: muxed on dside_trap_resolve -- a D-side page fault's own
+    // pc/cause live in a separate latch (dside_fault_*_r) from every
+    // other, dispatch-time-known trap cause (trap_inflight_*_r).
+    .trap_taken(csr_trap_taken),
+    .trap_pc(dside_trap_resolve ? dside_fault_pc_r : trap_inflight_pc_r),
+    .trap_cause(dside_trap_resolve ? {{(XLEN-32){1'b0}}, dside_fault_cause_r} : {{(XLEN-32){1'b0}}, trap_inflight_cause_r}),
+    .trap_is_interrupt(1'b0),
     .trap_value({XLEN{1'b0}}),
     .mret_taken(csr_mret_taken), .sret_taken(1'b0),
     .fp_flags_we(1'b0), .fp_flags_in(5'd0), .frm_val(),
@@ -912,8 +1107,8 @@ CSR #(.XLEN(XLEN)) m_CSR(
     .mie_ssie(), .mie_stie(), .mip_ssip(), .mip_stip(),
     .mstatus_mpie(), .mstatus_sie(), .mstatus_spie(), .mstatus_spp(), .mstatus_mpp(),
     .mtvec_val(csr_mtvec_val), .mepc_val(csr_mepc_val),
-    .priv_mode_val(), .stvec_val(), .sepc_val(), .trap_target_is_s(),
-    .satp_mode_val(), .satp_ppn_val(),
+    .priv_mode_val(csr_priv_mode_val), .stvec_val(), .sepc_val(), .trap_target_is_s(),
+    .satp_mode_val(csr_satp_mode_val), .satp_ppn_val(csr_satp_ppn_val),
     .instret_pulse(1'b0), .branch_retired_pulse(1'b0), .mispredict_pulse(1'b0),
     .icache_hit_pulse(1'b0), .icache_miss_pulse(1'b0), .dcache_hit_pulse(1'b0), .dcache_miss_pulse(1'b0),
     .stall_cycle_pulse(1'b0), .interrupt_pulse(1'b0), .exception_pulse(1'b0),
@@ -921,6 +1116,208 @@ CSR #(.XLEN(XLEN)) m_CSR(
     .stall_float_lu_pulse(1'b0), .stall_itlb_pulse(1'b0), .stall_dtlb_pulse(1'b0),
     .stall_icache_pulse(1'b0), .stall_imem_wait_pulse(1'b0)
 );
+
+// ==========================================================================
+// Gen6-P2 (docs/adr/0053): Sv39 MMU. Reuses Tlb39.v/Ptw39.v completely
+// unmodified (docs/adr/0032, Phase P) -- both already expose exactly the
+// shape this core needs (a unified TLB with independent fetch/ls query
+// ports, a Wishbone-master-shaped walker) and neither is XLEN=32-aware
+// (Sv39 doesn't exist there), matching this whole generation's own RV64-
+// only scope (no OOOCore.v test has ever used XLEN=32). satp_ppn_val is
+// already the real 44-bit Sv39 width (docs/adr/0032's own CSR.v widening),
+// needing no adaptation here.
+//
+// Real structural difference from riscvpipeline.v's own P3 wiring, worth
+// flagging: PIPELINED's Ptw.v/Ptw39.v share ONE Wishbone bus with the
+// D-side LSU (a real master/master arbiter already exists there). This
+// core's own D-side memory (DataMemoryBRAM.v, via LoadStoreQueue.v) is a
+// plain synchronous-read array, not Wishbone -- Ptw39's own Wishbone-
+// master-shaped port is adapted to that simpler shape below (m_cyc/m_stb
+// -> memRead/memWrite, m_ack/m_data_i driven back at DataMemoryBRAM.v's
+// own known fixed 1-cycle registered-read latency), and arbitrated
+// against the LSQ's own ordinary traffic for the SAME single port. Page
+// tables live in ordinary D-side memory, built by the test program's own
+// runtime stores (addi+sd), exactly the same convention PIPELINED's own
+// Sv39-aware random generator already established (docs/adr/0032 P5) --
+// this core's own m_DMem never gets a DATA_INIT_FILE, so nothing needs
+// preloading differently.
+wire [1:0]  csr_priv_mode_val;
+wire        csr_satp_mode_val;
+wire [43:0] csr_satp_ppn_val;
+
+wire translate_enable = (XLEN == 64) && csr_satp_mode_val && (csr_priv_mode_val != `PRIV_M);
+wire priv_is_u         = (csr_priv_mode_val == `PRIV_U);
+
+wire itlb_hit, ls_hit;
+wire [XLEN-1:0] itlb_ppn, ls_ppn;
+wire itlb_perm_r, itlb_perm_w, itlb_perm_x, itlb_perm_u;
+wire ls_perm_r, ls_perm_w, ls_perm_x, ls_perm_u;
+wire ptw_fill_valid;
+wire [XLEN-1:0] ptw_fill_vaddr, ptw_fill_ppn;
+wire ptw_fill_perm_r, ptw_fill_perm_w, ptw_fill_perm_x, ptw_fill_perm_u;
+
+Tlb39 #(.XLEN(XLEN)) m_Tlb(
+    .clk(clk), .rst(rst),
+    .fetch_vaddr(pc_r),
+    .fetch_hit(itlb_hit), .fetch_ppn(itlb_ppn),
+    .fetch_perm_r(itlb_perm_r), .fetch_perm_w(itlb_perm_w),
+    .fetch_perm_x(itlb_perm_x), .fetch_perm_u(itlb_perm_u),
+    // Queried at the LSQ's own real head virtual address (valid whenever
+    // lsq_head_want_access, combinationally -- see LoadStoreQueue.v's own
+    // head_addr, which doesn't depend on mem_stall_ext, so no circular
+    // dependency with the stall this same query feeds into below).
+    .ls_vaddr(lsq_mem_address),
+    .ls_hit(ls_hit), .ls_ppn(ls_ppn),
+    .ls_perm_r(ls_perm_r), .ls_perm_w(ls_perm_w),
+    .ls_perm_x(ls_perm_x), .ls_perm_u(ls_perm_u),
+    .fill_valid(ptw_fill_valid), .fill_vaddr(ptw_fill_vaddr), .fill_ppn(ptw_fill_ppn),
+    .fill_perm_r(ptw_fill_perm_r), .fill_perm_w(ptw_fill_perm_w),
+    .fill_perm_x(ptw_fill_perm_x), .fill_perm_u(ptw_fill_perm_u),
+    .flush_all(sfence_real)
+);
+
+// itlb_hit_fault: a genuine TLB hit whose own permission bits deny THIS
+// access (X, plus the U-bit match) -- resolved the same cycle as any
+// other combinational decode, no walk needed. itlb_miss: translation is
+// on but nothing hit yet, AND this isn't the exact cycle a walk just
+// concluded with a fault (that cycle needs to fall through to dispatch
+// instead, so is_trap_related can pick it up -- see itlb_fault_this_cycle
+// below). Mirrors docs/adr/0032 P3's itlb_hit_fault/itlb_miss exactly;
+// this core has no branch_taken/redirect_squash_extend_r-style same-cycle
+// redirect race to gate against the way PIPELINED's own front end does --
+// br_mispredict/jr_resolve/trap_resolve all fold into dispatch_stall via
+// their own *_inflight_valid_r, and none of them can coincide with a
+// FETCH still in progress this cycle (do_dispatch is what advances pc_r
+// at all -- see the PC-advance block).
+wire itlb_hit_fault = translate_enable && itlb_hit &&
+    !(itlb_perm_x && (priv_is_u ? itlb_perm_u : !itlb_perm_u));
+wire itlb_miss = translate_enable && !itlb_hit && !(ptw_done_i && ptw_fault);
+wire itlb_fault_this_cycle = itlb_hit_fault || (translate_enable && ptw_done_i && ptw_fault);
+
+// D-side (LSQ) equivalent. dtlb_needed: the LSQ's head genuinely wants a
+// real access this cycle (lsq_head_want_access, LoadStoreQueue.v's own
+// pre-stall condition), gated on translation being live at all.
+// ls_perm_ok checks W for a write-phase access (store/SC/AMO_RMW's own
+// write), R otherwise (load/LR/AMO_RMW's own read phase) -- lsq_head_want_write
+// already distinguishes these exactly the way LoadStoreQueue.v's own
+// internal head_wants_write does. Unlike I-side, a D-side fault does NOT
+// fit the dispatch-time-only trap shape (this entry was already
+// dispatched, its own rob_tag already allocated, well before its
+// translation resolves) -- see the late-injection latch further down.
+wire dtlb_needed = translate_enable && lsq_head_want_access;
+wire ls_perm_ok = (lsq_head_want_write ? ls_perm_w : ls_perm_r) &&
+    (priv_is_u ? ls_perm_u : !ls_perm_u);
+wire dtlb_hit_fault = dtlb_needed && ls_hit && !ls_perm_ok;
+wire dtlb_miss = dtlb_needed && !ls_hit && !(ptw_done_d && ptw_fault);
+wire dtlb_page_fault = dtlb_hit_fault || (dtlb_needed && ptw_done_d && ptw_fault);
+// Freezes the LSQ's own head (mem_stall_ext, wired at m_LSQ above) from
+// the FIRST cycle a miss is detected -- before ptw_busy even goes high --
+// through to either a genuine hit (translation resolved, real access can
+// finally issue) or a fault (at which point continuing to hold doesn't
+// matter: dtlb_page_fault has already latched the late trap injection
+// below, and the entry will never issue a real access again).
+wire dtlb_stall = dtlb_needed && !ls_hit;
+
+// -- Shared Ptw39, D-side vs. I-side arbitration: D-side (an older
+// access, by construction -- the LSQ is strictly in-order and its own
+// head is always the oldest outstanding memory op) wins whenever both
+// are pending, same program-order priority docs/adr/0032 P3 already
+// established for PIPELINED's own identical dtlb_miss/itlb_miss race.
+// lsq_bus_busy_r is the real bug that same phase already found and fixed
+// once (an older, unrelated access can genuinely still be using the
+// shared port the exact cycle a walk wants to start) -- DataMemoryBRAM.v's
+// own fixed 1-cycle registered-read latency means "was the LSQ using the
+// real port (not the mailbox) THIS cycle OR last cycle" is the complete,
+// sufficient condition here (no multi-cycle internal memory state to
+// track beyond that, unlike a real cache/Wishbone adapter).
+reg lsq_bus_busy_r;
+always @(posedge clk) begin
+    if (~rst) lsq_bus_busy_r <= 1'b0;
+    else lsq_bus_busy_r <= (lsq_mem_memRead || lsq_mem_memWrite) && !mailbox_hit;
+end
+wire ptw_req_d = dtlb_stall;
+wire ptw_req_i = itlb_miss && !dtlb_stall;
+wire ptw_start = (ptw_req_i || ptw_req_d)
+    && !((lsq_mem_memRead || lsq_mem_memWrite) && !mailbox_hit) && !lsq_bus_busy_r;
+wire [XLEN-1:0] ptw_vaddr = ptw_req_d ? lsq_mem_address : pc_r;
+wire ptw_is_fetch = ptw_req_i;
+wire ptw_is_store = ptw_req_d && lsq_head_want_write;
+
+wire ptw_busy, ptw_done, ptw_fault;
+wire [XLEN-1:0] ptw_result_ppn;
+wire ptw_result_perm_r, ptw_result_perm_w, ptw_result_perm_x, ptw_result_perm_u;
+wire ptw_m_cyc, ptw_m_stb, ptw_m_we;
+wire [XLEN-1:0] ptw_m_addr, ptw_m_data_o;
+wire [`WB_SEL_WIDTH-1:0] ptw_m_sel;
+wire [XLEN-1:0] ptw_m_data_i;
+wire ptw_m_ack;
+
+Ptw39 #(.XLEN(XLEN)) m_Ptw(
+    .clk(clk), .rst(rst),
+    .start(ptw_start), .vaddr(ptw_vaddr), .satp_ppn(csr_satp_ppn_val),
+    .is_fetch(ptw_is_fetch), .is_store(ptw_is_store), .priv_is_u(priv_is_u),
+    .busy(ptw_busy), .done(ptw_done), .fault(ptw_fault),
+    .result_ppn(ptw_result_ppn),
+    .result_perm_r(ptw_result_perm_r), .result_perm_w(ptw_result_perm_w),
+    .result_perm_x(ptw_result_perm_x), .result_perm_u(ptw_result_perm_u),
+    .m_cyc(ptw_m_cyc), .m_stb(ptw_m_stb), .m_we(ptw_m_we),
+    .m_addr(ptw_m_addr), .m_data_o(ptw_m_data_o), .m_sel(ptw_m_sel),
+    .m_data_i(ptw_m_data_i), .m_ack(ptw_m_ack)
+);
+
+// Which side a walk currently in progress was for -- Ptw39 itself doesn't
+// report this (mirrors Divider.v's own precedent of the caller owning
+// this bookkeeping). Only ptw_done_i is real this sub-phase (ptw_req_d
+// tied 0 above); ptw_done_d is wired for Gen6-P2d.
+reg ptw_servicing_d_r;
+always @(posedge clk) begin
+    if (~rst) ptw_servicing_d_r <= 1'b0;
+    else if (ptw_start && !ptw_busy) ptw_servicing_d_r <= ptw_req_d;
+end
+wire ptw_done_i = ptw_done && !ptw_servicing_d_r;
+wire ptw_done_d = ptw_done && ptw_servicing_d_r;
+
+assign ptw_fill_valid   = (ptw_done_i || ptw_done_d) && !ptw_fault;
+assign ptw_fill_vaddr   = ptw_servicing_d_r ? lsq_mem_address : pc_r;
+assign ptw_fill_ppn     = ptw_result_ppn;
+assign ptw_fill_perm_r  = ptw_result_perm_r;
+assign ptw_fill_perm_w  = ptw_result_perm_w;
+assign ptw_fill_perm_x  = ptw_result_perm_x;
+assign ptw_fill_perm_u  = ptw_result_perm_u;
+
+// docs/adr/0038's own established sfence.vma decode (isSfenceVma_c).
+// Privilege check mirrors docs/adr/0032 P3's own sfence_priv_violation
+// exactly (U-mode may never issue it); real future work, deliberately
+// scoped narrow this phase (not independently directed-tested the way
+// the translate-hit/-fault paths are -- flush_all's own mechanism,
+// Tlb39.v's unconditional-whole-TLB-flush pulse, is already covered by
+// that module's own unit test and is entirely translation-scheme-
+// agnostic, so the marginal risk here is low): fires the flush pulse the
+// SAME cycle it dispatches (this core's own frontend is purely
+// combinational, no separate EX/retire delay the way PIPELINED's own
+// reg2_hold-gated version needs), and folds the privilege violation into
+// the SAME dispatch-time trap path itlb_fault_this_cycle already uses
+// (illegal-instruction is the correct cause -- same as PIPELINED's own
+// sfence_priv_violation, which docs/adr/0032 already treats as an
+// ordinary illegal-instruction-shaped exception).
+wire sfence_priv_violation = isSfenceVma_c && priv_is_u;
+wire sfence_real = do_dispatch && isSfenceVma_c && !sfence_priv_violation;
+
+// Ptw39's own Wishbone-master-shaped port, adapted to DataMemoryBRAM.v's
+// plain synchronous memRead/memWrite/address/writeData/funct3/readData
+// shape -- m_ack asserts exactly one cycle after m_cyc&&m_stb, matching
+// DataMemoryBRAM.v's own documented fixed 1-cycle registered-read
+// latency (confirmed by direct reading of its always block, not assumed).
+// Sv39 PTEs are 8 bytes -- funct3 forced to F3_LOAD_LD regardless of
+// ptw_m_sel (Ptw39.v's own header already flags m_sel as vestigial on a
+// real adapter; width comes from funct3 here, same finding docs/adr/0032
+// P3 made for RamWishboneAdapter.v).
+reg ptw_m_ack_r;
+always @(posedge clk) begin
+    if (~rst) ptw_m_ack_r <= 1'b0;
+    else ptw_m_ack_r <= ptw_m_cyc && ptw_m_stb;
+end
+assign ptw_m_ack = ptw_m_ack_r;
 
 // Gen6-O (docs/adr/0051): lui/auipc/jal/jalr/csrrX's own operand-A
 // override, captured once at DISPATCH time (this cycle's pc_r/csr old
@@ -1011,6 +1408,11 @@ wire [XLEN-1:0]      lsq_mem_address, lsq_mem_writeData, lsq_mem_readData;
 wire                 lsq_mem_memRead, lsq_mem_memWrite;
 wire [2:0]           lsq_mem_funct3;
 wire [$clog2(8+1)-1:0] lsq_count;   // debug visibility only
+// Gen6-P2 (docs/adr/0053): see head_want_access's own port comment on
+// LoadStoreQueue.v.
+wire                  lsq_head_want_access, lsq_head_want_write;
+wire [ROB_IDX_BITS-1:0] lsq_head_rob_tag;
+wire [XLEN-1:0]       lsq_head_pc;
 
 LoadStoreQueue #(.XLEN(XLEN), .LSQ_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS)) m_LSQ(
     .clk(clk), .rst(rst),
@@ -1019,12 +1421,12 @@ LoadStoreQueue #(.XLEN(XLEN), .LSQ_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_B
     .disp_imm0(imm_d), .disp_funct3_0(funct3_c),
     .disp_store_data_preg0(rat_rpreg1), .disp_store_data_ready0(prf_rvalid1),
     .disp_dest_preg0(needs_dest ? fl_alloc_preg0 : {PREG_BITS{1'b0}}),
-    .disp_rob_tag0(rob_alloc_tag0),
+    .disp_rob_tag0(rob_alloc_tag0), .disp_pc0(pc_r),
     .disp_en1(1'b0), .disp_op_type1(2'd0), .disp_amo_op1(5'd0),
     .disp_base_preg1({PREG_BITS{1'b0}}), .disp_base_ready1(1'b0),
     .disp_imm1({XLEN{1'b0}}), .disp_funct3_1(3'd0),
     .disp_store_data_preg1({PREG_BITS{1'b0}}), .disp_store_data_ready1(1'b0),
-    .disp_dest_preg1({PREG_BITS{1'b0}}), .disp_rob_tag1({ROB_IDX_BITS{1'b0}}),
+    .disp_dest_preg1({PREG_BITS{1'b0}}), .disp_rob_tag1({ROB_IDX_BITS{1'b0}}), .disp_pc1({XLEN{1'b0}}),
     // CDB snoop: port0 an ALU result (e.g. a base register computed by a
     // prior addi still in flight); port1 self (an earlier queued load's
     // own result feeding a LATER entry's base/store-data operand); port2
@@ -1034,12 +1436,32 @@ LoadStoreQueue #(.XLEN(XLEN), .LSQ_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_B
     .cdb_valid2(div_complete_valid), .cdb_preg2(div_complete_dest_preg),
     .head_base_preg(lsq_head_base_preg), .head_store_data_preg(lsq_head_store_data_preg),
     .mem_base_value(prf_rdata4), .mem_store_data_value(prf_rdata5),
+    // Gen6-P2 (docs/adr/0053): frozen for as long as ANY walk (I-side or
+    // D-side) is using the shared m_DMem port, OR the head's own address
+    // hasn't finished translating yet (dtlb_stall -- forward-referenced,
+    // defined in the MMU section) -- the LSQ has no visibility into
+    // Ptw39/Tlb39 at all (fully standalone modules, same "wire the
+    // interlock in externally" shape DataMemoryBRAM.v's own header
+    // already documents for riscvpipeline.v's mem_stall), so "wait your
+    // turn, and wait for translation" is enforced entirely from this
+    // side. dtlb_stall alone (before ptw_busy even goes high) is what
+    // catches the very first cycle of a miss -- ptw_busy alone wouldn't
+    // freeze the head until a walk has actually started.
+    .mem_stall_ext(ptw_busy || dtlb_stall),
+    // Gen6-P2: see LoadStoreQueue.v's own force_retire_ext port comment --
+    // fires exactly once, the same cycle dside_fault_pulse (MMU section)
+    // reports the fault to the ROB, closing what would otherwise be a
+    // permanent LSQ deadlock (a frozen head that no other mechanism can
+    // ever clear once the trap has already redirected execution away).
+    .force_retire_ext(dside_fault_pulse),
     .mem_memRead(lsq_mem_memRead), .mem_memWrite(lsq_mem_memWrite),
     .mem_address(lsq_mem_address), .mem_writeData(lsq_mem_writeData), .mem_funct3(lsq_mem_funct3),
     .mem_readData(lsq_mem_readData),
     .complete_valid(lsq_complete_valid), .complete_is_load(lsq_complete_is_load),
     .complete_dest_preg(lsq_complete_dest_preg), .complete_data(lsq_complete_data),
     .complete_rob_tag(lsq_complete_rob_tag),
+    .head_want_access(lsq_head_want_access), .head_want_write(lsq_head_want_write),
+    .head_rob_tag(lsq_head_rob_tag), .head_pc(lsq_head_pc),
     .lsq_count(lsq_count), .lsq_full(lsq_full)
 );
 
@@ -1074,10 +1496,36 @@ end
 // combinationally off this cycle's (already-advanced) mailbox_hit.
 assign lsq_mem_readData = mailbox_hit_r ? mailbox_readData : dmem_readData;
 
+// Gen6-P2 (docs/adr/0053): m_DMem's single synchronous port, arbitrated
+// between the LSQ's own ordinary traffic and Ptw39's own page-table
+// reads -- ptw_busy gets exclusive access whenever a walk is in progress
+// (mem_stall_ext, wired into m_LSQ above, already guarantees the LSQ
+// itself never tries to issue a competing access during that same
+// window, so this mux has no real contention to arbitrate, just a clean
+// selector). funct3 forced to F3_LOAD_LD for the walker's own accesses
+// -- Sv39 PTEs are 8 bytes; see the MMU section's own comment on why
+// ptw_m_sel itself is vestigial here (same finding docs/adr/0032 P3 made
+// for RamWishboneAdapter.v).
+// Gen6-P2: the LSQ-side branch translates when live and hit -- same
+// X-avoidance reasoning imem_phys_addr's own comment already established
+// (a stale/never-filled Tlb39 entry's data fields are meaningless without
+// a qualifying hit; falling back to the untranslated VA on a miss/fault/
+// disabled cycle is harmless since mem_stall_ext already prevents a real
+// access from ever reaching m_DMem on any of those cycles anyway).
+wire [XLEN-1:0] dmem_arb_address   = ptw_busy ? ptw_m_addr :
+    ((translate_enable && ls_hit) ? {ls_ppn[19:0], lsq_mem_address[11:0]} : lsq_mem_address);
+wire [XLEN-1:0] dmem_arb_writeData = ptw_busy ? ptw_m_data_o : lsq_mem_writeData;
+wire [2:0]      dmem_arb_funct3    = ptw_busy ? `F3_LOAD_LD  : lsq_mem_funct3;
+wire            dmem_arb_memWrite  = ptw_busy ? (ptw_m_cyc && ptw_m_stb && ptw_m_we)
+                                               : (lsq_mem_memWrite && !mailbox_hit);
+wire            dmem_arb_memRead   = ptw_busy ? (ptw_m_cyc && ptw_m_stb && !ptw_m_we)
+                                               : (lsq_mem_memRead && !mailbox_hit);
+assign ptw_m_data_i = dmem_readData;
+
 DataMemoryBRAM #(.SIZE_BYTES(DMEM_SIZE_BYTES), .XLEN(XLEN)) m_DMem(
     .clk(clk), .rst(rst),
-    .memWrite(lsq_mem_memWrite && !mailbox_hit), .memRead(lsq_mem_memRead && !mailbox_hit),
-    .address(lsq_mem_address), .writeData(lsq_mem_writeData), .funct3(lsq_mem_funct3),
+    .memWrite(dmem_arb_memWrite), .memRead(dmem_arb_memRead),
+    .address(dmem_arb_address), .writeData(dmem_arb_writeData), .funct3(dmem_arb_funct3),
     .readData(dmem_readData)
 );
 

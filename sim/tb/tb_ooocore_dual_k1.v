@@ -16,6 +16,8 @@
 `include "Bht.v"
 `include "Btb.v"
 `include "CSR.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // Generation 6, Gen6-K. Dual-issue widening's own directed test --
 // sim/programs/ooocore_dual_k1.s (see that file's own header for the

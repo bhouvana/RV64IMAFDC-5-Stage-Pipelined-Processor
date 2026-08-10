@@ -16,6 +16,8 @@
 `include "Bht.v"
 `include "Btb.v"
 `include "CSR.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // Generation 6, Gen6-O (docs/adr/0051). OOOCore.v's own first csrrX test
 // -- proves the new csr_inflight single-outstanding scope cut end to

@@ -16,6 +16,8 @@
 `include "Bht.v"
 `include "Btb.v"
 `include "CSR.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // Generation 6, Gen6-P1. OOOCore.v's own general AMO-RMW + SC end-to-end
 // test, on top of Gen6-J's LR-only atomics: SC.D (always succeeds,

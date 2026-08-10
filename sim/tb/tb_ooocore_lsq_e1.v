@@ -16,6 +16,8 @@
 `include "Bht.v"
 `include "Btb.v"
 `include "CSR.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // Generation 6, Gen6-E. OOOCore.v's first load/store end-to-end test:
 // fetch -> decode -> rename -> dispatch -> LSQ -> DataMemoryBRAM.v ->

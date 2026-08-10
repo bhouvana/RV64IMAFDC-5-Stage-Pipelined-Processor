@@ -84,6 +84,7 @@ CSR_ADDR = {  # standard RISC-V machine-mode addresses (docs/adr/0011-csr-and-ex
               # docs/adr/0020-soc-integration.md Phase D7 for mie/mip)
     "mstatus": 0x300, "mie": 0x304, "mtvec": 0x305, "mscratch": 0x340, "mepc": 0x341,
     "mcause": 0x342, "mip": 0x344,
+    "satp": 0x180,  # docs/adr/0053 (Gen6-P2): standard RISC-V supervisor address, needed to write it directly
 }
 CSR_OP = {"csrrw": 0b001, "csrrs": 0b010, "csrrc": 0b011,
           "csrrwi": 0b101, "csrrsi": 0b110, "csrrci": 0b111}

@@ -16,6 +16,8 @@
 `include "Bht.v"
 `include "Btb.v"
 `include "CSR.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // Generation 6, Gen6-J. OOOCore.v's first atomics end-to-end test: LR.D
 // routed through the exact same LoadStoreQueue.v dispatch path an

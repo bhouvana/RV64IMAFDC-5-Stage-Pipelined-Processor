@@ -16,6 +16,8 @@
 `include "Bht.v"
 `include "Btb.v"
 `include "CSR.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // Generation 6, Gen6-G. OOOCore.v's first branch-speculation end-to-end
 // test: fetch->BHT/BTB-predict->decode->dispatch->RS_ALU/ALU-resolve->

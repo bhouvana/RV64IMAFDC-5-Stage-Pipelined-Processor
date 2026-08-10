@@ -19,16 +19,15 @@
 `include "Tlb39.v"
 `include "Ptw39.v"
 
-// Generation 6, Gen6-I. OOOCore.v's first precise-exception end-to-end
-// test: illegal-instruction detection at decode -> dispatch (as an
-// ordinary no-dest ROB entry) -> ROB-retire-gated trap_taken -> CSR.v
-// captures mepc/mcause -> PC redirect to mtvec -- for
-// sim/programs/ooocore_trap_i1.s's own self-re-triggering loop (see its
-// own header for why looping forever is the actual intended test
-// shape, not a bug). Checks BOTH the architectural-state-never-
-// corrupted property (x3 stays 0, forever) and CSR.v's own real state
-// capture (mepc/mcause), via direct hierarchical reference.
-module tb_ooocore_trap_i1;
+// Generation 6, Gen6-P2d (docs/adr/0053). OOOCore.v's own D-side Sv39
+// translation test: a real D-side page fault (LOAD_PAGE_FAULT, an
+// unmapped VPN2), correctly redirected to mtvec, AND -- the real point
+// of this test, not just the fault itself -- proof the LSQ is NOT left
+// permanently deadlocked afterward (force_retire_ext's own reason to
+// exist): a second mret drops back into the SAME still-live translated
+// region and an ordinary store+load round-trips correctly right after.
+// For sim/programs/ooocore_mmu_p2d.s.
+module tb_ooocore_mmu_p2d;
     reg clk = 0;
     always #5 clk = ~clk;
 
@@ -55,15 +54,16 @@ module tb_ooocore_trap_i1;
     endtask
 
     task check_val;
-        input [63:0] actual, expected;
+        input [63:0] actual;
+        input [63:0] expected;
         input [1023:0] label;
         begin
             checks = checks + 1;
             if (actual !== expected) begin
                 fails = fails + 1;
-                $display("FAIL  %0s: %0d, expected %0d", label, actual, expected);
+                $display("FAIL  %0s: %h, expected %h", label, actual, expected);
             end else begin
-                $display("pass  %0s: %0d", label, actual);
+                $display("pass  %0s: %h", label, actual);
             end
         end
     endtask
@@ -73,7 +73,7 @@ module tb_ooocore_trap_i1;
     OOOCore #(
         .XLEN(64), .NUM_AREGS(32), .NUM_PREGS(64),
         .ROB_ENTRIES(16), .RS_ALU_ENTRIES(8),
-        .IMEM_SIZE_BYTES(128), .IMEM_INIT_FILE("sim/programs/ooocore_trap_i1.mem"),
+        .IMEM_SIZE_BYTES(128), .IMEM_INIT_FILE("sim/programs/ooocore_mmu_p2d.mem"),
         .DMEM_SIZE_BYTES(256)
     ) dut (.clk(clk), .rst(rst), .mailbox_readData(64'b0));
 
@@ -82,21 +82,19 @@ module tb_ooocore_trap_i1;
         @(posedge clk); rst <= 0;
         @(posedge clk); rst <= 1;
 
-        // Generous fixed wait -- enough for several loop iterations
-        // (each pass is only 3 real dispatches: addi/addi/illegal).
-        for (i = 0; i < 300; i = i + 1)
+        for (i = 0; i < 600; i = i + 1)
             @(posedge clk);
         #1;
 
-        check_areg(5'd1, 64'd5, "x1 = 5, re-committed identically every loop pass");
-        check_areg(5'd2, 64'd7, "x2 = 7, re-committed identically every loop pass");
-        check_areg(5'd3, 64'd0, "x3 = 0 -- the post-fault instruction NEVER retires, not even once across many loop passes");
+        check_areg(5'd10, 64'd111, "x10 = 111 -- translated fetch landed at u_code");
+        check_areg(5'd22, 64'd222, "x22 = 222 -- the D-side fault correctly redirected to the handler");
+        check_val(dut.m_CSR.mcause, 64'd13, "mcause == 13 (MCAUSE_LOAD_PAGE_FAULT)");
+        check_areg(5'd24, 64'h1F, "x24 = 0x1F -- recovery's own translated load round-trip succeeded (proves the LSQ did NOT deadlock after the fault)");
+        check_val(dut.m_DMem.data_memory[200] | (dut.m_DMem.data_memory[201] << 8) | (dut.m_DMem.data_memory[202] << 16) | (dut.m_DMem.data_memory[203] << 24),
+                   32'h0000_001F, "recovery's own translated store really landed in physical memory at 200");
 
-        check_val(dut.m_CSR.mepc, 64'd8, "CSR mepc == 8, the illegal instruction's own PC");
-        check_val(dut.m_CSR.mcause, 64'd2, "CSR mcause == 2 (MCAUSE_ILLEGAL_INSTRUCTION)");
-
-        if (fails == 0) $display("PASS  ooocore_trap_i1 (%0d checks)", checks);
-        else $display("FAIL  ooocore_trap_i1 (%0d/%0d checks failed)", fails, checks);
+        if (fails == 0) $display("PASS  ooocore_mmu_p2d (%0d checks)", checks);
+        else $display("FAIL  ooocore_mmu_p2d (%0d/%0d checks failed)", fails, checks);
         $finish;
     end
 endmodule
