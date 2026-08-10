@@ -12,6 +12,7 @@
 // XLEN=64. The walk_count/priv_mode checks below now confirm ordinary,
 // unconditional Bare-mode behavior instead.
 `include "riscvpipeline.v"
+`include "Scoreboard.v"
 `include "MemoryController.v"
 `include "CompressedExpander.v"
 `include "PC.v"

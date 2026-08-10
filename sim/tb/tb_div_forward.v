@@ -1,4 +1,5 @@
 `include "riscvpipeline.v"
+`include "Scoreboard.v"
 `include "MemoryController.v"
 `include "CompressedExpander.v"
 `include "PC.v"
