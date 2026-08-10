@@ -90,7 +90,11 @@ OOOCore #(
     .clk(clk), .rst(rst_ooo),
     .mailbox_memWrite(mbox_b_memWrite), .mailbox_memRead(mbox_b_memRead),
     .mailbox_address(mbox_b_address), .mailbox_writeData(mbox_b_writeData),
-    .mailbox_readData(mbox_b_readData)
+    .mailbox_readData(mbox_b_readData),
+    // Gen6-P3 (docs/adr/0054): no CLINT/PLIC-lite in this SoC yet -- tied
+    // 0, same as every other standalone OOOCore.v instantiation. Real
+    // future work if a HeteroSoC-level interrupt source is ever needed.
+    .msip_pending(1'b0), .timer_pending(1'b0), .ext_pending(1'b0)
 );
 
 Mailbox #(.XLEN(XLEN), .NUM_WORDS(MAILBOX_WORDS)) m_Mailbox (

@@ -526,6 +526,29 @@ read+execute-only PTE that made the test's own "recovery" code
 illegitimately fault too — found by direct cycle tracing, not guessed).
 132/132 directed suite, zero-warning compile.
 
+**Gen6-P3 (`docs/adr/0054`): real interrupts in OOOCore.v.** Third
+sub-phase of the backlog. Machine-external/-software/-timer only (no
+S-mode delegation — this core has no medeleg/mideleg infrastructure at
+all yet, matching PIPELINED's own pre-Phase-S baseline). Real design
+decision: an interrupt is recognized only once the ROB fully drains
+(`rob_empty`), not injected at an arbitrary mid-flight boundary —
+`interrupt_pending` folds into `dispatch_stall` (same single-outstanding
+shape every other Gen6-* control-flow source already uses), and needs
+**zero new per-instruction tracking**, unlike every prior trap mechanism
+— `rob_empty` alone already guarantees nothing else could want the same
+cycle's redirect. Found and fixed one real gap by design, before writing
+any test: the PC-advance block's own priority chain had no arm that
+fires for a pure interrupt at all (`trap_resolve` is keyed to a specific
+retiring rob_tag, which an interrupt has none of) — left unfixed, `pc_r`
+would have silently frozen forever the instant a real interrupt fired.
+`tb_ooocore_int_p3.v`: enables `mie.MTIE`+`mstatus.MIE`, spins in a
+self-branch loop, the testbench asserts a real `timer_pending` input
+mid-flight — 4/4 first real run (after fixing the test's own wrong
+assumption about which mcause bit encodes "this was an interrupt" —
+CSR.v's own pre-existing convention puts it at bit 31, not spec's
+bit-63, unrelated to this phase). 133/133 directed suite, zero-warning
+compile.
+
 ---
 
 ## Generation 7 — Vector Processing (v7.0)

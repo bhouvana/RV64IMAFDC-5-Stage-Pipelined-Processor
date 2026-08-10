@@ -104,7 +104,19 @@ module OOOCore #(
     output wire              mailbox_memRead,
     output wire [XLEN-1:0]   mailbox_address,
     output wire [XLEN-1:0]   mailbox_writeData,
-    input  wire [XLEN-1:0]   mailbox_readData
+    input  wire [XLEN-1:0]   mailbox_readData,
+
+    // Gen6-P3 (docs/adr/0054): raw, level-pending machine-mode interrupt
+    // sources -- same names/shape as CSR.v's own ports (which these route
+    // straight through to), same meaning as PIPELINED's own
+    // msip_pending_w/timer_pending_w/uart_irq (docs/adr/0020 Phase D8/D9,
+    // docs/adr/0034 Phase R). This core has no Timer.v/Uart.v (CLINT/PLIC-
+    // lite) instantiated yet -- a caller (a future SoC integration, or a
+    // testbench directly) drives these; tied 0 in every existing
+    // standalone instantiation, changing nothing there.
+    input  wire               msip_pending,
+    input  wire               timer_pending,
+    input  wire               ext_pending
 );
 
 // ==========================================================================
@@ -742,7 +754,7 @@ wire dispatch_stall = rob_full
                                                   // discipline this project
                                                   // already used for Gen6-P1's
                                                   // own complete_is_load fix).
-                      || dside_fault_valid_r;    // Gen6-P2: same reasoning,
+                      || dside_fault_valid_r     // Gen6-P2: same reasoning,
                                                   // held through to the
                                                   // fault's own eventual
                                                   // retire/redirect -- once
@@ -756,6 +768,18 @@ wire dispatch_stall = rob_full
                                                   // resume prematurely,
                                                   // BEFORE the trap has
                                                   // actually redirected.
+                      || interrupt_pending;      // Gen6-P3 (docs/adr/0054):
+                                                  // stop admitting anything
+                                                  // NEW the moment an
+                                                  // enabled interrupt is
+                                                  // recognized -- everything
+                                                  // already in flight still
+                                                  // drains out normally
+                                                  // (rob_empty, which
+                                                  // interrupt_take itself
+                                                  // waits for, is what
+                                                  // actually fires the
+                                                  // redirect).
 wire do_dispatch     = !dispatch_stall;
 
 // Gen6-K: room for a SECOND dispatch this cycle, checked independently
@@ -978,7 +1002,13 @@ wire dside_trap_resolve = rob_retire_valid0 && dside_fault_valid_r && (rob_retir
 
 wire trap_resolve_dispatch = rob_retire_valid0 && trap_inflight_valid_r && (rob_retire_tag0 == trap_inflight_rob_tag_r);
 wire trap_resolve = trap_resolve_dispatch || dside_trap_resolve;
-wire csr_trap_taken = trap_resolve && !(trap_resolve_dispatch && trap_inflight_is_mret_r);
+// Gen6-P3 (docs/adr/0054): interrupt_take (forward-referenced, defined in
+// the interrupt section further down) ORs in unconditionally -- it can
+// never genuinely coincide with trap_resolve the same cycle (interrupt_take
+// only ever fires with rob_empty, meaning nothing could simultaneously be
+// retiring/resolving a trap), so there's no real priority question here
+// either, same reasoning that section's own header comment already gives.
+wire csr_trap_taken = (trap_resolve && !(trap_resolve_dispatch && trap_inflight_is_mret_r)) || interrupt_take;
 wire csr_mret_taken = trap_resolve_dispatch && trap_inflight_is_mret_r;
 // A D-side fault is never an mret, so widening csr_trap_taken/csr_mret_taken
 // this way is unambiguous: dside_trap_resolve alone always means
@@ -1087,23 +1117,36 @@ end
 // Every HPC/performance-counter pulse input and every S-mode/MMU-only
 // output is tied off/left open this phase -- real future work alongside
 // the MMU/interrupts noted above.
+// Gen6-P3 (docs/adr/0054): CSR.v's own live enable outputs, needed by the
+// interrupt-pending computation further down (after this instantiation,
+// same forward-reference convention every other Gen6-* section in this
+// file already uses for wires produced/consumed across sections).
+wire mstatus_mie, mie_msie, mie_mtie, mie_meie;
+
 CSR #(.XLEN(XLEN)) m_CSR(
     .clk(clk), .rst(rst),
     .csr_write_en(csr_write_fire),
     .csr_addr(csr_write_fire ? csr_inflight_addr_r : imm_d[11:0]),
     .csr_op(csr_inflight_op_r), .csr_wdata(csr_wdata_final), .csr_rdata(csr_old_value_captured),
-    // Gen6-P2: muxed on dside_trap_resolve -- a D-side page fault's own
+    // Gen6-P2/P3: muxed on interrupt_take first (highest priority -- only
+    // ever true with the ROB fully drained, see the interrupt section
+    // below, so it can never genuinely coincide with a real dside_trap_
+    // resolve/trap_resolve_dispatch the same cycle, but ordered first for
+    // clarity), then dside_trap_resolve -- a D-side page fault's own
     // pc/cause live in a separate latch (dside_fault_*_r) from every
     // other, dispatch-time-known trap cause (trap_inflight_*_r).
     .trap_taken(csr_trap_taken),
-    .trap_pc(dside_trap_resolve ? dside_fault_pc_r : trap_inflight_pc_r),
-    .trap_cause(dside_trap_resolve ? {{(XLEN-32){1'b0}}, dside_fault_cause_r} : {{(XLEN-32){1'b0}}, trap_inflight_cause_r}),
-    .trap_is_interrupt(1'b0),
+    .trap_pc(interrupt_take ? pc_r : (dside_trap_resolve ? dside_fault_pc_r : trap_inflight_pc_r)),
+    .trap_cause(interrupt_take ? {{(XLEN-32){1'b0}}, interrupt_cause} :
+                (dside_trap_resolve ? {{(XLEN-32){1'b0}}, dside_fault_cause_r} : {{(XLEN-32){1'b0}}, trap_inflight_cause_r})),
+    .trap_is_interrupt(interrupt_take),
     .trap_value({XLEN{1'b0}}),
     .mret_taken(csr_mret_taken), .sret_taken(1'b0),
     .fp_flags_we(1'b0), .fp_flags_in(5'd0), .frm_val(),
-    .msip_pending(1'b0), .timer_pending(1'b0), .ext_pending(1'b0),
-    .mstatus_mie(), .mie_msie(), .mie_mtie(), .mie_meie(),
+    // Gen6-P3 (docs/adr/0054): routed straight through from this module's
+    // own top-level ports.
+    .msip_pending(msip_pending), .timer_pending(timer_pending), .ext_pending(ext_pending),
+    .mstatus_mie(mstatus_mie), .mie_msie(mie_msie), .mie_mtie(mie_mtie), .mie_meie(mie_meie),
     .mie_ssie(), .mie_stie(), .mip_ssip(), .mip_stip(),
     .mstatus_mpie(), .mstatus_sie(), .mstatus_spie(), .mstatus_spp(), .mstatus_mpp(),
     .mtvec_val(csr_mtvec_val), .mepc_val(csr_mepc_val),
@@ -1116,6 +1159,46 @@ CSR #(.XLEN(XLEN)) m_CSR(
     .stall_float_lu_pulse(1'b0), .stall_itlb_pulse(1'b0), .stall_dtlb_pulse(1'b0),
     .stall_icache_pulse(1'b0), .stall_imem_wait_pulse(1'b0)
 );
+
+// ==========================================================================
+// Gen6-P3 (docs/adr/0054): real interrupts -- machine-external/-software/
+// -timer (mei/msi/mti), the same three sources PIPELINED's own Phase D8/
+// D9/R baseline established, BEFORE Phase S's later S-mode delegation
+// work (ssi/sti, sstatus.SIE, mip_ssip software-settable) -- a real,
+// deliberate, narrower scope cut: this core has no medeleg/mideleg
+// infrastructure at all yet (Gen6-I's own header already flagged this as
+// real future work), so S-mode-targeted interrupt delegation stays out
+// of scope here too, matching docs/adr/0053's own "not re-litigated"
+// treatment of similar Sv39 scoping defaults.
+//
+// Real design decision, not the more elaborate option: rather than
+// trying to inject an interrupt at an arbitrary mid-flight instruction
+// boundary (what a genuinely precise, minimum-latency interrupt
+// implementation would do), this core takes an interrupt only once the
+// ROB is fully DRAINED (rob_empty) -- everything already in flight
+// retires normally through its own existing path first, dispatch of
+// anything NEW stops the moment an enabled interrupt is recognized
+// (interrupt_pending folds into dispatch_stall, same single-outstanding
+// shape every other Gen6-* control-flow source already uses), and the
+// interrupt itself fires the first cycle nothing is left in flight. This
+// This is a real, legitimate, spec-compliant point to recognize an interrupt
+// (RISC-V does not mandate minimum latency), and it needs zero new
+// per-instruction tracking (no *_inflight_valid_r register at all) --
+// rob_empty already means nothing else could possibly want the SAME
+// cycle's redirect mux, so there is no priority/coincidence question to
+// resolve the way trap_resolve/br_resolve/jr_resolve's own mutual
+// exclusion already had to be reasoned through.
+wire mei_pending = mie_meie && ext_pending;
+wire msi_pending = mie_msie && msip_pending;
+wire mti_pending = mie_mtie && timer_pending;
+// Spec-mandated priority when more than one is pending and enabled:
+// machine-external > machine-software > machine-timer (identical order
+// docs/adr/0020's own PIPELINED wiring already established).
+wire [31:0] interrupt_cause = mei_pending ? `MCAUSE_INT_MACHINE_EXTERNAL :
+                               msi_pending ? `MCAUSE_INT_MACHINE_SOFTWARE :
+                                             `MCAUSE_INT_MACHINE_TIMER;
+wire interrupt_pending = mstatus_mie && (mei_pending || msi_pending || mti_pending);
+wire interrupt_take = interrupt_pending && rob_empty;
 
 // ==========================================================================
 // Gen6-P2 (docs/adr/0053): Sv39 MMU. Reuses Tlb39.v/Ptw39.v completely
@@ -1823,6 +1906,16 @@ PhysicalRegisterFile #(.XLEN(XLEN), .NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS)
 always @(posedge clk) begin
     if (~rst)
         pc_r <= {XLEN{1'b0}};
+    else if (interrupt_take)   // Gen6-P3 (docs/adr/0054): highest priority
+                                 // of all -- genuinely independent of
+                                 // trap_resolve (interrupt_take fires with
+                                 // rob_empty, NOT tied to any retiring
+                                 // rob_tag), so it needs its own arm here;
+                                 // falling through to trap_resolve's own
+                                 // branch below would never trigger for a
+                                 // pure interrupt (nothing is retiring),
+                                 // silently leaving pc_r frozen forever.
+        pc_r <= csr_mtvec_val;
     else if (trap_resolve)   // Gen6-I: highest priority -- an exception/
                                // mret retiring always redirects, same
                                // "can't coincide with do_dispatch" argument

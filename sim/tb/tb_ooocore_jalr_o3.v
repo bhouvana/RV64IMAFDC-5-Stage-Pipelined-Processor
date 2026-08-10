@@ -58,7 +58,7 @@ module tb_ooocore_jalr_o3;
         .ROB_ENTRIES(16), .RS_ALU_ENTRIES(8),
         .IMEM_SIZE_BYTES(128), .IMEM_INIT_FILE("sim/programs/ooocore_jalr_o3.mem"),
         .DMEM_SIZE_BYTES(256)
-    ) dut (.clk(clk), .rst(rst), .mailbox_readData(64'b0));
+    ) dut (.clk(clk), .rst(rst), .mailbox_readData(64'b0), .msip_pending(1'b0), .timer_pending(1'b0), .ext_pending(1'b0));
 
     integer i;
     initial begin

@@ -45,7 +45,7 @@ module bench_run_ooocore;
         .ROB_ENTRIES(16), .RS_ALU_ENTRIES(8), .RS_FALU_ENTRIES(8),
         .IMEM_SIZE_BYTES(__MEM_SIZE__), .IMEM_INIT_FILE("__INIT_FILE__"),
         .DMEM_SIZE_BYTES(__MEM_SIZE__), .SP_INIT(__XLEN__'d__MEM_SIZE__)
-    ) dut (.clk(clk), .rst(rst), .mailbox_readData(64'b0));
+    ) dut (.clk(clk), .rst(rst), .mailbox_readData(64'b0), .msip_pending(1'b0), .timer_pending(1'b0), .ext_pending(1'b0));
 
     always #5 clk = ~clk;
 
