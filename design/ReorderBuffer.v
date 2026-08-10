@@ -45,6 +45,7 @@ module ReorderBuffer #(
     // entry to mark done on completion.
     input  wire                  alloc_en0,
     input  wire                  alloc_has_dest0,
+    input  wire                  alloc_is_fp_dest0,   // Gen6-H -- see below
     input  wire [AREG_BITS-1:0]  alloc_areg0,
     input  wire [PREG_BITS-1:0]  alloc_preg0,
     input  wire [PREG_BITS-1:0]  alloc_old_preg0,
@@ -52,6 +53,7 @@ module ReorderBuffer #(
 
     input  wire                  alloc_en1,
     input  wire                  alloc_has_dest1,
+    input  wire                  alloc_is_fp_dest1,
     input  wire [AREG_BITS-1:0]  alloc_areg1,
     input  wire [PREG_BITS-1:0]  alloc_preg1,
     input  wire [PREG_BITS-1:0]  alloc_old_preg1,
@@ -73,6 +75,9 @@ module ReorderBuffer #(
     input  wire [IDX_BITS-1:0]   complete_tag1,
     input  wire                  complete_en2,
     input  wire [IDX_BITS-1:0]   complete_tag2,
+    input  wire                  complete_en3,   // Gen6-H: RS_FALU's own
+                                                   // instant broadcast
+    input  wire [IDX_BITS-1:0]   complete_tag3,
 
     // Retire, up to 2/cycle, STRICTLY in program order from the head.
     // slot1 can only ALSO retire the same cycle slot0 does -- a
@@ -80,12 +85,14 @@ module ReorderBuffer #(
     // just slot-by-slot.
     output wire                  retire_valid0,
     output wire                  retire_has_dest0,
+    output wire                  retire_is_fp_dest0,
     output wire [AREG_BITS-1:0]  retire_areg0,
     output wire [PREG_BITS-1:0]  retire_preg0,
     output wire [PREG_BITS-1:0]  retire_old_preg0,
 
     output wire                  retire_valid1,
     output wire                  retire_has_dest1,
+    output wire                  retire_is_fp_dest1,
     output wire [AREG_BITS-1:0]  retire_areg1,
     output wire [PREG_BITS-1:0]  retire_preg1,
     output wire [PREG_BITS-1:0]  retire_old_preg1,
@@ -95,12 +102,18 @@ module ReorderBuffer #(
     output wire                  rob_empty
 );
 
-reg                 e_valid    [0:ROB_ENTRIES-1];
-reg                 e_done     [0:ROB_ENTRIES-1];
-reg                 e_has_dest [0:ROB_ENTRIES-1];
-reg [AREG_BITS-1:0] e_areg     [0:ROB_ENTRIES-1];
-reg [PREG_BITS-1:0] e_preg     [0:ROB_ENTRIES-1];
-reg [PREG_BITS-1:0] e_old_preg [0:ROB_ENTRIES-1];
+reg                 e_valid      [0:ROB_ENTRIES-1];
+reg                 e_done       [0:ROB_ENTRIES-1];
+reg                 e_has_dest   [0:ROB_ENTRIES-1];
+// Gen6-H: an entry's dest is EITHER an integer OR a float register, never
+// both (RV32F's own encoding never writes both files from one
+// instruction) -- one bit disambiguates which RAT/FreeList/PRF the
+// caller routes e_areg/e_preg/e_old_preg to at retire, reusing those
+// same fields rather than adding a second, mostly-redundant set.
+reg                 e_is_fp_dest [0:ROB_ENTRIES-1];
+reg [AREG_BITS-1:0] e_areg       [0:ROB_ENTRIES-1];
+reg [PREG_BITS-1:0] e_preg       [0:ROB_ENTRIES-1];
+reg [PREG_BITS-1:0] e_old_preg   [0:ROB_ENTRIES-1];
 
 reg [CNT_BITS-1:0]  count_r;
 reg [IDX_BITS-1:0]  head_r, tail_r;
@@ -133,17 +146,19 @@ wire slot0_can_retire = !rob_empty && e_valid[head_r] && e_done[head_r];
 wire slot1_can_retire = slot0_can_retire && (count_r >= 2'd2)
                          && e_valid[head1_idx] && e_done[head1_idx];
 
-assign retire_valid0    = slot0_can_retire;
-assign retire_has_dest0 = e_has_dest[head_r];
-assign retire_areg0     = e_areg[head_r];
-assign retire_preg0     = e_preg[head_r];
-assign retire_old_preg0 = e_old_preg[head_r];
+assign retire_valid0      = slot0_can_retire;
+assign retire_has_dest0   = e_has_dest[head_r];
+assign retire_is_fp_dest0 = e_is_fp_dest[head_r];
+assign retire_areg0       = e_areg[head_r];
+assign retire_preg0       = e_preg[head_r];
+assign retire_old_preg0   = e_old_preg[head_r];
 
-assign retire_valid1    = slot1_can_retire;
-assign retire_has_dest1 = e_has_dest[head1_idx];
-assign retire_areg1     = e_areg[head1_idx];
-assign retire_preg1     = e_preg[head1_idx];
-assign retire_old_preg1 = e_old_preg[head1_idx];
+assign retire_valid1      = slot1_can_retire;
+assign retire_has_dest1   = e_has_dest[head1_idx];
+assign retire_is_fp_dest1 = e_is_fp_dest[head1_idx];
+assign retire_areg1       = e_areg[head1_idx];
+assign retire_preg1       = e_preg[head1_idx];
+assign retire_old_preg1   = e_old_preg[head1_idx];
 
 wire [1:0] retire_count = (slot0_can_retire ? 2'd1 : 2'd0) + (slot1_can_retire ? 2'd1 : 2'd0);
 wire [1:0] alloc_count  = (alloc_en0 ? 2'd1 : 2'd0) + (alloc_en1 ? 2'd1 : 2'd0);
@@ -165,20 +180,22 @@ always @(posedge clk) begin
         // ever holds meaningful data between its own alloc and its own
         // retire).
         if (alloc_en0) begin
-            e_valid[tail_r]    <= 1'b1;
-            e_done[tail_r]     <= 1'b0;
-            e_has_dest[tail_r] <= alloc_has_dest0;
-            e_areg[tail_r]     <= alloc_areg0;
-            e_preg[tail_r]     <= alloc_preg0;
-            e_old_preg[tail_r] <= alloc_old_preg0;
+            e_valid[tail_r]      <= 1'b1;
+            e_done[tail_r]       <= 1'b0;
+            e_has_dest[tail_r]   <= alloc_has_dest0;
+            e_is_fp_dest[tail_r] <= alloc_is_fp_dest0;
+            e_areg[tail_r]       <= alloc_areg0;
+            e_preg[tail_r]       <= alloc_preg0;
+            e_old_preg[tail_r]   <= alloc_old_preg0;
         end
         if (alloc_en1) begin
-            e_valid[alloc_tag1]    <= 1'b1;
-            e_done[alloc_tag1]     <= 1'b0;
-            e_has_dest[alloc_tag1] <= alloc_has_dest1;
-            e_areg[alloc_tag1]     <= alloc_areg1;
-            e_preg[alloc_tag1]     <= alloc_preg1;
-            e_old_preg[alloc_tag1] <= alloc_old_preg1;
+            e_valid[alloc_tag1]      <= 1'b1;
+            e_done[alloc_tag1]       <= 1'b0;
+            e_has_dest[alloc_tag1]   <= alloc_has_dest1;
+            e_is_fp_dest[alloc_tag1] <= alloc_is_fp_dest1;
+            e_areg[alloc_tag1]       <= alloc_areg1;
+            e_preg[alloc_tag1]       <= alloc_preg1;
+            e_old_preg[alloc_tag1]   <= alloc_old_preg1;
         end
         if (alloc_count != 2'd0)
             tail_r <= wrap_add(tail_r, alloc_count);
@@ -196,6 +213,8 @@ always @(posedge clk) begin
             e_done[complete_tag1] <= 1'b1;
         if (complete_en2)
             e_done[complete_tag2] <= 1'b1;
+        if (complete_en3)
+            e_done[complete_tag3] <= 1'b1;
 
         // Retire: free the entries just vacated. A retiring entry's own
         // e_valid clear isn't strictly needed for correctness (head_r

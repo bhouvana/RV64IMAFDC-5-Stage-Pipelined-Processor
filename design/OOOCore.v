@@ -60,9 +60,18 @@ module OOOCore #(
     parameter DMEM_SIZE_BYTES = 4096,
     parameter SP_INIT         = 64'd128,
     parameter BHT_BTB_ENTRIES = 32,   // Gen6-G, matches docs/adr/0021's own default
+    parameter NUM_FREGS       = 32,   // Gen6-H -- f0-f31, RV32F register count
+    parameter NUM_FPREGS      = 64,   // Gen6-H -- float physical register count
+    parameter FLEN            = 32,   // Gen6-H -- this project's F-extension is
+                                        // F-only (never D): FALU.v's own header
+                                        // comment documents FLEN==32 always,
+                                        // independent of XLEN
+    parameter RS_FALU_ENTRIES = 8,    // Gen6-H
 
     parameter AREG_BITS  = $clog2(NUM_AREGS),
     parameter PREG_BITS  = $clog2(NUM_PREGS),
+    parameter FAREG_BITS = $clog2(NUM_FREGS),
+    parameter FPREG_BITS = $clog2(NUM_FPREGS),
     parameter ROB_IDX_BITS = $clog2(ROB_ENTRIES),
     // Reservation-station payload: {ALUSrc, ALUCtl[4:0], imm[XLEN-1:0]}.
     // ALUSrc tells the execute step whether operand B is the decoded
@@ -150,6 +159,25 @@ wire is_div_op = (ALUCtl_d == `ALUCTL_DIV) || (ALUCtl_d == `ALUCTL_DIVU) ||
 // phase's own scope -- deferred, not silently dropped; see the header
 // comment on the branch-speculation section below for why.
 wire is_branch = branch_c;
+
+// Gen6-H: F-extension, scoped to a real, tested, but deliberately narrow
+// subset -- see design/OOOCore.v's own Gen6-H section further down (right
+// before the float rename stack) for the full rationale on which funct5
+// groups are in scope this phase and why (fRegWrite_c is NOT a clean
+// "pure float-float op" signal: it's ALSO set for fcvt.s.w*/fmv.w.x,
+// which read an INTEGER source, and Control.v routes fcmp/fcvt.w.s/
+// fmv.x.w/fclass.s through plain regWrite_c instead since they write an
+// INTEGER dest despite reading float operands -- see Control.v's own
+// OPCODE_FP case comment). fp_funct5 mirrors ALUCtrl.v's own funct7[6:2]
+// convention (this project's OP-FP funct5 sits at the same bit position
+// funct7 does for R-type).
+wire [4:0] fp_funct5 = funct7_c[6:2];
+wire is_fp_pure = fRegWrite_c && (
+    fp_funct5 == `FUNCT5_FADD || fp_funct5 == `FUNCT5_FSUB || fp_funct5 == `FUNCT5_FMUL ||
+    fp_funct5 == `FUNCT5_FSGNJ || fp_funct5 == `FUNCT5_FMINMAX
+);
+wire is_fp_intmove = fRegWrite_c && (fp_funct5 == `FUNCT5_FMV_W_X);
+wire is_fp_op = is_fp_pure || is_fp_intmove;
 
 // ==========================================================================
 // Gen6-G: branch speculation. Reuses Gen1's own Bht.v/Btb.v exactly
@@ -279,7 +307,7 @@ wire [PREG_BITS-1:0] rat_old_preg0;            // rd's PRE-rename mapping (for F
 // only inside an instantiation's port connections as an "implicit
 // definition" warning otherwise, even though the eventual `wire`
 // declaration is real).
-wire rob_retire_valid0, rob_retire_has_dest0;
+wire rob_retire_valid0, rob_retire_has_dest0, rob_retire_is_fp_dest0;
 wire [AREG_BITS-1:0] rob_retire_areg0;
 wire [PREG_BITS-1:0] rob_retire_preg0, rob_retire_old_preg0;
 // ReorderBuffer.v retires up to 2/cycle INTERNALLY (slot0 AND slot1)
@@ -297,7 +325,7 @@ wire [PREG_BITS-1:0] rob_retire_preg0, rob_retire_old_preg0;
 // faster than 1/cycle when the ROB has a backlog of already-completed
 // entries is always correct, never something dispatch's own width needs
 // to match.
-wire rob_retire_valid1, rob_retire_has_dest1;
+wire rob_retire_valid1, rob_retire_has_dest1, rob_retire_is_fp_dest1;
 wire [AREG_BITS-1:0] rob_retire_areg1;
 wire [PREG_BITS-1:0] rob_retire_preg1, rob_retire_old_preg1;
 wire issue_valid;
@@ -325,6 +353,19 @@ wire [XLEN-1:0]         div_complete_data;
 wire [ROB_IDX_BITS-1:0] div_complete_rob_tag;
 wire                    rs_div_full;
 
+// Gen6-H: RS_FALU's own completion + the float FreeList's own allocation
+// readiness, forward-declared for the identical reason (consumed by
+// dispatch_stall/ROB above where they're instantiated below).
+wire                     falu_complete_valid;
+wire [FPREG_BITS-1:0]    falu_complete_dest_preg;
+wire [FLEN-1:0]          falu_complete_data;
+wire [ROB_IDX_BITS-1:0]  falu_complete_rob_tag;
+wire                     rs_falu_full;
+wire                     fl_f_alloc_ok0;
+wire [FPREG_BITS-1:0]    fl_f_alloc_preg0;
+wire [FPREG_BITS-1:0]    rat_f_rpreg0, rat_f_rpreg1;
+wire [FPREG_BITS-1:0]    rat_f_old_preg0;
+
 wire [PREG_BITS-1:0] fl_alloc_preg0;
 wire                 fl_alloc_ok0;
 wire [$clog2(NUM_PREGS - NUM_AREGS):0] fl_free_count;   // unused beyond
@@ -333,8 +374,9 @@ wire [$clog2(NUM_PREGS - NUM_AREGS):0] fl_free_count;   // unused beyond
     // free_count port exactly ([CAP_BITS:0], CAP_BITS = $clog2(CAPACITY)).
 
 wire dispatch_stall = rob_full
-                      || (is_mem_op ? lsq_full : (is_div_op ? rs_div_full : rs_alu_full))
+                      || (is_mem_op ? lsq_full : (is_div_op ? rs_div_full : (is_fp_op ? rs_falu_full : rs_alu_full)))
                       || (needs_dest && !fl_alloc_ok0)
+                      || (is_fp_op && !fl_f_alloc_ok0)   // Gen6-H
                       || br_inflight_valid_r;   // Gen6-G: single-outstanding-
                                                   // branch scope cut, see the
                                                   // branch-speculation
@@ -351,8 +393,11 @@ FreeList #(.NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS)) m_FreeList(
     .alloc_en0(needs_dest), .alloc_en1(1'b0),
     .alloc_preg0(fl_alloc_preg0), .alloc_preg1(),
     .alloc_ok0(fl_alloc_ok0), .alloc_ok1(),
-    .free_en0(rob_retire_valid0 && rob_retire_has_dest0), .free_preg0(rob_retire_old_preg0),
-    .free_en1(rob_retire_valid1 && rob_retire_has_dest1), .free_preg1(rob_retire_old_preg1),
+    // Gen6-H: gated !is_fp_dest -- a float-destination entry's own
+    // old_preg lives in the FLOAT preg space, and must be reclaimed by
+    // FreeList_Float below instead, never this (integer) FreeList.
+    .free_en0(rob_retire_valid0 && rob_retire_has_dest0 && !rob_retire_is_fp_dest0), .free_preg0(rob_retire_old_preg0),
+    .free_en1(rob_retire_valid1 && rob_retire_has_dest1 && !rob_retire_is_fp_dest1), .free_preg1(rob_retire_old_preg1),
     .free_count(fl_free_count)
 );
 
@@ -362,11 +407,55 @@ RegisterAliasTable #(.NUM_AREGS(NUM_AREGS), .NUM_PREGS(NUM_PREGS)) m_RAT(
     .rpreg0(rat_rpreg0), .rpreg1(rat_rpreg1), .rpreg2(), .rpreg3(),
     .wen0(do_dispatch && needs_dest), .waddr0(rd_areg), .wpreg0(fl_alloc_preg0), .old_preg0(rat_old_preg0),
     .wen1(1'b0), .waddr1({AREG_BITS{1'b0}}), .wpreg1({PREG_BITS{1'b0}}), .old_preg1(),
-    .cwen0(rob_retire_valid0 && rob_retire_has_dest0), .cwaddr0(rob_retire_areg0), .cwpreg0(rob_retire_preg0),
-    .cwen1(rob_retire_valid1 && rob_retire_has_dest1), .cwaddr1(rob_retire_areg1), .cwpreg1(rob_retire_preg1),
+    .cwen0(rob_retire_valid0 && rob_retire_has_dest0 && !rob_retire_is_fp_dest0), .cwaddr0(rob_retire_areg0), .cwpreg0(rob_retire_preg0),
+    .cwen1(rob_retire_valid1 && rob_retire_has_dest1 && !rob_retire_is_fp_dest1), .cwaddr1(rob_retire_areg1), .cwpreg1(rob_retire_preg1),
     .restore_en(1'b0)   // Gen6-G adds real speculation/squash; nothing to
                           // restore yet since nothing speculative can be
                           // in flight (no branches in Gen6-D's own scope).
+);
+
+// ==========================================================================
+// Gen6-H: F-extension rename stack -- a SEPARATE FreeList/RAT/PRF instance
+// for f0-f31, not a shared space with the integer one. RV32F's f0-f31 has
+// no hardwired-zero register at all (FRegister.v's own header comment) --
+// RegisterAliasTable.v/PhysicalRegisterFile.v's HARDWIRE_REG0/
+// HARDWIRE_PREG0=0 here disables every x0-style special case those
+// modules otherwise apply, so freg 0 renames/frees/reads/writes exactly
+// like any other float register.
+//
+// Scope, deliberately narrow and real (not a placeholder): FADD.S/
+// FSUB.S/FMUL.S/FSGNJ.S family/FMIN.S/FMAX.S (pure float-float, via
+// FALU.v's existing single-cycle datapath) and FMV.W.X (integer-bit-
+// pattern move, needed to get any value into a float register at all
+// without also building flw's own LSQ-float-awareness this same pass).
+// Explicitly OUT of scope, real future work: FDIV.S/FSQRT.S (multi-cycle,
+// would need their own Divider.v-style in-flight tracking), the fused
+// multiply-add family (3-operand, needs FRegister.v's own 3rd read port
+// equivalent), FCVT.S.W (integer source, real rounding-mode conversion,
+// unlike FMV.W.X's plain bit copy), FCMP/FCVT.W.S/FMV.X.W/FCLASS.S
+// (float source, INTEGER dest -- the reverse cross-file direction from
+// FMV.W.X), and FLW/FSW (float loads/stores through LoadStoreQueue.v,
+// which currently only knows how to complete into the integer PRF).
+// ==========================================================================
+FreeList #(.NUM_PREGS(NUM_FPREGS), .NUM_AREGS(NUM_FREGS)) m_FreeList_Float(
+    .clk(clk), .rst(rst),
+    .alloc_en0(is_fp_op), .alloc_en1(1'b0),
+    .alloc_preg0(fl_f_alloc_preg0), .alloc_preg1(),
+    .alloc_ok0(fl_f_alloc_ok0), .alloc_ok1(),
+    .free_en0(rob_retire_valid0 && rob_retire_has_dest0 && rob_retire_is_fp_dest0), .free_preg0(rob_retire_old_preg0),
+    .free_en1(rob_retire_valid1 && rob_retire_has_dest1 && rob_retire_is_fp_dest1), .free_preg1(rob_retire_old_preg1),
+    .free_count()
+);
+
+RegisterAliasTable #(.NUM_AREGS(NUM_FREGS), .NUM_PREGS(NUM_FPREGS), .HARDWIRE_REG0(0)) m_RAT_Float(
+    .clk(clk), .rst(rst),
+    .raddr0(rs1_areg), .raddr1(rs2_areg), .raddr2({FAREG_BITS{1'b0}}), .raddr3({FAREG_BITS{1'b0}}),
+    .rpreg0(rat_f_rpreg0), .rpreg1(rat_f_rpreg1), .rpreg2(), .rpreg3(),
+    .wen0(do_dispatch && is_fp_op), .waddr0(rd_areg), .wpreg0(fl_f_alloc_preg0), .old_preg0(rat_f_old_preg0),
+    .wen1(1'b0), .waddr1({FAREG_BITS{1'b0}}), .wpreg1({FPREG_BITS{1'b0}}), .old_preg1(),
+    .cwen0(rob_retire_valid0 && rob_retire_has_dest0 && rob_retire_is_fp_dest0), .cwaddr0(rob_retire_areg0), .cwpreg0(rob_retire_preg0),
+    .cwen1(rob_retire_valid1 && rob_retire_has_dest1 && rob_retire_is_fp_dest1), .cwaddr1(rob_retire_areg1), .cwpreg1(rob_retire_preg1),
+    .restore_en(1'b0)
 );
 
 wire [XLEN-1:0] prf_rdata0, prf_rdata1, prf_rdata2, prf_rdata3;
@@ -383,18 +472,19 @@ wire [$clog2(ROB_ENTRIES+1)-1:0] rob_count;
 
 ReorderBuffer #(.ROB_ENTRIES(ROB_ENTRIES), .AREG_BITS(AREG_BITS), .PREG_BITS(PREG_BITS)) m_ROB(
     .clk(clk), .rst(rst),
-    .alloc_en0(do_dispatch), .alloc_has_dest0(needs_dest),
-    .alloc_areg0(rd_areg), .alloc_preg0(needs_dest ? fl_alloc_preg0 : {PREG_BITS{1'b0}}),
-    .alloc_old_preg0(rat_old_preg0), .alloc_tag0(rob_alloc_tag0),
-    .alloc_en1(1'b0), .alloc_has_dest1(1'b0),
+    .alloc_en0(do_dispatch), .alloc_has_dest0(needs_dest || is_fp_op), .alloc_is_fp_dest0(is_fp_op),
+    .alloc_areg0(rd_areg), .alloc_preg0(is_fp_op ? fl_f_alloc_preg0 : (needs_dest ? fl_alloc_preg0 : {PREG_BITS{1'b0}})),
+    .alloc_old_preg0(is_fp_op ? rat_f_old_preg0 : rat_old_preg0), .alloc_tag0(rob_alloc_tag0),
+    .alloc_en1(1'b0), .alloc_has_dest1(1'b0), .alloc_is_fp_dest1(1'b0),
     .alloc_areg1({AREG_BITS{1'b0}}), .alloc_preg1({PREG_BITS{1'b0}}),
     .alloc_old_preg1({PREG_BITS{1'b0}}), .alloc_tag1(),
     .complete_en0(issue_valid), .complete_tag0(issue_rob_tag),
     .complete_en1(lsq_complete_valid), .complete_tag1(lsq_complete_rob_tag),
     .complete_en2(div_complete_valid), .complete_tag2(div_complete_rob_tag),
-    .retire_valid0(rob_retire_valid0), .retire_has_dest0(rob_retire_has_dest0),
+    .complete_en3(falu_complete_valid), .complete_tag3(falu_complete_rob_tag),
+    .retire_valid0(rob_retire_valid0), .retire_has_dest0(rob_retire_has_dest0), .retire_is_fp_dest0(rob_retire_is_fp_dest0),
     .retire_areg0(rob_retire_areg0), .retire_preg0(rob_retire_preg0), .retire_old_preg0(rob_retire_old_preg0),
-    .retire_valid1(rob_retire_valid1), .retire_has_dest1(rob_retire_has_dest1),
+    .retire_valid1(rob_retire_valid1), .retire_has_dest1(rob_retire_has_dest1), .retire_is_fp_dest1(rob_retire_is_fp_dest1),
     .retire_areg1(rob_retire_areg1), .retire_preg1(rob_retire_preg1), .retire_old_preg1(rob_retire_old_preg1),
     .rob_count(rob_count), .rob_full(rob_full), .rob_empty(rob_empty)
 );
@@ -411,7 +501,7 @@ wire [$clog2(RS_ALU_ENTRIES+1)-1:0] rs_alu_count;
 
 ReservationStation #(.RS_ENTRIES(RS_ALU_ENTRIES), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(PAYLOAD_BITS)) m_RS_ALU(
     .clk(clk), .rst(rst),
-    .disp_en0(do_dispatch && !is_mem_op && !is_div_op),
+    .disp_en0(do_dispatch && !is_mem_op && !is_div_op && !is_fp_op),
     .disp_src1_preg0(rat_rpreg0), .disp_src1_ready0(prf_rvalid0),
     .disp_src2_preg0(rat_rpreg1), .disp_src2_ready0(prf_rvalid1),
     .disp_dest_preg0(needs_dest ? fl_alloc_preg0 : {PREG_BITS{1'b0}}),
@@ -617,6 +707,102 @@ assign div_complete_rob_tag   = div_inflight_rob_tag_r;
 assign div_complete_dest_preg = div_inflight_dest_preg_r;
 assign div_complete_data      = div_inflight_select_rem_r ? div_remainder : div_quotient;
 
+// ==========================================================================
+// Gen6-H: RS_FALU + the SAME existing FALU.v this project's PIPELINED
+// core already uses -- single-cycle, exactly like RS_ALU/ALU.v, no
+// in-flight tracking needed (unlike Divider.v).
+//
+// `# ponytail`-tagged scope cut: RS_FALU's own CDB snoop covers self
+// (float-to-float chains) + RS_ALU's + Divider.v's completions (so
+// FMV.W.X's own integer source can wake up if it's still an in-flight
+// ALU/DIV result at dispatch time) but NOT LoadStoreQueue.v's -- a 4th
+// snoop port would need ReservationStation.v itself widened from 3 to 4
+// CDB ports for every instance, not just this one. Narrow, real,
+// bounded: an FMV.W.X whose integer source is still an outstanding LOAD
+// at dispatch time won't wake up when that load completes. This phase's
+// own directed test doesn't hit it (sources its FMV.W.X operand from an
+// already-committed/ALU-computed register, never directly from a fresh
+// load) -- flagged as real future work alongside FLW/FSW themselves,
+// which need LSQ float-awareness regardless.
+wire [PREG_BITS-1:0] issue_src1_preg_falu, issue_src2_preg_falu;
+wire [PREG_BITS-1:0] issue_dest_preg_falu_wide;
+wire [FPREG_BITS-1:0] issue_dest_preg_falu;
+wire [ROB_IDX_BITS-1:0] issue_rob_tag_falu;
+wire [13:0] issue_payload_falu;   // {is_intmove, funct5[4:0], funct3[2:0], rs2sel[4:0]}
+wire issue_valid_falu;
+wire [$clog2(RS_FALU_ENTRIES+1)-1:0] rs_falu_count;
+
+wire [PREG_BITS-1:0]  falu_disp_src1_preg = is_fp_intmove ? rat_rpreg0 : {{(PREG_BITS-FPREG_BITS){1'b0}}, rat_f_rpreg0};
+wire                  falu_disp_src1_ready = is_fp_intmove ? prf_rvalid0 : prf_f_rvalid0;
+wire [13:0]           falu_disp_payload = {is_fp_intmove, fp_funct5, funct3_c, rs2_areg};
+
+ReservationStation #(.RS_ENTRIES(RS_FALU_ENTRIES), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(14)) m_RS_FALU(
+    .clk(clk), .rst(rst),
+    .disp_en0(do_dispatch && is_fp_op),
+    .disp_src1_preg0(falu_disp_src1_preg), .disp_src1_ready0(falu_disp_src1_ready),
+    .disp_src2_preg0({{(PREG_BITS-FPREG_BITS){1'b0}}, rat_f_rpreg1}), .disp_src2_ready0(is_fp_intmove ? 1'b1 : prf_f_rvalid1),
+    .disp_dest_preg0({{(PREG_BITS-FPREG_BITS){1'b0}}, fl_f_alloc_preg0}),
+    .disp_rob_tag0(rob_alloc_tag0), .disp_payload0(falu_disp_payload),
+    .disp_en1(1'b0),
+    .disp_src1_preg1({PREG_BITS{1'b0}}), .disp_src1_ready1(1'b0),
+    .disp_src2_preg1({PREG_BITS{1'b0}}), .disp_src2_ready1(1'b0),
+    .disp_dest_preg1({PREG_BITS{1'b0}}), .disp_rob_tag1({ROB_IDX_BITS{1'b0}}), .disp_payload1(14'd0),
+    .cdb_valid0(falu_complete_valid), .cdb_preg0({{(PREG_BITS-FPREG_BITS){1'b0}}, falu_complete_dest_preg}),
+    .cdb_valid1(issue_valid), .cdb_preg1(issue_dest_preg),
+    .cdb_valid2(div_complete_valid), .cdb_preg2(div_complete_dest_preg),
+    .issue_valid(issue_valid_falu),
+    .issue_src1_preg(issue_src1_preg_falu), .issue_src2_preg(issue_src2_preg_falu),
+    .issue_dest_preg(issue_dest_preg_falu_wide), .issue_rob_tag(issue_rob_tag_falu), .issue_payload(issue_payload_falu),
+    .issue_ack(issue_valid_falu),   // FALU.v is combinational/never busy
+    .rs_count(rs_falu_count), .rs_full(rs_falu_full)
+);
+assign issue_dest_preg_falu = issue_dest_preg_falu_wide[FPREG_BITS-1:0];
+
+wire                falu_issue_is_intmove = issue_payload_falu[13];
+wire [4:0]          falu_issue_funct5     = issue_payload_falu[12:8];
+wire [2:0]          falu_issue_funct3     = issue_payload_falu[7:5];
+wire [4:0]          falu_issue_rs2sel     = issue_payload_falu[4:0];
+
+wire [XLEN-1:0] prf_rdata8;   // FMV.W.X's own integer source, issue-time
+wire [FLEN-1:0] prf_f_rdata2, prf_f_rdata3;
+wire [FLEN-1:0] falu_a = falu_issue_is_intmove ? prf_rdata8[FLEN-1:0] : prf_f_rdata2;
+wire [FLEN-1:0] falu_b = prf_f_rdata3;
+wire [FLEN-1:0] falu_result;
+wire [4:0] falu_flags;
+
+FALU m_FALU(
+    .funct5(falu_issue_funct5), .funct3(falu_issue_funct3), .rs2_sel(falu_issue_rs2sel),
+    .a(falu_a), .b(falu_b),
+    .result(falu_result), .flags(falu_flags)
+);
+
+assign falu_complete_valid     = issue_valid_falu;
+assign falu_complete_rob_tag   = issue_rob_tag_falu;
+assign falu_complete_dest_preg = issue_dest_preg_falu;
+assign falu_complete_data      = falu_result;
+
+wire [FLEN-1:0] prf_f_rdata0, prf_f_rdata1;
+wire            prf_f_rvalid0, prf_f_rvalid1;
+
+PhysicalRegisterFile #(.XLEN(FLEN), .NUM_PREGS(NUM_FPREGS), .NUM_AREGS(NUM_FREGS), .HARDWIRE_PREG0(0), .SP_INIT(0)) m_PRF_Float(
+    .clk(clk), .rst(rst),
+    // Port 0/1: dispatch-time readiness query. Port 2/3: RS_FALU's own
+    // issue-time operand fetch.
+    .raddr0(rat_f_rpreg0), .raddr1(rat_f_rpreg1),
+    .raddr2(issue_src1_preg_falu[FPREG_BITS-1:0]), .raddr3(issue_src2_preg_falu[FPREG_BITS-1:0]),
+    .raddr4({FPREG_BITS{1'b0}}), .raddr5({FPREG_BITS{1'b0}}), .raddr6({FPREG_BITS{1'b0}}), .raddr7({FPREG_BITS{1'b0}}), .raddr8({FPREG_BITS{1'b0}}),
+    .rdata0(prf_f_rdata0), .rdata1(prf_f_rdata1), .rdata2(prf_f_rdata2), .rdata3(prf_f_rdata3),
+    .rdata4(), .rdata5(), .rdata6(), .rdata7(), .rdata8(),
+    .rvalid0(prf_f_rvalid0), .rvalid1(prf_f_rvalid1), .rvalid2(), .rvalid3(), .rvalid4(), .rvalid5(), .rvalid6(), .rvalid7(), .rvalid8(),
+    // CDB writeback -- FALU's own instant result is the ONLY completion
+    // source for the float PRF this phase (no FDIV/FSQRT/FMADD/FLW yet).
+    .wen0(falu_complete_valid), .waddr0(falu_complete_dest_preg), .wdata0(falu_complete_data),
+    .wen1(1'b0), .waddr1({FPREG_BITS{1'b0}}), .wdata1({FLEN{1'b0}}),
+    .wen2(1'b0), .waddr2({FPREG_BITS{1'b0}}), .wdata2({FLEN{1'b0}}),
+    .alloc_en0(do_dispatch && is_fp_op), .alloc_preg0(fl_f_alloc_preg0),
+    .alloc_en1(1'b0), .alloc_preg1({FPREG_BITS{1'b0}})
+);
+
 wire [XLEN-1:0] prf_rdata4, prf_rdata5;
 
 PhysicalRegisterFile #(.XLEN(XLEN), .NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS), .SP_INIT(SP_INIT)) m_PRF(
@@ -626,18 +812,22 @@ PhysicalRegisterFile #(.XLEN(XLEN), .NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS)
     // for whichever entry RS_ALU just selected. Port 4/5 (Gen6-E): the
     // LSQ's own head-entry base/store-data value fetch. Port 6/7
     // (Gen6-F): Divider.v's own dividend/divisor fetch for whichever
-    // entry RS_DIV just selected.
+    // entry RS_DIV just selected. Port 8 (Gen6-H): FMV.W.X's own
+    // integer source, issue-time, for whichever entry RS_FALU selected.
     .raddr0(rat_rpreg0), .raddr1(rat_rpreg1),
     .raddr2(issue_src1_preg), .raddr3(issue_src2_preg),
     .raddr4(lsq_head_base_preg), .raddr5(lsq_head_store_data_preg),
     .raddr6(issue_src1_preg_div), .raddr7(issue_src2_preg_div),
+    .raddr8(issue_src1_preg_falu),
     .rdata0(prf_rdata0), .rdata1(prf_rdata1), .rdata2(prf_rdata2), .rdata3(prf_rdata3),
     .rdata4(prf_rdata4), .rdata5(prf_rdata5), .rdata6(prf_rdata6), .rdata7(prf_rdata7),
-    .rvalid0(prf_rvalid0), .rvalid1(prf_rvalid1), .rvalid2(), .rvalid3(), .rvalid4(), .rvalid5(), .rvalid6(), .rvalid7(),
+    .rdata8(prf_rdata8),
+    .rvalid0(prf_rvalid0), .rvalid1(prf_rvalid1), .rvalid2(), .rvalid3(), .rvalid4(), .rvalid5(), .rvalid6(), .rvalid7(), .rvalid8(),
     // CDB writeback -- port0 the ALU's own result (single-cycle execute,
     // no latency); port1 (Gen6-E) a completed LOAD's result (a store has
     // no destination register, so lsq_complete_is_load gates this);
-    // port2 (Gen6-F) a completed DIV/REM's result.
+    // port2 (Gen6-F) a completed DIV/REM's result. (RS_FALU's own
+    // results never target this, integer, PRF in this phase's scope.)
     .wen0(issue_valid), .waddr0(issue_dest_preg), .wdata0(alu_out),
     .wen1(lsq_complete_valid && lsq_complete_is_load), .waddr1(lsq_complete_dest_preg), .wdata1(lsq_complete_data),
     .wen2(div_complete_valid), .waddr2(div_complete_dest_preg), .wdata2(div_complete_data),

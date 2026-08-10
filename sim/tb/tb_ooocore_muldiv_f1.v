@@ -4,6 +4,7 @@
 `include "ALUCtrl.v"
 `include "ImmGen.v"
 `include "ALU.v"
+`include "FALU.v"
 `include "RegisterAliasTable.v"
 `include "FreeList.v"
 `include "PhysicalRegisterFile.v"

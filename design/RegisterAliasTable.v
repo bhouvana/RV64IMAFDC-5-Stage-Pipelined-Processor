@@ -24,9 +24,20 @@
 // matches FreeList.v's own reset assumption that only pregs
 // [NUM_AREGS, NUM_PREGS) start in the free list (pregs 0..NUM_AREGS-1
 // are "in use" by this initial mapping from the very first cycle).
+//
+// HARDWIRE_REG0 (Gen6-H): the x0-never-renamed behavior above is an
+// INTEGER-specific architectural fact -- RV32F's f0-f31 has no hardwired-
+// zero register at all (every one is plainly, independently writable,
+// see FRegister.v's own header comment). Rather than a separate,
+// near-duplicate module for the float rename table, this single
+// parameter (default 1, exactly reproducing every existing bit-for-bit
+// behavior above) gates every areg-0 special case off when instantiated
+// for floats (HARDWIRE_REG0=0) -- reg 0 then behaves like any other
+// register: renamed, tracked, freed, same as areg 1-31.
 module RegisterAliasTable #(
     parameter NUM_AREGS = 32,
     parameter NUM_PREGS = 64,
+    parameter HARDWIRE_REG0 = 1,
     parameter AREG_BITS = $clog2(NUM_AREGS),
     parameter PREG_BITS = $clog2(NUM_PREGS)
 )(
@@ -80,10 +91,10 @@ module RegisterAliasTable #(
 reg [PREG_BITS-1:0] spec_map [0:NUM_AREGS-1];
 reg [PREG_BITS-1:0] arch_map [0:NUM_AREGS-1];
 
-assign rpreg0 = (raddr0 == 0) ? {PREG_BITS{1'b0}} : spec_map[raddr0];
-assign rpreg1 = (raddr1 == 0) ? {PREG_BITS{1'b0}} : spec_map[raddr1];
-assign rpreg2 = (raddr2 == 0) ? {PREG_BITS{1'b0}} : spec_map[raddr2];
-assign rpreg3 = (raddr3 == 0) ? {PREG_BITS{1'b0}} : spec_map[raddr3];
+assign rpreg0 = (HARDWIRE_REG0 && raddr0 == 0) ? {PREG_BITS{1'b0}} : spec_map[raddr0];
+assign rpreg1 = (HARDWIRE_REG0 && raddr1 == 0) ? {PREG_BITS{1'b0}} : spec_map[raddr1];
+assign rpreg2 = (HARDWIRE_REG0 && raddr2 == 0) ? {PREG_BITS{1'b0}} : spec_map[raddr2];
+assign rpreg3 = (HARDWIRE_REG0 && raddr3 == 0) ? {PREG_BITS{1'b0}} : spec_map[raddr3];
 
 assign old_preg0 = spec_map[waddr0];
 assign old_preg1 = (wen0 && waddr0 == waddr1) ? wpreg0 : spec_map[waddr1];
@@ -102,25 +113,25 @@ always @(posedge clk) begin
                 spec_map[reset_i] <= arch_map[reset_i];
         end
         else begin
-            if (wen0 && waddr0 != 0)
+            if (wen0 && (!HARDWIRE_REG0 || waddr0 != 0))
                 spec_map[waddr0] <= wpreg0;
-            if (wen1 && waddr1 != 0)
+            if (wen1 && (!HARDWIRE_REG0 || waddr1 != 0))
                 spec_map[waddr1] <= wpreg1;
         end
 
         // Architectural table: independent of restore_en/spec writes --
         // retirement keeps committing even the same cycle a LATER
         // (not-yet-retired) speculative instruction is being squashed.
-        if (cwen0 && cwaddr0 != 0)
+        if (cwen0 && (!HARDWIRE_REG0 || cwaddr0 != 0))
             arch_map[cwaddr0] <= cwpreg0;
-        if (cwen1 && cwaddr1 != 0)
+        if (cwen1 && (!HARDWIRE_REG0 || cwaddr1 != 0))
             arch_map[cwaddr1] <= cwpreg1;
     end
 end
 
 `ifdef ASSERT_ON
 always @(posedge clk) begin
-    if (rst && (spec_map[0] !== {PREG_BITS{1'b0}} || arch_map[0] !== {PREG_BITS{1'b0}}))
+    if (rst && HARDWIRE_REG0 && (spec_map[0] !== {PREG_BITS{1'b0}} || arch_map[0] !== {PREG_BITS{1'b0}}))
         begin $display("ASSERTION FAILED @t=%0t: areg x0 must always map to preg 0 in both tables", $time); $finish; end
 end
 `endif

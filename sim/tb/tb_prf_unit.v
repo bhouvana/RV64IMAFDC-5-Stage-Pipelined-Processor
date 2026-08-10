@@ -40,9 +40,9 @@ module tb_prf_unit;
     endtask
 
     reg        rst = 0;
-    reg  [5:0] raddr0 = 0, raddr1 = 0, raddr2 = 0, raddr3 = 0, raddr4 = 0, raddr5 = 0, raddr6 = 0, raddr7 = 0;
-    wire [63:0] rdata0, rdata1, rdata2, rdata3, rdata4, rdata5, rdata6, rdata7;
-    wire       rvalid0, rvalid1, rvalid2, rvalid3, rvalid4, rvalid5, rvalid6, rvalid7;
+    reg  [5:0] raddr0 = 0, raddr1 = 0, raddr2 = 0, raddr3 = 0, raddr4 = 0, raddr5 = 0, raddr6 = 0, raddr7 = 0, raddr8 = 0;
+    wire [63:0] rdata0, rdata1, rdata2, rdata3, rdata4, rdata5, rdata6, rdata7, rdata8;
+    wire       rvalid0, rvalid1, rvalid2, rvalid3, rvalid4, rvalid5, rvalid6, rvalid7, rvalid8;
     reg        wen0 = 0, wen1 = 0, wen2 = 0;
     reg  [5:0] waddr0 = 0, waddr1 = 0, waddr2 = 0;
     reg [63:0] wdata0 = 0, wdata1 = 0, wdata2 = 0;
@@ -51,9 +51,9 @@ module tb_prf_unit;
 
     PhysicalRegisterFile #(.XLEN(64), .NUM_PREGS(64), .NUM_AREGS(32)) dut(
         .clk(clk), .rst(rst),
-        .raddr0(raddr0), .raddr1(raddr1), .raddr2(raddr2), .raddr3(raddr3), .raddr4(raddr4), .raddr5(raddr5), .raddr6(raddr6), .raddr7(raddr7),
-        .rdata0(rdata0), .rdata1(rdata1), .rdata2(rdata2), .rdata3(rdata3), .rdata4(rdata4), .rdata5(rdata5), .rdata6(rdata6), .rdata7(rdata7),
-        .rvalid0(rvalid0), .rvalid1(rvalid1), .rvalid2(rvalid2), .rvalid3(rvalid3), .rvalid4(rvalid4), .rvalid5(rvalid5), .rvalid6(rvalid6), .rvalid7(rvalid7),
+        .raddr0(raddr0), .raddr1(raddr1), .raddr2(raddr2), .raddr3(raddr3), .raddr4(raddr4), .raddr5(raddr5), .raddr6(raddr6), .raddr7(raddr7), .raddr8(raddr8),
+        .rdata0(rdata0), .rdata1(rdata1), .rdata2(rdata2), .rdata3(rdata3), .rdata4(rdata4), .rdata5(rdata5), .rdata6(rdata6), .rdata7(rdata7), .rdata8(rdata8),
+        .rvalid0(rvalid0), .rvalid1(rvalid1), .rvalid2(rvalid2), .rvalid3(rvalid3), .rvalid4(rvalid4), .rvalid5(rvalid5), .rvalid6(rvalid6), .rvalid7(rvalid7), .rvalid8(rvalid8),
         .wen0(wen0), .waddr0(waddr0), .wdata0(wdata0),
         .wen1(wen1), .waddr1(waddr1), .wdata1(wdata1),
         .wen2(wen2), .waddr2(waddr2), .wdata2(wdata2),

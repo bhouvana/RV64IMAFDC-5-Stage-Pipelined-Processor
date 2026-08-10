@@ -50,8 +50,8 @@ module tb_rob_unit;
     reg  [5:0] alloc_preg1 = 0, alloc_old_preg1 = 0;
     wire [1:0] alloc_tag0, alloc_tag1;
 
-    reg        complete_en0 = 0, complete_en1 = 0, complete_en2 = 0;
-    reg  [1:0] complete_tag0 = 0, complete_tag1 = 0, complete_tag2 = 0;
+    reg        complete_en0 = 0, complete_en1 = 0, complete_en2 = 0, complete_en3 = 0;
+    reg  [1:0] complete_tag0 = 0, complete_tag1 = 0, complete_tag2 = 0, complete_tag3 = 0;
 
     wire       retire_valid0, retire_has_dest0;
     wire [4:0] retire_areg0;
@@ -67,18 +67,19 @@ module tb_rob_unit;
 
     ReorderBuffer #(.ROB_ENTRIES(4)) dut(
         .clk(clk), .rst(rst),
-        .alloc_en0(alloc_en0), .alloc_has_dest0(alloc_has_dest0),
+        .alloc_en0(alloc_en0), .alloc_has_dest0(alloc_has_dest0), .alloc_is_fp_dest0(1'b0),
         .alloc_areg0(alloc_areg0), .alloc_preg0(alloc_preg0), .alloc_old_preg0(alloc_old_preg0),
         .alloc_tag0(alloc_tag0),
-        .alloc_en1(alloc_en1), .alloc_has_dest1(alloc_has_dest1),
+        .alloc_en1(alloc_en1), .alloc_has_dest1(alloc_has_dest1), .alloc_is_fp_dest1(1'b0),
         .alloc_areg1(alloc_areg1), .alloc_preg1(alloc_preg1), .alloc_old_preg1(alloc_old_preg1),
         .alloc_tag1(alloc_tag1),
         .complete_en0(complete_en0), .complete_tag0(complete_tag0),
         .complete_en1(complete_en1), .complete_tag1(complete_tag1),
         .complete_en2(complete_en2), .complete_tag2(complete_tag2),
-        .retire_valid0(retire_valid0), .retire_has_dest0(retire_has_dest0),
+        .complete_en3(complete_en3), .complete_tag3(complete_tag3),
+        .retire_valid0(retire_valid0), .retire_has_dest0(retire_has_dest0), .retire_is_fp_dest0(),
         .retire_areg0(retire_areg0), .retire_preg0(retire_preg0), .retire_old_preg0(retire_old_preg0),
-        .retire_valid1(retire_valid1), .retire_has_dest1(retire_has_dest1),
+        .retire_valid1(retire_valid1), .retire_has_dest1(retire_has_dest1), .retire_is_fp_dest1(),
         .retire_areg1(retire_areg1), .retire_preg1(retire_preg1), .retire_old_preg1(retire_old_preg1),
         .rob_count(rob_count), .rob_full(rob_full), .rob_empty(rob_empty)
     );
