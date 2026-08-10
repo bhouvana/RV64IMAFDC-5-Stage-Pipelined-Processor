@@ -110,7 +110,18 @@ module ReorderBuffer #(
 
     output wire [CNT_BITS-1:0]   rob_count,
     output wire                  rob_full,
-    output wire                  rob_empty
+    output wire                  rob_empty,
+
+    // Gen6-L5 (docs/adr/0027's own established pattern for CSR.v):
+    // debug-only outputs, unconnected in every real caller (OOOCore.v),
+    // changes nothing there -- exist purely so sim/formal/rob_formal.sv
+    // can observe head_r/tail_r directly. Yosys's `read_verilog` (unlike
+    // iverilog's simulator) can't resolve a hierarchical dot-reference
+    // into a submodule's internal state (confirmed by direct ADR 0027
+    // precedent, re-confirmed by running here), so a real port is the
+    // only way a formal property can see this.
+    output wire [IDX_BITS-1:0]   debug_head,
+    output wire [IDX_BITS-1:0]   debug_tail
 );
 
 reg                 e_valid      [0:ROB_ENTRIES-1];
@@ -132,6 +143,8 @@ reg [IDX_BITS-1:0]  head_r, tail_r;
 assign rob_count = count_r;
 assign rob_full  = (count_r >= ROB_ENTRIES[CNT_BITS-1:0]);
 assign rob_empty = (count_r == {CNT_BITS{1'b0}});
+assign debug_head = head_r;
+assign debug_tail = tail_r;
 
 function [IDX_BITS-1:0] wrap_add;
     input [IDX_BITS-1:0] base;

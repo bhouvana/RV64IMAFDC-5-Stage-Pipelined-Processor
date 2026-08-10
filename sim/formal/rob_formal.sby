@@ -1,0 +1,14 @@
+[options]
+mode bmc
+depth 4
+
+[engines]
+smtbmc boolector
+
+[script]
+read_verilog -sv -I ../../design rob_formal.sv
+prep -top rob_formal
+
+[files]
+rob_formal.sv
+../../design/ReorderBuffer.v
