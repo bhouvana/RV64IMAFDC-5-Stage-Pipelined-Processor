@@ -1,5 +1,7 @@
 `default_nettype none
 
+`include "wb_defs.vh"
+
 // docs/adr/0023-caches.md (Phase G2). Set-associative, PIPT (indexed by the
 // already-translated physical address -- this core's fetch is already PIPT
 // today, see the ADR), read-only instruction cache. Standalone this phase
@@ -62,7 +64,15 @@ module ICache #(
     // sufficient here, unlike the D-side's own MEM_LATENCY_D wrapper
     // (docs/adr/0024 Phase I2), which had to account for DCache.v/Ptw.v/
     // the raw LSU all sharing one real Wishbone bus.
-    parameter MEM_LATENCY = 0
+    parameter MEM_LATENCY = 0,
+    // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). 0 (default):
+    // today's exact private-InstructionMemory-direct-fill path, byte-for-
+    // byte unchanged. 1: fill words are fetched over a real Wishbone-master
+    // bus port instead (below), targeting an L2Cache.v instance -- the
+    // private InstructionMemory instance is not even instantiated in this
+    // case (generate-gated, mirrors VICTIM_ENTRIES==0's own "don't
+    // instantiate what isn't used" discipline).
+    parameter L2_ENABLE = 0
 )(
     input clk,
     input rst,
@@ -80,7 +90,20 @@ module ICache #(
     // ties probe_req=0 (the default, every existing testbench).
     input                 probe_req,
     input      [XLEN-1:0] probe_addr,
-    output                probe_ack
+    output                probe_ack,
+
+    // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). New
+    // Wishbone-master bus port, only meaningful when L2_ENABLE=1 -- read-
+    // only (no m_we/m_data_o at all; a caller wiring this to an L2Cache.v
+    // instance's own u_* slave port ties u_we=1'b0/u_data_o={XLEN{1'b0}}
+    // directly at the instantiation site, since I$ never writes).
+    output                          m_cyc,
+    output                          m_stb,
+    output     [XLEN-1:0]           m_addr,
+    output     [`WB_SEL_WIDTH-1:0]  m_sel,
+    output     [2:0]                m_funct3,
+    input      [XLEN-1:0]           m_data_i,
+    input                           m_ack
 );
 
 localparam LINE_WORDS   = LINE_BYTES / 4;
@@ -297,34 +320,77 @@ reg                        busy_r, done_r;
 wire [XLEN-1:0] imem_addr = fill_base_r + {{(XLEN-OFFSET_BITS){1'b0}}, fill_word_r, 2'b00};
 wire [XLEN-1:0] imem_data;
 
-InstructionMemory #(.INIT_FILE(INIT_FILE), .SIZE_BYTES(IMEM_SIZE_BYTES), .XLEN(XLEN)) m_imem(
-    .readAddr(imem_addr),
-    .inst(imem_data)
-);
-
 assign busy = busy_r;
 assign done = done_r;
 
-// docs/adr/0024-variable-latency-memory.md (Phase I4). fillword_ready
-// gates S_FILL's per-word capture/advance below -- tied 1'b1 combinationally
-// at MEM_LATENCY==0 (bit-exact, one word per cycle, unchanged), otherwise
-// driven by a MemoryLatencyModel instance retriggered once per word
-// (start = (state==S_FILL) && !busy, naturally re-fires the cycle after
-// each word's own done pulse). Generate-gated so MEM_LATENCY==0 callers
-// (the overwhelming majority of existing tests) never need
-// MemoryLatencyModel.v in their own include list.
+// docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). L2_ENABLE==0
+// (default): the EXISTING private-InstructionMemory-direct-fill path,
+// completely unchanged -- including the existing MEM_LATENCY wait-state
+// wrapper (docs/adr/0024-variable-latency-memory.md, Phase I4), nested
+// inside this same branch. The new bus-master output port is simply tied
+// off/idle here.
+// L2_ENABLE==1: `imem_data`/`fillword_ready` are re-sourced from a real
+// Wishbone-master transaction instead -- S_FILL's own case-statement logic
+// below is UNCHANGED either way, it only ever consumes these two signals by
+// name. No separate FSM needed: `m_cyc` held for the whole S_FILL service
+// (mirrors DCache.v/L2Cache.v's own `m_cyc = (state==S_FILL)` shape),
+// `fillword_ready` IS `m_ack` directly (one pulse per word, the same
+// granularity S_FILL's own fill_word_r loop already advances at).
+// docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). Kept
+// UNCONDITIONALLY instantiated (not inside the L2_ENABLE generate split
+// below) on purpose -- mirrors riscvpipeline.v's own documented reason for
+// keeping RamWishboneAdapter.v's instance name (`dut.m_DataMemory`) outside
+// any generate branch: several existing testbenches (tb_icache_unit.v and
+// others) poke `dut.m_imem.insts[...]` by hierarchical reference, which a
+// generate-block wrapper would silently rename (e.g. to
+// `dut.gen_l2_disabled.m_imem...`), breaking every one of them -- a real
+// regression found by running the full suite while first implementing this
+// phase, not a theoretical concern. Harmless at L2_ENABLE=1 (simply unused,
+// its own small IMEM_SIZE_BYTES-sized array going untouched).
+InstructionMemory #(.INIT_FILE(INIT_FILE), .SIZE_BYTES(IMEM_SIZE_BYTES), .XLEN(XLEN)) m_imem(
+    .readAddr(imem_addr),
+    .inst(imem_data_priv)
+);
+wire [XLEN-1:0] imem_data_priv;
+
 wire fillword_ready;
 generate
-if (MEM_LATENCY == 0) begin : gen_fill_latency_none
-    assign fillword_ready = 1'b1;
-end else begin : gen_fill_latency_added
-    wire fillword_latency_busy;
-    MemoryLatencyModel #(.LATENCY(MEM_LATENCY)) m_FillLatency(
-        .clk(clk), .rst(rst),
-        .start((state == S_FILL) && !fillword_latency_busy),
-        .busy(fillword_latency_busy),
-        .done(fillword_ready)
-    );
+if (L2_ENABLE == 0) begin : gen_l2_disabled
+    assign m_cyc    = 1'b0;
+    assign m_stb    = 1'b0;
+    assign m_addr   = {XLEN{1'b0}};
+    assign m_sel    = {`WB_SEL_WIDTH{1'b0}};
+    assign m_funct3 = 3'b000;
+    assign imem_data = imem_data_priv;
+
+    // docs/adr/0024-variable-latency-memory.md (Phase I4). fillword_ready
+    // gates S_FILL's per-word capture/advance below -- tied 1'b1
+    // combinationally at MEM_LATENCY==0 (bit-exact, one word per cycle,
+    // unchanged), otherwise driven by a MemoryLatencyModel instance
+    // retriggered once per word (start = (state==S_FILL) && !busy,
+    // naturally re-fires the cycle after each word's own done pulse).
+    // Generate-gated so MEM_LATENCY==0 callers (the overwhelming majority
+    // of existing tests) never need MemoryLatencyModel.v in their own
+    // include list.
+    if (MEM_LATENCY == 0) begin : gen_fill_latency_none
+        assign fillword_ready = 1'b1;
+    end else begin : gen_fill_latency_added
+        wire fillword_latency_busy;
+        MemoryLatencyModel #(.LATENCY(MEM_LATENCY)) m_FillLatency(
+            .clk(clk), .rst(rst),
+            .start((state == S_FILL) && !fillword_latency_busy),
+            .busy(fillword_latency_busy),
+            .done(fillword_ready)
+        );
+    end
+end else begin : gen_l2_enabled
+    assign m_cyc    = (state == S_FILL);
+    assign m_stb    = m_cyc;
+    assign m_addr   = imem_addr;
+    assign m_sel    = {`WB_SEL_WIDTH{1'b1}};
+    assign m_funct3 = 3'b010;
+    assign fillword_ready = m_ack;
+    assign imem_data = m_data_i;
 end
 endgenerate
 
