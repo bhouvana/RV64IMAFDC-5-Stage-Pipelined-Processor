@@ -139,7 +139,31 @@ ImmGen #(.Width(XLEN)) m_ImmGen(.inst(inst_full), .imm(imm_d));
 // harmlessly (their Control.v outputs are simply never consumed below)
 // but produce no real effect yet; each is its own later Gen6-* sub-phase.
 wire needs_dest = regWrite_c && (rd_areg != 5'd0);
-wire is_mem_op  = memRead_c || memWrite_c;
+// Gen6-J: LR.W/LR.D route through the EXACT SAME LoadStoreQueue.v
+// dispatch path as an ordinary load -- Control.v deliberately leaves
+// memRead/memWrite at 0 for the whole OPCODE_AMO family (docs/adr/0038's
+// own design, so the caller can tell "is this an AMO" apart from "is
+// this an ordinary load/store" before routing), so is_mem_op needs
+// is_amo_lr OR'd in explicitly for LR to ever reach the LSQ at all.
+// ImmGen.v has no OPCODE_AMO case arm, so imm_d is already its own
+// documented default-0 for these (AMO's own encoding has no real
+// immediate field -- those bits are aq/rl instead), needing no extra
+// forcing at the dispatch site.
+//
+// `# ponytail`-tagged scope cut: only LR is real this phase. SC.W/SC.D
+// need a store PLUS a hardcoded rd=0 success write that doesn't come
+// from memory at all (this LSQ has no concept of "a store that also
+// writes an unrelated integer destination") -- a real LSQ interface
+// change. The general AMOADD/AMOSWAP/etc. read-modify-write family needs
+// real 2-phase sequencing (read old value -> compute new -> write new),
+// its own in-flight state machine comparable to Divider.v's, interleaving
+// an LSQ round trip with an ALU computation. Both are real, flagged
+// future work -- this core's own single-hart simplification (every AMO
+// is trivially atomic, no other hart can ever contend, ADR 0038's own
+// finding) still applies whenever they're eventually built, same as it
+// already does for LR here.
+wire is_amo_lr = isAmo_c && (funct7_c[6:2] == `AMO_F5_LR);
+wire is_mem_op  = memRead_c || memWrite_c || is_amo_lr;
 // Gen6-F: DIV/DIVU/REM/REMU route to their own reservation station +
 // Divider.v, NOT the single-cycle RS_ALU/ALU.v path -- mirrors
 // riscvpipeline.v's own isDivRem detection exactly (same ALUCtl
