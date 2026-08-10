@@ -57,7 +57,9 @@ module tb_lsq_unit;
 
     reg rst = 0;
 
-    reg        disp_en0 = 0, disp_is_store0 = 0;
+    reg        disp_en0 = 0;
+    reg  [1:0] disp_op_type0 = 0;
+    reg  [4:0] disp_amo_op0 = 0;
     reg  [5:0] disp_base_preg0 = 0;
     reg        disp_base_ready0 = 0;
     reg [63:0] disp_imm0 = 0;
@@ -94,12 +96,12 @@ module tb_lsq_unit;
 
     LoadStoreQueue #(.XLEN(64), .LSQ_ENTRIES(4), .PREG_BITS(6), .ROB_IDX_BITS(4)) dut(
         .clk(clk), .rst(rst),
-        .disp_en0(disp_en0), .disp_is_store0(disp_is_store0),
+        .disp_en0(disp_en0), .disp_op_type0(disp_op_type0), .disp_amo_op0(disp_amo_op0),
         .disp_base_preg0(disp_base_preg0), .disp_base_ready0(disp_base_ready0),
         .disp_imm0(disp_imm0), .disp_funct3_0(disp_funct3_0),
         .disp_store_data_preg0(disp_store_data_preg0), .disp_store_data_ready0(disp_store_data_ready0),
         .disp_dest_preg0(disp_dest_preg0), .disp_rob_tag0(disp_rob_tag0),
-        .disp_en1(1'b0), .disp_is_store1(1'b0),
+        .disp_en1(1'b0), .disp_op_type1(2'd0), .disp_amo_op1(5'd0),
         .disp_base_preg1(6'd0), .disp_base_ready1(1'b0),
         .disp_imm1(64'd0), .disp_funct3_1(3'd0),
         .disp_store_data_preg1(6'd0), .disp_store_data_ready1(1'b0),
@@ -140,7 +142,7 @@ module tb_lsq_unit;
         fake_prf[6'd10] = 64'd100;                 // base (address)
         fake_prf[6'd11] = 64'hCAFEBABE_12345678;    // store data
         @(negedge clk);
-        disp_en0 = 1; disp_is_store0 = 1;
+        disp_en0 = 1; disp_op_type0 = 2'd1;
         disp_base_preg0 = 6'd10; disp_base_ready0 = 1;
         disp_imm0 = 64'd0; disp_funct3_0 = 3'b011;
         disp_store_data_preg0 = 6'd11; disp_store_data_ready0 = 1;
@@ -168,7 +170,7 @@ module tb_lsq_unit;
         // Now the load, same address.
         fake_prf[6'd12] = 64'd100;
         @(negedge clk);
-        disp_en0 = 1; disp_is_store0 = 0;
+        disp_en0 = 1; disp_op_type0 = 2'd0;
         disp_base_preg0 = 6'd12; disp_base_ready0 = 1;
         disp_imm0 = 64'd0; disp_funct3_0 = 3'b011;
         disp_dest_preg0 = 6'd20; disp_rob_tag0 = 4'd2;
@@ -188,7 +190,7 @@ module tb_lsq_unit;
         // -- Case 4: dispatch with base NOT ready -- no memory access
         // fires until a CDB wakeup arrives. --
         @(negedge clk);
-        disp_en0 = 1; disp_is_store0 = 0;
+        disp_en0 = 1; disp_op_type0 = 2'd0;
         disp_base_preg0 = 6'd13; disp_base_ready0 = 0;
         disp_imm0 = 64'd0; disp_funct3_0 = 3'b011;
         disp_dest_preg0 = 6'd21; disp_rob_tag0 = 4'd3;
@@ -219,7 +221,7 @@ module tb_lsq_unit;
         // even though the load's own operand IS ready. The core property
         // this phase's own scope cut exists to guarantee. --
         @(negedge clk);
-        disp_en0 = 1; disp_is_store0 = 1;
+        disp_en0 = 1; disp_op_type0 = 2'd1;
         disp_base_preg0 = 6'd14; disp_base_ready0 = 0;   // NOT ready
         disp_imm0 = 64'd0; disp_funct3_0 = 3'b011;
         disp_store_data_preg0 = 6'd15; disp_store_data_ready0 = 1;
@@ -228,7 +230,7 @@ module tb_lsq_unit;
         @(posedge clk); #1; disp_en0 = 0;   // store dispatch commits
 
         @(negedge clk);
-        disp_en0 = 1; disp_is_store0 = 0;
+        disp_en0 = 1; disp_op_type0 = 2'd0;
         disp_base_preg0 = 6'd16; disp_base_ready0 = 1;   // ready, but queued BEHIND the store
         disp_imm0 = 64'd0; disp_funct3_0 = 3'b011;
         disp_dest_preg0 = 6'd22; disp_rob_tag0 = 4'd5;
@@ -259,6 +261,89 @@ module tb_lsq_unit;
                                 // mem_memRead reads 1 right now, no
                                 // further posedge needed.
         check_bit(mem_memRead, 1'b1, "case5: load THEN issues, strictly after the store ahead of it");
+        @(posedge clk); #1;   // load's own completion/retire settles --
+                                // every OTHER case already does this
+                                // before moving on; case5 itself hadn't,
+                                // a real test bug found by running: case6
+                                // below dispatched into a queue that
+                                // still had this load occupying the head,
+                                // one cycle away from actually retiring.
+
+        // -- Case 6 (Gen6-P1, docs/adr/0052): SC.D -- a real store PLUS a
+        // real destination write (rd=0, success -- this core's own
+        // single-hart simplification means SC always succeeds). Proves
+        // BOTH halves: the memory write actually lands (checked directly
+        // against m_Mem's own backing array, not through a second LSQ
+        // round trip) AND complete_data/complete_is_load are correct.
+        fake_prf[6'd17] = 64'd200;                  // base (address)
+        fake_prf[6'd18] = 64'hAAAA_1111;             // store data
+        @(negedge clk);
+        disp_en0 = 1; disp_op_type0 = 2'd2;   // OP_SC
+        disp_base_preg0 = 6'd17; disp_base_ready0 = 1;
+        disp_imm0 = 64'd0; disp_funct3_0 = 3'b011;
+        disp_store_data_preg0 = 6'd18; disp_store_data_ready0 = 1;
+        disp_dest_preg0 = 6'd23; disp_rob_tag0 = 4'd6;
+        #1;
+        @(posedge clk); #1; disp_en0 = 0;   // dispatch commits
+        @(posedge clk); #1;   // memWrite fires, mem_pending_r latches --
+                                // complete_valid already high right here.
+        check_bit(complete_valid, 1'b1, "case6: sc completes");
+        check_bit(complete_is_load, 1'b1, "case6: sc DOES carry a real destination value (the bug this phase found and fixed before writing this test)");
+        check_val(complete_data, 64'd0, "case6: sc's own rd is always 0 (success) -- single-hart, always succeeds");
+        check_val(complete_dest_preg, 64'd23, "case6: sc's own dest_preg == 23");
+        @(posedge clk); #1;   // retire settles
+        check_val(m_Mem.data_memory[200] | (m_Mem.data_memory[201] << 8) | (m_Mem.data_memory[202] << 16) | (m_Mem.data_memory[203] << 24),
+                   64'hAAAA_1111, "case6: sc's own store really landed in memory (low 32 bits)");
+
+        // -- Case 7: AMOADD.D at the SAME address sc just wrote -- real
+        // 2-phase read-modify-write. complete_data must be the OLD value
+        // (0xAAAA1111, captured before the write, per spec), not the new
+        // one -- a real, easy-to-get-backwards detail this test directly
+        // guards.
+        fake_prf[6'd19] = 64'd200;                  // base (same address)
+        fake_prf[6'd20] = 64'h0000_FFFF;             // rs2 (add operand)
+        @(negedge clk);
+        disp_en0 = 1; disp_op_type0 = 2'd3;   // OP_AMO_RMW
+        disp_amo_op0 = `AMO_F5_ADD;
+        disp_base_preg0 = 6'd19; disp_base_ready0 = 1;
+        disp_imm0 = 64'd0; disp_funct3_0 = 3'b011;
+        disp_store_data_preg0 = 6'd20; disp_store_data_ready0 = 1;
+        disp_dest_preg0 = 6'd24; disp_rob_tag0 = 4'd7;
+        #1;
+        @(posedge clk); #1; disp_en0 = 0;   // dispatch commits (edge D)
+        @(posedge clk); #1;   // edge D+1: phase 1's own READ is sampled by
+                                // DataMemoryBRAM during the (D,D+1)
+                                // interval; mem_pending_r latches 1 AT
+                                // this edge -- the entry hasn't captured
+                                // the old value yet (that happens NEXT
+                                // edge, once mem_readData is actually
+                                // valid), so nothing new to check here
+                                // beyond "still not complete".
+        check_bit(complete_valid, 1'b0, "case7: phase 1 (read) alone does not complete the entry");
+        @(posedge clk); #1;   // edge D+2: mem_readData IS now valid (this
+                                // is where amo_old_value_r actually gets
+                                // captured, amo_need_write_r flips to 1,
+                                // mem_pending_r clears) -- head_ready
+                                // recomputes combinationally off the NEW
+                                // amo_need_write_r during the (D+2,D+3)
+                                // interval that just opened, so mem_memWrite
+                                // is high RIGHT HERE, not one edge earlier
+                                // (a real off-by-one in an EARLIER version
+                                // of this test, found by hand-retracing the
+                                // RTL against the actual failure -- the
+                                // same discipline case2's own header
+                                // comment already used once before).
+        check_bit(mem_memWrite, 1'b1, "case7: phase 2 (write) issues once the old value is actually captured, one edge after phase 1's own read landed");
+        @(posedge clk); #1;   // edge D+3: phase 2's own WRITE is sampled;
+                                // mem_pending_r latches 1 again (this time
+                                // for the write) -- complete_valid is high
+                                // starting the interval this edge opens.
+        check_bit(complete_valid, 1'b1, "case7: phase 2 (write) completes the entry for real");
+        check_val(complete_data, 64'hAAAA_1111, "case7: rd == the OLD value (pre-write), per spec -- not the new sum");
+        check_val(complete_dest_preg, 64'd24, "case7: amoadd's own dest_preg == 24");
+        @(posedge clk); #1;   // retire settles
+        check_val(m_Mem.data_memory[200] | (m_Mem.data_memory[201] << 8) | (m_Mem.data_memory[202] << 16) | (m_Mem.data_memory[203] << 24),
+                   32'hAAAB_1110, "case7: memory now holds old+rs2 == 0xAAAA1111+0x0000FFFF == 0xAAAB1110 (hand-verified independently, not re-derived from the RTL's own arithmetic)");
 
         if (fails == 0) $display("PASS  lsq_unit (%0d checks)", checks);
         else $display("FAIL  lsq_unit (%0d/%0d checks failed)", fails, checks);

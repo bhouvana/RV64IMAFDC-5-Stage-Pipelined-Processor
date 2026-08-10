@@ -472,6 +472,25 @@ check) compared against *persistent* CSR state across that restart;
 fixed with `beq x0,x0,halt` (a genuine working infinite loop). 129/129
 directed suite, zero-warning compile.
 
+**Gen6-P1 (`docs/adr/0052`): general AMO-RMW + SC in OOOCore.v.** First of
+six sub-phases the user chose ("finish the backlog first, then close")
+before Gen6 gets a real closure ADR. Gen6-J only wired LR; SC and the nine
+AMO-RMW ops (ADD/SWAP/XOR/OR/AND/MIN/MAX/MINU/MAXU) would have silently
+mis-executed as plain ALU ops if ever dispatched. `LoadStoreQueue.v`'s own
+dispatch interface generalized (`disp_is_store0` → 2-bit `disp_op_type0` +
+`disp_amo_op0`); AMO-RMW gets a real 2-phase read-modify-write sequence
+(global `amo_need_write_r`/`amo_old_value_r`, matching `mem_pending_r`'s
+own existing single-outstanding-head-only scope), completing with the
+*old* value per spec. SC always succeeds, single-hart (`docs/adr/0038`).
+Found and fixed one real bug before writing any test for it:
+`complete_is_load` naively extended to cover AMO omitted SC entirely,
+re-derived from its true meaning (`!head_is_store`) instead. `OOOCore.v`'s
+own `is_mem_op`/`is_mem_op_1` widened from LR-only to all `isAmo_c` —
+`is_mem_op_1` was caught proactively, by analogy, before it could let
+SC/AMO-RMW wrongly stay dual-issue-eligible. `tb_lsq_unit.v` 31/31 (new
+SC/AMOADD cases); new `tb_ooocore_amo_p1.v` 5/5, proving the decode
+routing end to end. 130/130 directed suite, zero-warning compile.
+
 ---
 
 ## Generation 7 — Vector Processing (v7.0)

@@ -1,4 +1,5 @@
 `default_nettype none
+`include "riscv_defs.vh"
 
 // Generation 6 (out-of-order core), Gen6-E
 // (C:\Users\poorn\.claude\plans\gen6-ooo-core.md). Load/store queue: a
@@ -54,19 +55,33 @@ module LoadStoreQueue #(
     // Dispatch, up to 2/cycle (matches every other Gen6-* module's own
     // dual-issue-capable shape; only slot0 driven until Gen6-K widens
     // the whole core).
+    //
+    // Gen6-P1 (docs/adr/0052): disp_is_store0 (1-bit) replaced by
+    // disp_op_type0 (2-bit: OP_LOAD/OP_STORE/OP_SC/OP_AMO_RMW, see the
+    // localparams below) -- a real, load-bearing interface change, not
+    // a cosmetic rename. SC/AMO-RMW both need a real destination
+    // register on what used to be a pure "is this a store" boolean, and
+    // AMO-RMW specifically needs a genuine 2-phase read-then-write
+    // sequence (see amo_need_write_r's own section below) neither a
+    // plain load nor a plain store ever needed. disp_amo_op0 (funct5,
+    // riscv_defs.vh's own AMO_F5_* encoding reused directly rather than
+    // inventing a new one) selects which RMW operation for OP_AMO_RMW
+    // entries -- ignored for the other 3 op types.
     input  wire                    disp_en0,
-    input  wire                    disp_is_store0,
+    input  wire [1:0]              disp_op_type0,
+    input  wire [4:0]              disp_amo_op0,
     input  wire [PREG_BITS-1:0]    disp_base_preg0,
     input  wire                    disp_base_ready0,
     input  wire [XLEN-1:0]         disp_imm0,
     input  wire [2:0]              disp_funct3_0,
     input  wire [PREG_BITS-1:0]    disp_store_data_preg0,
     input  wire                    disp_store_data_ready0,
-    input  wire [PREG_BITS-1:0]    disp_dest_preg0,     // loads only
+    input  wire [PREG_BITS-1:0]    disp_dest_preg0,     // loads/sc/amo_rmw
     input  wire [ROB_IDX_BITS-1:0] disp_rob_tag0,
 
     input  wire                    disp_en1,
-    input  wire                    disp_is_store1,
+    input  wire [1:0]              disp_op_type1,
+    input  wire [4:0]              disp_amo_op1,
     input  wire [PREG_BITS-1:0]    disp_base_preg1,
     input  wire                    disp_base_ready1,
     input  wire [XLEN-1:0]         disp_imm1,
@@ -118,8 +133,17 @@ module LoadStoreQueue #(
     output wire                    lsq_full
 );
 
+// Gen6-P1 (docs/adr/0052): the 4 real op types this queue now handles.
+// OP_LOAD/OP_STORE are exactly what they always were; OP_SC and
+// OP_AMO_RMW are new.
+localparam OP_LOAD    = 2'd0;
+localparam OP_STORE   = 2'd1;
+localparam OP_SC      = 2'd2;
+localparam OP_AMO_RMW = 2'd3;
+
 reg                    e_valid          [0:LSQ_ENTRIES-1];
-reg                    e_is_store       [0:LSQ_ENTRIES-1];
+reg  [1:0]             e_op_type        [0:LSQ_ENTRIES-1];
+reg  [4:0]             e_amo_op         [0:LSQ_ENTRIES-1];
 reg [PREG_BITS-1:0]    e_base_preg      [0:LSQ_ENTRIES-1];
 reg                    e_base_ready     [0:LSQ_ENTRIES-1];
 reg [XLEN-1:0]         e_imm            [0:LSQ_ENTRIES-1];
@@ -134,6 +158,14 @@ reg [LSQ_IDX_BITS-1:0] head_r, tail_r;
 reg                    mem_pending_r;   // 1 = a memRead/memWrite was
                                           // issued last cycle; this cycle
                                           // completes it.
+// Gen6-P1: OP_AMO_RMW's own real 2-phase sequencing -- read the old
+// value first (phase 1, amo_need_write_r==0), capture it, compute
+// new = old OP rs2, then issue the write (phase 2, amo_need_write_r==1)
+// before finally completing (rd = the captured OLD value, per spec).
+// Global, not per-entry, same "only the head is ever in flight" scope
+// this whole module already established for mem_pending_r itself.
+reg                    amo_need_write_r;
+reg [XLEN-1:0]         amo_old_value_r;
 
 function [LSQ_IDX_BITS-1:0] wrap_add;
     input [LSQ_IDX_BITS-1:0] base;
@@ -157,22 +189,90 @@ wire head_present = !lsq_empty && e_valid[head_r];
 assign head_base_preg       = e_base_preg[head_r];
 assign head_store_data_preg = e_store_data_preg[head_r];
 
+// Gen6-P1: op-type classification of the head entry -- head_needs_data
+// is true for STORE/SC/AMO_RMW (all three consume the store-data/rs2
+// operand: a real store writes it directly, SC writes it directly too
+// (just with a real destination alongside), AMO_RMW uses it as the RMW
+// operand); head_wants_read/head_wants_write pick which memory
+// direction THIS cycle needs, accounting for AMO_RMW's own 2-phase
+// sequence via amo_need_write_r.
+wire head_is_load  = (e_op_type[head_r] == OP_LOAD);
+wire head_is_store = (e_op_type[head_r] == OP_STORE);
+wire head_is_sc    = (e_op_type[head_r] == OP_SC);
+wire head_is_amo   = (e_op_type[head_r] == OP_AMO_RMW);
+
+wire head_needs_data  = head_is_store || head_is_sc || head_is_amo;
+wire head_wants_read  = head_is_load || (head_is_amo && !amo_need_write_r);
+wire head_wants_write = head_is_store || head_is_sc || (head_is_amo && amo_need_write_r);
+
 wire head_ready = head_present && !mem_pending_r
                  && e_base_ready[head_r]
-                 && (!e_is_store[head_r] || e_store_data_ready[head_r]);
+                 && (!head_needs_data || e_store_data_ready[head_r]);
 
 wire [XLEN-1:0] head_addr = mem_base_value + e_imm[head_r];
 
-assign mem_memRead   = head_ready && !e_is_store[head_r];
-assign mem_memWrite  = head_ready && e_is_store[head_r];
+// Gen6-P1: the real read-modify-write computation for OP_AMO_RMW's own
+// phase-2 write -- amo_old_value_r was captured when phase 1's own read
+// completed (see the always block below); mem_store_data_value is rs2's
+// own value, read through the SAME PRF port a plain store's own data
+// already uses (head_store_data_preg stays constant across both phases,
+// since head_r itself doesn't advance until the entry is FULLY done).
+// funct5 encoding reused directly from riscv_defs.vh's own AMO_F5_*
+// (docs/adr/0038's own established values) -- no new encoding invented.
+// Continuous assign with a ternary chain, NOT a procedural always+case
+// reading e_amo_op[head_r] -- Icarus's own "@* is sensitive to all N
+// words in array" warning for a variable-indexed array read inside a
+// procedural block (the same PhysicalRegisterFile.v/Mailbox.v finding
+// this whole project already established); a plain assign avoids it.
+wire signed [XLEN-1:0] amo_old_signed = amo_old_value_r;
+wire signed [XLEN-1:0] amo_rs2_signed = mem_store_data_value;
+wire [4:0] head_amo_op = e_amo_op[head_r];
+wire [XLEN-1:0] amo_new_value =
+    (head_amo_op == `AMO_F5_ADD)  ? (amo_old_value_r + mem_store_data_value) :
+    (head_amo_op == `AMO_F5_SWAP) ? mem_store_data_value :
+    (head_amo_op == `AMO_F5_XOR)  ? (amo_old_value_r ^ mem_store_data_value) :
+    (head_amo_op == `AMO_F5_OR)   ? (amo_old_value_r | mem_store_data_value) :
+    (head_amo_op == `AMO_F5_AND)  ? (amo_old_value_r & mem_store_data_value) :
+    (head_amo_op == `AMO_F5_MIN)  ? ((amo_old_signed < amo_rs2_signed) ? amo_old_value_r : mem_store_data_value) :
+    (head_amo_op == `AMO_F5_MAX)  ? ((amo_old_signed > amo_rs2_signed) ? amo_old_value_r : mem_store_data_value) :
+    (head_amo_op == `AMO_F5_MINU) ? ((amo_old_value_r < mem_store_data_value) ? amo_old_value_r : mem_store_data_value) :
+    (head_amo_op == `AMO_F5_MAXU) ? ((amo_old_value_r > mem_store_data_value) ? amo_old_value_r : mem_store_data_value) :
+    mem_store_data_value;   // unreached for a valid encoding
+
+assign mem_memRead   = head_ready && head_wants_read;
+assign mem_memWrite  = head_ready && head_wants_write;
 assign mem_address   = head_addr;
-assign mem_writeData = mem_store_data_value;
+// SC writes rs2's own raw value directly (a real store, just with a
+// destination too); AMO_RMW's own phase-2 write uses the computed RMW
+// result instead.
+assign mem_writeData = (head_is_amo && amo_need_write_r) ? amo_new_value : mem_store_data_value;
 assign mem_funct3    = e_funct3[head_r];
 
-assign complete_valid      = mem_pending_r;
-assign complete_is_load    = !e_is_store[head_r];
+// Gen6-P1: complete_valid excludes AMO_RMW's own phase-1-just-finished
+// moment (mem_pending_r dropping after the READ, not yet after the
+// WRITE) -- see the always block below for where phase 1 -> phase 2
+// actually transitions instead of retiring.
+wire amo_phase1_just_finished = mem_pending_r && head_is_amo && !amo_need_write_r;
+assign complete_valid      = mem_pending_r && !amo_phase1_just_finished;
+// Gen6-P1: generalized from the original `!e_is_store[head_r]` --
+// still exactly "does this completion carry a real destination value",
+// just now true for LOAD/SC/AMO_RMW and false only for a plain STORE
+// (the same 3-vs-1 split needs_dest itself already makes at dispatch
+// time). A real bug caught before writing any test for it: an earlier
+// version of this line was `head_is_load || head_is_amo`, silently
+// missing SC -- SC's own real destination write (rd=0) would never
+// have reached the PRF/ROB at all, since PRF's/RS_ALU's own CDB-write/
+// snoop wiring both gate on this flag, the same "orphaned preg, never
+// completes" deadlock shape docs/adr/0049 already found and fixed once
+// for FreeList.v.
+assign complete_is_load    = !head_is_store;
 assign complete_dest_preg  = e_dest_preg[head_r];
-assign complete_data       = mem_readData;
+// SC always succeeds (single-hart, no real contention possible -- same
+// spec-legal simplification docs/adr/0038's own LR/SC header already
+// established for LR) -- rd = 0 unconditionally. AMO_RMW's own rd is
+// the OLD value (captured before the write, per spec); a plain load's
+// rd is whatever memory returned this cycle.
+assign complete_data       = head_is_sc ? {XLEN{1'b0}} : (head_is_amo ? amo_old_value_r : mem_readData);
 assign complete_rob_tag    = e_rob_tag[head_r];
 
 integer reset_i;
@@ -184,39 +284,60 @@ always @(posedge clk) begin
         head_r        <= {LSQ_IDX_BITS{1'b0}};
         tail_r        <= {LSQ_IDX_BITS{1'b0}};
         mem_pending_r <= 1'b0;
+        amo_need_write_r <= 1'b0;
     end
     else begin
         // Wakeup: any entry's not-yet-ready base/store-data operand
         // matching a live CDB broadcast becomes ready next cycle -- same
         // shape as ReservationStation.v's own wakeup, applied to every
         // entry (not just the head) so operands can become ready while
-        // still queued behind an older entry.
+        // still queued behind an older entry. Gen6-P1: STORE/SC/AMO_RMW
+        // all need the store-data/rs2 operand (e_op_type != OP_LOAD),
+        // not just STORE.
         for (reset_i = 0; reset_i < LSQ_ENTRIES; reset_i = reset_i + 1) begin
             if (e_valid[reset_i] && !e_base_ready[reset_i]
                 && ((cdb_valid0 && cdb_preg0 == e_base_preg[reset_i]) || (cdb_valid1 && cdb_preg1 == e_base_preg[reset_i]) || (cdb_valid2 && cdb_preg2 == e_base_preg[reset_i])))
                 e_base_ready[reset_i] <= 1'b1;
-            if (e_valid[reset_i] && e_is_store[reset_i] && !e_store_data_ready[reset_i]
+            if (e_valid[reset_i] && (e_op_type[reset_i] != OP_LOAD) && !e_store_data_ready[reset_i]
                 && ((cdb_valid0 && cdb_preg0 == e_store_data_preg[reset_i]) || (cdb_valid1 && cdb_preg1 == e_store_data_preg[reset_i]) || (cdb_valid2 && cdb_preg2 == e_store_data_preg[reset_i])))
                 e_store_data_ready[reset_i] <= 1'b1;
         end
 
         // Memory issue/complete, head entry only. complete_valid (==
-        // mem_pending_r, declared above) is this cycle's own retire
-        // signal -- reused directly in the single count_r update at the
-        // end of this block instead of a second, separately-maintained
-        // copy of the same condition.
+        // mem_pending_r && !amo_phase1_just_finished, declared above) is
+        // this cycle's own retire signal -- reused directly in the
+        // single count_r update at the end of this block instead of a
+        // second, separately-maintained copy of the same condition.
+        // Gen6-P1: OP_AMO_RMW's own phase 1 (read) completing does NOT
+        // retire the entry -- it captures the old value and flips into
+        // phase 2 (write) instead, re-triggering head_ready/mem_pending_r
+        // for the SAME entry.
         if (head_ready)
             mem_pending_r <= 1'b1;
         else if (mem_pending_r) begin
-            mem_pending_r   <= 1'b0;
-            e_valid[head_r] <= 1'b0;
-            head_r          <= wrap_add(head_r, 2'd1);
+            mem_pending_r <= 1'b0;
+            if (head_is_amo && !amo_need_write_r) begin
+                amo_old_value_r  <= mem_readData;
+                amo_need_write_r <= 1'b1;
+                // e_valid[head_r]/head_r deliberately untouched -- this
+                // entry isn't done yet, phase 2 (the write) still needs
+                // to happen before it can retire.
+            end
+            else begin
+                e_valid[head_r]   <= 1'b0;
+                head_r            <= wrap_add(head_r, 2'd1);
+                amo_need_write_r  <= 1'b0;   // reset for whichever entry
+                                               // is head next (harmless
+                                               // no-op if that entry
+                                               // isn't itself an AMO_RMW)
+            end
         end
 
         // Dispatch: append at the tail.
         if (disp_en0) begin
             e_valid[tail_r]             <= 1'b1;
-            e_is_store[tail_r]          <= disp_is_store0;
+            e_op_type[tail_r]           <= disp_op_type0;
+            e_amo_op[tail_r]            <= disp_amo_op0;
             e_base_preg[tail_r]         <= disp_base_preg0;
             e_base_ready[tail_r]        <= disp_base_ready0;
             e_imm[tail_r]               <= disp_imm0;
@@ -228,7 +349,8 @@ always @(posedge clk) begin
         end
         if (disp_en1) begin
             e_valid[tail1_idx]             <= 1'b1;
-            e_is_store[tail1_idx]          <= disp_is_store1;
+            e_op_type[tail1_idx]           <= disp_op_type1;
+            e_amo_op[tail1_idx]            <= disp_amo_op1;
             e_base_preg[tail1_idx]         <= disp_base_preg1;
             e_base_ready[tail1_idx]        <= disp_base_ready1;
             e_imm[tail1_idx]               <= disp_imm1;

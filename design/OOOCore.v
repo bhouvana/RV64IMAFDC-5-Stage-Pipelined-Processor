@@ -172,20 +172,30 @@ wire needs_dest = regWrite_c && (rd_areg != 5'd0);
 // immediate field -- those bits are aq/rl instead), needing no extra
 // forcing at the dispatch site.
 //
-// `# ponytail`-tagged scope cut: only LR is real this phase. SC.W/SC.D
-// need a store PLUS a hardcoded rd=0 success write that doesn't come
-// from memory at all (this LSQ has no concept of "a store that also
-// writes an unrelated integer destination") -- a real LSQ interface
-// change. The general AMOADD/AMOSWAP/etc. read-modify-write family needs
-// real 2-phase sequencing (read old value -> compute new -> write new),
-// its own in-flight state machine comparable to Divider.v's, interleaving
-// an LSQ round trip with an ALU computation. Both are real, flagged
-// future work -- this core's own single-hart simplification (every AMO
-// is trivially atomic, no other hart can ever contend, ADR 0038's own
-// finding) still applies whenever they're eventually built, same as it
-// already does for LR here.
-wire is_amo_lr = isAmo_c && (funct7_c[6:2] == `AMO_F5_LR);
-wire is_mem_op  = memRead_c || memWrite_c || is_amo_lr;
+// Gen6-P1 (docs/adr/0052): SC.W/SC.D and the general AMOADD/AMOSWAP/
+// AMOXOR/AMOOR/AMOAND/AMOMIN/AMOMAX/AMOMINU/AMOMAXU read-modify-write
+// family are now real too -- LoadStoreQueue.v gained the real interface
+// change (disp_op_type0, OP_SC/OP_AMO_RMW) and 2-phase sequencing
+// (read old value -> compute new -> write new) this comment's own
+// prior-phase self documented as needed. This core's own single-hart
+// simplification (every AMO is trivially atomic, no other hart can
+// ever contend, docs/adr/0038's own finding) still applies -- LR/SC/
+// AMO-RMW all route through the SAME LoadStoreQueue.v dispatch path,
+// none needing anything RS_ALU-side beyond the existing Gen6-O "force
+// A" mechanism's own unrelated use for other instruction classes.
+wire is_amo_lr  = isAmo_c && (funct7_c[6:2] == `AMO_F5_LR);
+wire is_amo_sc  = isAmo_c && (funct7_c[6:2] == `AMO_F5_SC);
+wire is_amo_rmw = isAmo_c && !is_amo_lr && !is_amo_sc;
+wire is_mem_op  = memRead_c || memWrite_c || isAmo_c;
+// LoadStoreQueue.v's own OP_LOAD/OP_STORE/OP_SC/OP_AMO_RMW localparams
+// (2'd0/1/2/3) reused as plain literals here -- a cross-module
+// parameter reference isn't appropriate for a port-driving value; must
+// stay in sync with LoadStoreQueue.v's own definitions if those ever
+// change.
+wire [1:0] lsq_op_type0 = is_amo_lr  ? 2'd0 :
+                          is_amo_sc  ? 2'd2 :
+                          is_amo_rmw ? 2'd3 :
+                          memWrite_c ? 2'd1 : 2'd0;
 // Gen6-F: DIV/DIVU/REM/REMU route to their own reservation station +
 // Divider.v, NOT the single-cycle RS_ALU/ALU.v path -- mirrors
 // riscvpipeline.v's own isDivRem detection exactly (same ALUCtl
@@ -482,8 +492,13 @@ wire [XLEN-1:0] imm_d_1;
 ImmGen #(.Width(XLEN)) m_ImmGen_1(.inst(inst_full1), .imm(imm_d_1));
 
 wire needs_dest_1  = regWrite_c_1 && (rd_areg_1 != 5'd0);
+// Gen6-P1: widened to isAmo_c_1 (was is_amo_lr_1 alone) -- SC/AMO-RMW
+// need the same dual-issue exclusion LR already had, or slot1_is_plain_alu
+// would incorrectly stay true for an SC/AMO-RMW in slot1 (this generic
+// flag only needs to gate dual-issue eligibility; slot1 never actually
+// dispatches into the LSQ regardless, see try_dual_issue's own scope).
 wire is_amo_lr_1   = isAmo_c_1 && (funct7_c_1[6:2] == `AMO_F5_LR);
-wire is_mem_op_1   = memRead_c_1 || memWrite_c_1 || is_amo_lr_1;
+wire is_mem_op_1   = memRead_c_1 || memWrite_c_1 || isAmo_c_1;
 wire is_div_op_1   = (ALUCtl_d_1 == `ALUCTL_DIV) || (ALUCtl_d_1 == `ALUCTL_DIVU) ||
                      (ALUCtl_d_1 == `ALUCTL_REM) || (ALUCtl_d_1 == `ALUCTL_REMU);
 wire is_branch_1   = branch_c_1;
@@ -999,13 +1014,13 @@ wire [$clog2(8+1)-1:0] lsq_count;   // debug visibility only
 
 LoadStoreQueue #(.XLEN(XLEN), .LSQ_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS)) m_LSQ(
     .clk(clk), .rst(rst),
-    .disp_en0(do_dispatch && is_mem_op), .disp_is_store0(memWrite_c),
+    .disp_en0(do_dispatch && is_mem_op), .disp_op_type0(lsq_op_type0), .disp_amo_op0(funct7_c[6:2]),
     .disp_base_preg0(rat_rpreg0), .disp_base_ready0(prf_rvalid0),
     .disp_imm0(imm_d), .disp_funct3_0(funct3_c),
     .disp_store_data_preg0(rat_rpreg1), .disp_store_data_ready0(prf_rvalid1),
     .disp_dest_preg0(needs_dest ? fl_alloc_preg0 : {PREG_BITS{1'b0}}),
     .disp_rob_tag0(rob_alloc_tag0),
-    .disp_en1(1'b0), .disp_is_store1(1'b0),
+    .disp_en1(1'b0), .disp_op_type1(2'd0), .disp_amo_op1(5'd0),
     .disp_base_preg1({PREG_BITS{1'b0}}), .disp_base_ready1(1'b0),
     .disp_imm1({XLEN{1'b0}}), .disp_funct3_1(3'd0),
     .disp_store_data_preg1({PREG_BITS{1'b0}}), .disp_store_data_ready1(1'b0),
