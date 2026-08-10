@@ -17,7 +17,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from iss import ISS  # noqa: E402
-from random_gen import gen_program  # noqa: E402
+from random_gen import gen_program, OOO_TRAILER_NOP_COUNT  # noqa: E402
 
 # Phase Q (docs/adr/0033-memory-capacity-scale-up-phase-q.md): a fixed 64KB
 # window every constrained-random program's real touched range provably
@@ -49,6 +49,110 @@ def load_words(mem_path):
             break
         words.append(int(b[3] + b[2] + b[1] + b[0], 2))
     return words
+
+
+def run_one_ooo(seed, n_instrs, work_dir, iverilog_bin, mem_size=256, xlen=64):
+    """Generation 6, Gen6-L. OOOCore.v's own cross-check path -- a real,
+    much narrower cousin of run_one() below: gen_program(ooo=True) already
+    restricts the instruction mix to what OOOCore.v actually implements
+    correctly (see that function's own docstring), so no hazard_strategy/
+    pipeline_profile/branch_predictor/cache_mode/... knobs apply here (none
+    of those concepts exist for OOOCore.v yet) -- a separate function
+    instead of threading a maze of ooo-only branches through run_one()
+    itself, which would hurt that function's own readability far more than
+    this real, if partial, duplication does.
+
+    Uses sim/tb/dump_regs_ooocore_template.v's own retirement-counting
+    termination (see that file's own header for why the fixed-cycle
+    convention every other template uses doesn't work here) -- the target
+    is real_n_instrs (asm.py's own reported count) minus
+    OOO_TRAILER_NOP_COUNT (gen_program's own ooo-mode trailer, never part
+    of what needs to retire for the comparison below to be meaningful).
+    """
+    prog_s = os.path.join(work_dir, f"o{seed}.s")
+    prog_mem = os.path.join(work_dir, f"o{seed}.mem")
+    text, _ = gen_program(seed, n_instrs, mem_size=mem_size, xlen=xlen, ooo=True)
+    with open(prog_s, "w") as f:
+        f.write(text)
+
+    asm_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "asm.py")
+    r = subprocess.run([sys.executable, asm_py, prog_s, "-o", prog_mem,
+                         "--size", str(mem_size), "--xlen", str(xlen)],
+                        capture_output=True, text=True)
+    if r.returncode != 0:
+        return False, f"assembler error: {r.stderr.strip()}"
+
+    m = re.search(r":\s*(\d+)\s+instructions", r.stdout)
+    if m is None:
+        return False, f"couldn't parse asm.py's own instruction count: {r.stdout.strip()}"
+    real_n_instrs = int(m.group(1))
+    target_retired = real_n_instrs - OOO_TRAILER_NOP_COUNT
+    if target_retired <= 0:
+        return False, f"real_n_instrs={real_n_instrs} <= OOO_TRAILER_NOP_COUNT={OOO_TRAILER_NOP_COUNT}"
+
+    words = load_words(prog_mem)
+    iss = ISS(mem_size=mem_size, xlen=xlen)
+    try:
+        iss.run(words, max_steps=5000)
+    except Exception as e:  # noqa: BLE001
+        return False, f"ISS error: {e}"
+
+    # Same generous per-instruction cycle budget philosophy as run_one()'s
+    # own max_time, just as a pure safety timeout here (the real
+    # termination is retirement counting, see above) -- if this fires,
+    # dump_regs_ooocore_template.v's own $display reports it explicitly as
+    # a TIMEOUT rather than silently comparing partial state.
+    max_time = (real_n_instrs * 70 + 200) * 10
+    dump_v = os.path.join(work_dir, f"o{seed}.v")
+    out_path = os.path.join(work_dir, f"o{seed}.out").replace("\\", "/")
+    init_file_rel = os.path.relpath(prog_mem, start=os.getcwd()).replace("\\", "/")
+    template = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tb", "dump_regs_ooocore_template.v")
+    with open(template) as f:
+        tpl = f.read()
+    tpl = (tpl.replace("__INIT_FILE__", init_file_rel).replace("__MAX_TIME__", str(max_time))
+              .replace("__OUT_FILE__", out_path).replace("__MEM_SIZE__", str(mem_size))
+              .replace("__XLEN__", str(xlen)).replace("__TARGET_RETIRED__", str(target_retired)))
+    with open(dump_v, "w") as f:
+        f.write(tpl)
+
+    vvp_path = os.path.join(work_dir, f"o{seed}.vvp")
+    iverilog_exe = os.path.join(iverilog_bin, "iverilog.exe") if iverilog_bin else "iverilog"
+    vvp_exe = os.path.join(iverilog_bin, "vvp.exe") if iverilog_bin else "vvp"
+    r = subprocess.run([iverilog_exe, "-g2005", "-I", "design", "-o", vvp_path, dump_v],
+                        capture_output=True, text=True)
+    if r.returncode != 0:
+        return False, f"compile error: {r.stderr.strip()[:500]}"
+    r = subprocess.run([vvp_exe, vvp_path], capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(out_path):
+        return False, f"simulation error: {r.stdout.strip()[:500]} {r.stderr.strip()[:500]}"
+    if "TIMEOUT" in r.stdout:
+        return False, f"RTL never reached target retirement count: {r.stdout.strip()[:300]}"
+
+    reg_mask = (1 << xlen) - 1
+    with open(out_path) as f:
+        vals = [int(l.strip()) & reg_mask for l in f if l.strip()]
+    # Layout: 32 int regs, mem_size mem bytes, 32 float regs -- no
+    # fflags/frm (dump_regs_ooocore_template.v's own header explains why:
+    # OOOCore.v's own CSR.v instance never latches fflags in this phase's
+    # supported subset, nothing real to compare there yet).
+    rtl_regs = vals[:32]
+    rtl_mem = vals[32:32 + mem_size]
+    rtl_fregs = vals[32 + mem_size:32 + mem_size + 32]
+
+    mismatches = []
+    for i in range(32):
+        if rtl_regs[i] != iss.regs[i]:
+            mismatches.append(f"x{i}: RTL={rtl_regs[i]:#x} ISS={iss.regs[i]:#x}")
+    for i in range(mem_size):
+        if rtl_mem[i] != iss.mem[i]:
+            mismatches.append(f"mem[{i}]: RTL={rtl_mem[i]:#x} ISS={iss.mem[i]:#x}")
+    for i in range(32):
+        if rtl_fregs[i] != iss.fregs[i]:
+            mismatches.append(f"f{i}: RTL={rtl_fregs[i]:#010x} ISS={iss.fregs[i]:#010x}")
+
+    if mismatches:
+        return False, "; ".join(mismatches[:8]) + (" ..." if len(mismatches) > 8 else "")
+    return True, None
 
 
 def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0, pipeline_profile=0,
@@ -310,7 +414,50 @@ def main():
     ap.add_argument("--xlen", type=int, default=32, choices=[32, 64],
                      help="riscvpipeline.v's XLEN (Generation 2, docs/adr/0028-rv64-migration-"
                           "phase-m.md): 32=default/bit-exact, 64=RV64 (Sv39 MMU support since Phase P3)")
+    ap.add_argument("--ooo", action="store_true",
+                     help="Gen6-L: cross-check OOOCore.v instead of PIPELINED, restricted to its own "
+                          "actually-implemented instruction subset (random_gen.py's gen_program(ooo=True), "
+                          "see that function's own docstring). Mutually exclusive with every PIPELINED-only "
+                          "flag above (hazard-strategy/pipeline-profile/branch-predictor/cache-mode/mmu/"
+                          "interrupt/... -- none of those concepts exist for OOOCore.v yet)")
     args = ap.parse_args()
+
+    if args.ooo and (args.interrupt or args.mmu):
+        print("error: --ooo is mutually exclusive with --interrupt/--mmu (Gen6-L scope -- "
+              "OOOCore.v implements neither yet)", file=sys.stderr)
+        sys.exit(2)
+
+    if args.ooo:
+        # Gen6-L: same "generous default, real budget check happens inside
+        # gen_program itself" philosophy as the non-ooo defaults below --
+        # ooo mode's own seed-prefix costs more instructions (no_lui, see
+        # random_gen.py's own docstring) and its trailer is 32 nops instead
+        # of 2, so 128 (the non-ooo default) is too tight for anything but
+        # a tiny --n-instrs.
+        mem_size = args.mem_size if args.mem_size is not None else 512
+        passed = 0
+        failed = 0
+        with tempfile.TemporaryDirectory() as work_dir:
+            for i in range(args.count):
+                seed = args.seed_start + i
+                ok, msg = run_one_ooo(seed, args.n_instrs, work_dir, args.iverilog_dir,
+                                       mem_size=mem_size, xlen=args.xlen)
+                if ok:
+                    passed += 1
+                    print(f"pass  seed={seed}")
+                else:
+                    failed += 1
+                    print(f"FAIL  seed={seed}: {msg}")
+                    if args.keep_failures:
+                        keep_dir = os.path.join(os.getcwd(), f"random_fail_{seed}")
+                        os.makedirs(keep_dir, exist_ok=True)
+                        for fn in (f"o{seed}.s", f"o{seed}.mem", f"o{seed}.v"):
+                            src = os.path.join(work_dir, fn)
+                            if os.path.exists(src):
+                                with open(src, "rb") as sf, open(os.path.join(keep_dir, fn), "wb") as df:
+                                    df.write(sf.read())
+        print(f"\n=== ooo random cross-check: {passed}/{passed+failed} programs matched ISS reference ===")
+        sys.exit(0 if failed == 0 else 1)
 
     if args.interrupt and args.mmu:
         print("error: --interrupt and --mmu are mutually exclusive in this generator (Phase F7 scope)", file=sys.stderr)

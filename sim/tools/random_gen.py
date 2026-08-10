@@ -78,6 +78,13 @@ FCSR_ADDR = {"fflags": "0x1", "frm": "0x2", "fcsr": "0x3"}
 # is only 128 bytes (32 instructions) end to end, shared with the leading
 # base-pointer setup, the trailing halt loop, and n_instrs of actual random
 # instructions -- see gen_program's own budget comment.
+# Gen6-L: nop-padding trailer length for ooo mode -- see gen_program's own
+# trailer comment for why, and run_random_tests.py's own --ooo path (which
+# imports this to compute the real-instruction-count target for
+# sim/tb/dump_regs_ooocore_template.v's retirement-counting termination,
+# excluding this padding).
+OOO_TRAILER_NOP_COUNT = 32
+
 FLOAT_SEED_BITS = [
     0x00000000,  # +0.0
     0x3F800000,  # 1.0
@@ -92,7 +99,7 @@ R_TYPE_W = ["addw", "subw", "sllw", "srlw", "sraw", "mulw", "divw", "divuw", "re
 I_TYPE_W = ["addiw", "slliw", "srliw", "sraiw"]
 
 
-def const64_to_reg_instrs(rd, rd_scratch, bits64):
+def const64_to_reg_instrs(rd, rd_scratch, bits64, no_lui=False):
     """Generation 2 (Phase M15, docs/adr/0028-rv64-migration-phase-m.md).
     Builds an arbitrary 64-bit constant into `rd`, using `rd_scratch` as a
     second, clobbered register. Splits into hi32/lo32, builds each half via
@@ -102,12 +109,14 @@ def const64_to_reg_instrs(rd, rd_scratch, bits64):
     32 bits entirely and zero-fills the new low 32; for the lo half, a
     slli-then-srli-by-32 pair zero-extends it the same way before the two
     halves are OR'd together (their bit ranges never overlap, so OR and ADD
-    are equivalent here -- OR makes that non-overlap explicit)."""
+    are equivalent here -- OR makes that non-overlap explicit). no_lui
+    (Gen6-L): forwarded to both const_to_reg_instrs calls -- see that
+    function's own docstring/comment."""
     hi32 = (bits64 >> 32) & 0xFFFFFFFF
     lo32 = bits64 & 0xFFFFFFFF
-    lines = const_to_reg_instrs(rd, hi32)
+    lines = const_to_reg_instrs(rd, hi32, no_lui=no_lui)
     lines.append(f"slli x{rd}, x{rd}, 32")
-    lines.extend(const_to_reg_instrs(rd_scratch, lo32))
+    lines.extend(const_to_reg_instrs(rd_scratch, lo32, no_lui=no_lui))
     lines.append(f"slli x{rd_scratch}, x{rd_scratch}, 32")
     lines.append(f"srli x{rd_scratch}, x{rd_scratch}, 32")
     lines.append(f"or x{rd}, x{rd}, x{rd_scratch}")
@@ -141,13 +150,39 @@ for _v in (0, 0xFFFFFFFFFFFFFFFF, 0x8000000000000000, 0x7FFFFFFFFFFFFFFF,
     _self_check_const64(_v)
 
 
-def const_to_reg_instrs(rd, bits32):
+def const_to_reg_instrs(rd, bits32, no_lui=False):
     # Standard "build an arbitrary 32-bit constant" idiom: lui supplies the
     # upper 20 bits, addi's sign-extended 12-bit immediate corrects the
     # lower 12 -- when the low 12 bits' own top bit is set, addi would
     # sign-extend them negative, so the lui half is pre-incremented by 1 to
     # compensate (the classic lui+addi construction every RISC-V assembler
     # uses for li).
+    #
+    # no_lui (Gen6-L): design/OOOCore.v never wires lui_c into any
+    # operand-A-forced-to-0 mux the way design/riscvpipeline.v's own
+    # execute stage does (design/riscvpipeline.v:1395-1398's own comment
+    # documents that forcing) -- lui genuinely computes garbage-register +
+    # imm instead of 0+imm there, confirmed by direct code read before
+    # this phase touched anything. This builds the same constant from
+    # three 11-bit chunks using only addi/slli (both real, correctly-
+    # executed OOOCore.v ops): addi loads each chunk as a small POSITIVE
+    # immediate (0..2047, never sign-extension-ambiguous, unlike the lo-12
+    # correction above), slli shifts the accumulator left 11 bits between
+    # chunks. 3 chunks x 11 bits = 33 >= 32, so the top chunk only ever
+    # carries 10 significant bits -- never overflows addi's own signed
+    # 12-bit range either.
+    if no_lui:
+        bits32 &= 0xFFFFFFFF
+        chunk_bits = 11
+        n_chunks = 3
+        top_shift = (n_chunks - 1) * chunk_bits
+        chunks = [(bits32 >> (top_shift - i * chunk_bits)) & ((1 << chunk_bits) - 1) for i in range(n_chunks)]
+        lines = [f"addi x{rd}, x0, {chunks[0]}"]
+        for c in chunks[1:]:
+            lines.append(f"slli x{rd}, x{rd}, {chunk_bits}")
+            if c:
+                lines.append(f"addi x{rd}, x{rd}, {c}")
+        return lines
     lo = bits32 & 0xFFF
     hi = (bits32 >> 12) & 0xFFFFF
     if lo & 0x800:
@@ -159,8 +194,60 @@ def const_to_reg_instrs(rd, bits32):
     return lines
 
 
-def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, mmu=False, xlen=32):
-    """xlen (Generation 2, docs/adr/0028-rv64-migration-phase-m.md): 32
+def _self_check_const32_no_lui(bits32):
+    # Same "replay the exact instruction sequence" rigor as
+    # _self_check_const64 below, for the new no_lui construction.
+    MASK32 = (1 << 32) - 1
+
+    def sext32(v):
+        v &= MASK32
+        return v - (1 << 32) if v & 0x80000000 else v
+
+    lines = const_to_reg_instrs(0, bits32, no_lui=True)
+    v = sext32(int(lines[0].rsplit(",", 1)[1]))  # addi x,x0,chunk0 -- sign-extends, but chunk0 < 1024, always positive
+    for ln in lines[1:]:
+        if ln.strip().startswith("slli"):
+            v = (v << 11) & MASK32
+        else:  # addi x,x,chunk -- chunk always 0..2047, positive, never sign-extends
+            v = (v + int(ln.rsplit(",", 1)[1])) & MASK32
+    assert v == (bits32 & MASK32), f"const_to_reg_instrs(no_lui=True) self-check failed: got {v:#x}, expected {bits32 & MASK32:#x}"
+
+
+for _v in (0, 0xFFFFFFFF, 0x80000000, 0x7FFFFFFF, 0x12345678, 0xDEADBEEF, 1, 0x800):
+    _self_check_const32_no_lui(_v)
+
+
+def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, mmu=False, xlen=32, ooo=False):
+    """ooo (Generation 6, Gen6-L): restricts the generated instruction mix
+    to OOOCore.v's own actually-implemented subset, confirmed by direct
+    code read (not assumed) before this phase touched anything: jump_c/
+    jalr_c/lui_c/auipc_c/isCsr_c are decoded (design/Control.v) but never
+    consumed anywhere in design/OOOCore.v -- jal/jalr/lui/auipc/csrrX all
+    silently fall into the "plain ALU" dispatch bucket instead of either
+    executing correctly or cleanly trapping. Similarly fcvt.w.s/fcvt.wu.s/
+    feq.s/flt.s/fle.s (regWrite=1 path) read garbage from the INTEGER RAT
+    instead of the float one, fsw reads garbage integer "store data"
+    instead of the intended float register (both genuinely wrong, not
+    just unsupported), and fdiv.s/fsqrt.s/fcvt.s.w*/the fmadd family/flw
+    all quietly become no-dest no-ops (is_fp_op's own whitelist in
+    OOOCore.v only covers FADD/FSUB/FMUL/FSGNJ*/FMIN/FMAX/FMV.W.X). None
+    of that is safe to cross-check. ooo=True instead generates only: r/i/
+    shift/load/store/branch (conditional only, no jal), and a float pool
+    restricted to fadd.s/fsub.s/fmul.s (FP_ARITH minus fdiv.s), fsgnj*,
+    fmin.s/fmax.s -- every one of these OOOCore.v actually executes
+    correctly end-to-end (Gen6-D/E/G/H). No CSR (csr_weight forced 0, same
+    "exclude what can't be made safe to compare" precedent mmu mode
+    already established below), no "w"-suffixed family even at xlen=64
+    (design/OOOCore.v's own is_div_op check was never confirmed to
+    recognize a DIVW/REMW-distinct ALUCtl encoding -- excluded rather than
+    assumed safe), no ecall/illegal/mret injection (OOOCore.v's own
+    single-outstanding-trap machinery is already covered by
+    tb_ooocore_trap_i1.v; duplicating fault-injection here is disproportionate,
+    same reasoning this docstring's own interrupt/mmu-mode CSR restrictions
+    already use), no interrupt/mmu (mutually exclusive with those modes
+    below, and OOOCore.v implements neither yet).
+
+    xlen (Generation 2, docs/adr/0028-rv64-migration-phase-m.md): 32
     (default, every existing call site's exact behavior, unaffected) or 64
     -- gates in the "w"-suffixed instruction family (addw/subw/sllw/srlw/
     sraw/mulw/divw/divuw/remw/remuw/addiw/slliw/srliw/sraiw) and ld/sd/lwu
@@ -234,6 +321,9 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
     """
     if interrupt is not None and mmu:
         raise ValueError("interrupt and mmu modes are mutually exclusive in this generator (Phase F7 scope)")
+    if ooo and (interrupt is not None or mmu):
+        raise ValueError("ooo mode is mutually exclusive with interrupt/mmu in this generator (Gen6-L scope -- "
+                          "OOOCore.v implements neither yet)")
 
     # docs/adr/00NN-mmu-sv32.md (Phase F7). See gen_program's own docstring
     # for why: the random body's own loads/stores must stay within the
@@ -272,8 +362,16 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
     # up to 8 -- same upper bound the RV64 seeding cost above already uses)
     # -- generous upper bound, mem_size is generous there too (see below).
     mmu_prefix_cost = (24 if xlen >= 64 else 13) if mmu else 0
-    xlen64_seed_cost = 8 if xlen >= 64 else 0  # const64_to_reg_instrs's own upper bound, see above
-    budget = (1 + 2 * len(FLOAT_SEED_BITS) + xlen64_seed_cost + n_instrs + 1
+    # Gen6-L: no_lui's chunked addi/slli construction costs more
+    # instructions than lui+addi (up to 5 per 32-bit half vs up to 2) --
+    # per-float-seed cost and the 64-bit seed's own upper bound both widen
+    # under ooo. Still just a generous upper bound for this budget
+    # pre-check, not a correctness-critical exact count (see const64_to_
+    # reg_instrs's own "washes out" argument for why the exact per-half
+    # construction never affects final correctness).
+    xlen64_seed_cost = (20 if ooo else 8) if xlen >= 64 else 0  # const64_to_reg_instrs's own upper bound, see above
+    trailer_cost = OOO_TRAILER_NOP_COUNT if ooo else 1  # Gen6-L: nops instead of fence+jal, see the trailer's own comment below
+    budget = (1 + (6 if ooo else 2) * len(FLOAT_SEED_BITS) + xlen64_seed_cost + n_instrs + trailer_cost
               + interrupt_prefix_cost + mmu_prefix_cost)
     if budget > mem_size // 4:
         raise ValueError(f"n_instrs={n_instrs} would overflow the {mem_size}-byte budget "
@@ -294,14 +392,14 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
     seed_lines = []
     for i, bits in enumerate(FLOAT_SEED_BITS):
         fr = i + 1  # f1, f2, ... -- f0 deliberately left at its 0.0 reset default
-        seed_lines.extend(const_to_reg_instrs(30, bits))
+        seed_lines.extend(const_to_reg_instrs(30, bits, no_lui=ooo))
         seed_lines.append(f"fmv.w.x f{fr}, x30")
     if xlen >= 64:
         # Generation 2 (Phase M15): x29 lands in the ordinary GP_REGS pool
         # afterward (fair game for any later random instruction, same as
         # every other register) -- x30 is transient scratch here only, same
         # convention the float seeding above already uses.
-        seed_lines.extend(const64_to_reg_instrs(29, 30, 0xDEADBEEF12345678))
+        seed_lines.extend(const64_to_reg_instrs(29, 30, 0xDEADBEEF12345678, no_lui=ooo))
     labels_at = {}  # instruction index -> label name, resolved into text at the end
 
     # docs/adr/0020-soc-integration.md (Phase D10/D11). mstatus/mepc/mcause
@@ -344,7 +442,7 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
     # restricted CSR pool -- here the whole `csr` instruction kind is
     # excluded outright (fflags/frm/fcsr, the separate `fcsr` kind below,
     # stay included: their addresses are U-mode accessible, genuinely safe).
-    csr_weight = 0 if mmu else 6
+    csr_weight = 0 if (mmu or ooo) else 6
 
     # Build a flat instruction list first (as dicts), then assign forward-only
     # branch/jump targets once every instruction's final index is known.
@@ -352,15 +450,27 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
     # widened load/store mnemonic pools only exist in the choice list when
     # xlen>=64 -- at xlen=32 the exact same list/weights as every prior
     # phase, so existing seeds reproduce bit-exact programs.
-    kind_names = ["r", "i", "shift", "load", "store", "branch", "jal", "csr",
-                  "fp_arith", "fp_sqrt", "fp_sgnj", "fp_minmax", "fp_cmp",
-                  "fp_cvt_to_int", "fp_cvt_from_int", "fp_madd", "fload", "fstore", "fcsr"]
-    kind_weights = [24, 16, 8, 10, 10, 8, 5, csr_weight,
-                     10, 4, 4, 4, 4,
-                     4, 4, 6, 6, 6, 4]
-    if xlen >= 64:
-        kind_names = kind_names + ["rw", "iw"]
-        kind_weights = kind_weights + [12, 8]
+    if ooo:
+        # Gen6-L: see gen_program's own docstring for exactly which kinds
+        # this excludes and why (jal/csr/fp_sqrt/fp_cmp/fp_cvt*/fp_madd/
+        # fload/fstore/fcsr all either silently mis-execute or quietly
+        # no-op in OOOCore.v today -- none are safe to cross-check). The
+        # "w"-suffixed family is excluded regardless of xlen (DIVW/REMW
+        # routing through OOOCore.v's is_div_op was never confirmed).
+        kind_names = ["r", "i", "shift", "load", "store", "branch",
+                      "fp_arith", "fp_sgnj", "fp_minmax"]
+        kind_weights = [24, 16, 8, 10, 10, 8,
+                         10, 4, 4]
+    else:
+        kind_names = ["r", "i", "shift", "load", "store", "branch", "jal", "csr",
+                      "fp_arith", "fp_sqrt", "fp_sgnj", "fp_minmax", "fp_cmp",
+                      "fp_cvt_to_int", "fp_cvt_from_int", "fp_madd", "fload", "fstore", "fcsr"]
+        kind_weights = [24, 16, 8, 10, 10, 8, 5, csr_weight,
+                         10, 4, 4, 4, 4,
+                         4, 4, 6, 6, 6, 4]
+        if xlen >= 64:
+            kind_names = kind_names + ["rw", "iw"]
+            kind_weights = kind_weights + [12, 8]
     load_mnemonics = ["lb", "lh", "lw", "lbu", "lhu"] + (["ld", "lwu"] if xlen >= 64 else [])
     store_mnemonics = ["sb", "sh", "sw"] + (["sd"] if xlen >= 64 else [])
     load_widths = {"lb": 1, "lbu": 1, "lh": 2, "lhu": 2, "lw": 4, "lwu": 4, "ld": 8}
@@ -431,7 +541,10 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
             rd = rnd.choice(GP_REGS)
             instrs.append(("jal", rd))
         elif kind == "fp_arith":
-            mn = rnd.choice(FP_ARITH)
+            # Gen6-L: fdiv.s excluded under ooo -- not in OOOCore.v's own
+            # is_fp_op whitelist (no iterative FP divider built), see
+            # gen_program's own docstring.
+            mn = rnd.choice(FP_ARITH[:3] if ooo else FP_ARITH)
             rd, rs1, rs2 = rnd.choice(FREGS), rnd.choice(FREGS), rnd.choice(FREGS)
             rm = rnd.choice(RM_NAMES)
             instrs.append(f"{mn} f{rd}, f{rs1}, f{rs2}, {rm}")
@@ -517,18 +630,42 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
 
     if len(instrs) in labels_at:
         out.append(labels_at[len(instrs)] + ":")
-    # docs/adr/0023-caches.md (Phase G7). fence immediately before the halt
-    # spin -- under CACHE_MODE=1 (write-back D$), a store's dirty data can
-    # sit in the cache, invisible to the harness's own post-halt dump
-    # (which reads DataMemoryBRAM.v's backing array directly, bypassing any
-    # cache). Harmless, real no-op under CACHE_MODE=0 (fence has nothing to
-    # flush there).
-    out.append("fence")
-    # Spin here instead of running off the end into instruction memory's
-    # zero-filled remainder -- opcode 0000000 is not a valid instruction and
-    # (correctly, after docs/adr/0011-csr-and-exceptions.md) now traps.
-    out.append("__halt:")
-    out.append("jal x0, __halt")
+    if ooo:
+        # Gen6-L: the ordinary fence+jal-self-loop halt below relies on jal
+        # actually redirecting the PC -- it doesn't in OOOCore.v (see
+        # gen_program's own docstring). A real self-loop isn't reachable
+        # without implementing jal there (out of this phase's own scope,
+        # verification tooling, not new RTL), so this pads with plain nops
+        # instead: OOOCore.v's frontend fetches/dispatches well ahead of
+        # retirement (bounded by ROB_ENTRIES=16 in sim/tb/dump_regs_ooocore_
+        # template.v's own fixed instantiation), so 32 nops (2x that bound,
+        # generous margin) guarantees fetch is still safely inside this
+        # harmless padding -- never at the real out-of-bounds/illegal-
+        # opcode tail -- for the entire window run_random_tests.py's own
+        # --ooo path needs (from the last real instruction's retirement
+        # back to when it was first dispatched). A genuine bug, found by
+        # running: without this, OOOCore.v's fetch had *already*
+        # spéculatively run off the end and taken the illegal-opcode trap
+        # (PC redirects to mtvec's own reset default of 0, since csrrw is
+        # never dispatched in OOOCore.v either -- restarting the entire
+        # program) before the real random body's own LAST instructions had
+        # even retired, corrupting the exact comparison this mode exists
+        # to make.
+        out.extend(["addi x0, x0, 0"] * OOO_TRAILER_NOP_COUNT)
+    else:
+        # docs/adr/0023-caches.md (Phase G7). fence immediately before the
+        # halt spin -- under CACHE_MODE=1 (write-back D$), a store's dirty
+        # data can sit in the cache, invisible to the harness's own
+        # post-halt dump (which reads DataMemoryBRAM.v's backing array
+        # directly, bypassing any cache). Harmless, real no-op under
+        # CACHE_MODE=0 (fence has nothing to flush there).
+        out.append("fence")
+        # Spin here instead of running off the end into instruction
+        # memory's zero-filled remainder -- opcode 0000000 is not a valid
+        # instruction and (correctly, after docs/adr/0011-csr-and-
+        # exceptions.md) now traps.
+        out.append("__halt:")
+        out.append("jal x0, __halt")
 
     if mmu and xlen >= 64:
         # docs/adr/00NN-sv39-mmu-phase-p.md (Phase P5). Sv39 twin of the
@@ -715,12 +852,16 @@ if __name__ == "__main__":
                           "or Sv39 at XLEN=64 (docs/adr/00NN-sv39-mmu-phase-p.md Phase P5)")
     ap.add_argument("--xlen", type=int, default=32, choices=[32, 64],
                      help="Generation 2 (docs/adr/0028-rv64-migration-phase-m.md): 32=default, 64=RV64")
+    ap.add_argument("--ooo", action="store_true",
+                     help="Gen6-L: restrict the generated mix to OOOCore.v's own actually-implemented "
+                          "instruction subset (see gen_program's own docstring). Mutually exclusive "
+                          "with --interrupt/--mmu")
     ap.add_argument("-o", "--output")
     args = ap.parse_args()
     mem_size = args.mem_size if args.mem_size is not None else \
         ((16384 if args.xlen == 64 else 8192) if args.mmu else 128)
     text, interrupt_info = gen_program(args.seed, args.n, mem_size=mem_size, interrupt=args.interrupt,
-                                        mmu=args.mmu, xlen=args.xlen)
+                                        mmu=args.mmu, xlen=args.xlen, ooo=args.ooo)
     if interrupt_info is not None:
         print(f"# interrupt scheduled after instruction {interrupt_info['after']}, "
               f"cause={interrupt_info['cause']:#010x}")
