@@ -102,22 +102,22 @@ module DCache #(
     // PREFETCH_MODE live.
     parameter MEM_SIZE_BYTES = 32'hFFFFFFFF
 )(
-    input clk,
-    input rst,
+    input wire clk,
+    input wire rst,
 
     // CPU-side request (level-held by the caller until resp_ready pulses).
-    input                  req_read,
-    input                  req_write,
-    input      [XLEN-1:0]  req_addr,    // physical address (PIPT)
-    input      [XLEN-1:0]  req_wdata,
-    input      [2:0]       req_funct3,  // DataMemoryBRAM.v's own encoding: 000=lb 001=lh 010=lw 100=lbu 101=lhu (stores use [1:0]: 00=sb 01=sh else=sw)
-    output     [XLEN-1:0]  resp_rdata,
-    output                 resp_ready,
+    input                  wire req_read,
+    input                  wire req_write,
+    input      wire [XLEN-1:0]  req_addr,    // physical address (PIPT)
+    input      wire [XLEN-1:0]  req_wdata,
+    input      wire [2:0]       req_funct3,  // DataMemoryBRAM.v's own encoding: 000=lb 001=lh 010=lw 100=lbu 101=lhu (stores use [1:0]: 00=sb 01=sh else=sw)
+    output     wire [XLEN-1:0]  resp_rdata,
+    output                 wire resp_ready,
     // Generation 4, Phase E. Caller-supplied architectural destination
     // register for a LOAD -- only ever consumed if this request becomes a
     // non-blocking MSHR (mshr_accept) or an S_IDLE-fork load miss at
     // MSHR_ENTRIES>1; ignored for stores/hits.
-    input      [4:0]       req_dest_reg,
+    input      wire [4:0]       req_dest_reg,
     // Generation 4, Phase E. True only when THIS req_read, if it misses,
     // is a genuine plain-integer load (riscvpipeline.v wires this to
     // regWrite_regem) -- a real, serious gap found by running the
@@ -134,7 +134,7 @@ module DCache #(
     // (mshr_busy_dispatch_hit resolves through the ordinary resp_ready/
     // resp_rdata path every load, integer or float, already uses) --
     // only the queued/non-blocking accept path needs this gate.
-    input                   req_int_load,
+    input                   wire req_int_load,
 
     // Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
     // Fires the SAME cycle a load miss is accepted into the MSHR queue
@@ -143,39 +143,39 @@ module DCache #(
     // arrives later via mshr_complete. Never fires for a store (stores
     // always use the traditional resp_ready path, see module header) or
     // when MSHR_ENTRIES==1 (bit-identical-to-today requirement).
-    output                 mshr_accept,
+    output                 wire mshr_accept,
     // Pulses exactly once when a queued MSHR's fill finishes, carrying the
     // destination register and final (already-extended) data directly --
     // decoupled from req_addr/resp_ready, since the caller that issued
     // this load is long gone by the time its fill completes.
-    output                 mshr_complete,
-    output     [4:0]       mshr_complete_reg,
-    output     [XLEN-1:0]  mshr_complete_data,
+    output                 wire mshr_complete,
+    output     wire [4:0]       mshr_complete_reg,
+    output     wire [XLEN-1:0]  mshr_complete_data,
     // Generation 4, Phase E. Fence must wait for every outstanding MSHR to
     // drain before starting its scan (a line still mid-fill has no
     // meaningful dirty/clean state to flush yet) -- riscvpipeline.v's own
     // fence_pending_r gate consumes this alongside its existing !ptw_busy
     // check.
-    output                 mshr_outstanding,
+    output                 wire mshr_outstanding,
 
     // fence -- unconditional whole-cache writeback of every dirty line
     // (lines stay valid/cached, just become clean -- not an invalidation).
-    input                  flush_all,
-    output                 flush_busy,
-    output                 flush_done,
+    input                  wire flush_all,
+    output                 wire flush_busy,
+    output                 wire flush_done,
 
     // Wishbone master (own port; muxed onto the shared bus in G6, mirroring
     // Ptw.v's own F4-standalone-then-F5-wired staging).
-    output                          m_cyc,
-    output                          m_stb,
-    output                          m_we,
-    output     [XLEN-1:0]           m_addr,
-    output     [XLEN-1:0]           m_data_o,
-    output     [`WB_SEL_WIDTH-1:0]  m_sel,
-    output     [2:0]                m_funct3,
-    output     [2:0]                m_cti,   // docs/adr/0043 (Phase D): real Wishbone B3 cycle-type, only meaningful when BURST_ENABLE=1
-    input      [XLEN-1:0]           m_data_i,
-    input                           m_ack,
+    output                          wire m_cyc,
+    output                          wire m_stb,
+    output                          wire m_we,
+    output     wire [XLEN-1:0]           m_addr,
+    output     wire [XLEN-1:0]           m_data_o,
+    output     wire [`WB_SEL_WIDTH-1:0]  m_sel,
+    output     wire [2:0]                m_funct3,
+    output     wire [2:0]                m_cti,   // docs/adr/0043 (Phase D): real Wishbone B3 cycle-type, only meaningful when BURST_ENABLE=1
+    input      wire [XLEN-1:0]           m_data_i,
+    input                           wire m_ack,
 
     // docs/adr/0025-hpc-performance-csrs.md (Phase J5). One-cycle pulses,
     // exactly once per genuine new access (not per stall/fill cycle): the
@@ -187,8 +187,8 @@ module DCache #(
     // S_IDLE the same cycle a miss is recognized, so `access_miss` can
     // never re-fire during the multi-cycle S_WB/S_FILL service that
     // follows.
-    output                          access_hit,
-    output                          access_miss,
+    output                          wire access_hit,
+    output                          wire access_miss,
 
     // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). Inclusion
     // probe responder -- driven by an L2Cache.v instance sitting below this
@@ -200,11 +200,11 @@ module DCache #(
     // header) -- this module's own job is simple: answer truthfully whether
     // probe_addr's line is resident here right now, and if so, hand over its
     // dirty bit + full data and invalidate it, same cycle.
-    input                           probe_req,
-    input      [XLEN-1:0]           probe_addr,
-    output                          probe_ack,
-    output                          probe_dirty,
-    output     [XLEN*LINE_WORDS-1:0] probe_data
+    input                           wire probe_req,
+    input      wire [XLEN-1:0]           probe_addr,
+    output                          wire probe_ack,
+    output                          wire probe_dirty,
+    output     wire [XLEN*LINE_WORDS-1:0] probe_data
 );
 
 localparam LINE_WORDS    = LINE_BYTES / 4;
@@ -854,7 +854,7 @@ wire mshr_busy_dispatch_hit  = mshr_busy && req_read && !req_write && hit_main;
 wire mshr_room               = (MSHR_ENTRIES > 1) && (mshr_count_r < MSHR_ENTRIES) && !mshr_addr_line_conflict;
 wire mshr_busy_dispatch_miss = mshr_busy && req_read && !req_write && !hit && req_int_load && mshr_room;
 
-wire mshr_accept = mshr_fresh_load_miss || mshr_busy_dispatch_miss;
+assign mshr_accept = mshr_fresh_load_miss || mshr_busy_dispatch_miss;
 
 // Generation 4, Phase E. Unified per-cycle MSHR occupancy bookkeeping --
 // see the two `if`-chains inside the always block below (before and inside

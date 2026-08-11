@@ -30,16 +30,16 @@ module Chooser #(
     parameter XLEN = 32,
     parameter NUM_ENTRIES = 32
 )(
-    input clk,
-    input rst,
+    input wire clk,
+    input wire rst,
 
-    input      [XLEN-1:0] query_pc,
-    output                prefer_b,
+    input      wire [XLEN-1:0] query_pc,
+    output                wire prefer_b,
 
-    input                  update_valid,
-    input      [XLEN-1:0]  update_pc,
-    input                  a_correct,
-    input                  b_correct
+    input                  wire update_valid,
+    input      wire [XLEN-1:0]  update_pc,
+    input                  wire a_correct,
+    input                  wire b_correct
 );
 
 localparam INDEX_WIDTH = $clog2(NUM_ENTRIES);

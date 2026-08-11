@@ -72,22 +72,22 @@
 module Uart #(
     parameter CLKS_PER_BIT = 4
 )(
-    input clk,
-    input rst,
+    input wire clk,
+    input wire rst,
 
-    input                          s_cyc,
-    input                          s_stb,
-    input                          s_we,
-    input      [31:0]              s_addr,
-    input      [31:0]              s_data_o,
-    input      [`WB_SEL_WIDTH-1:0] s_sel,
+    input                          wire s_cyc,
+    input                          wire s_stb,
+    input                          wire s_we,
+    input      wire [31:0]              s_addr,
+    input      wire [31:0]              s_data_o,
+    input      wire [`WB_SEL_WIDTH-1:0] s_sel,
     output reg [31:0]              s_data_i,
-    output                         s_ack,
+    output                         wire s_ack,
 
     output reg tx,
-    input      rx,
+    input      wire rx,
 
-    output irq  // pending_rx | pending_thr -- Phase R's mip.MEIP source
+    output wire irq  // pending_rx | pending_thr -- Phase R's mip.MEIP source
 );
 
 localparam CNT_WIDTH = $clog2(CLKS_PER_BIT + 1);

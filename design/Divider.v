@@ -13,15 +13,15 @@ module Divider #(
                             // magic 32s to the named parameter, not the
                             // asymptotic cost.
 )(
-    input clk,
-    input rst,
-    input start,          // level: caller ties this to "the instruction currently
+    input wire clk,
+    input wire rst,
+    input wire start,          // level: caller ties this to "the instruction currently
                            // presented is a div/rem whose result isn't ready yet"
                            // (see riscvpipeline.v's isDivRem) -- held asserted for
                            // the instruction's entire stay in EX, not a one-shot pulse
-    input isSigned,        // 1 = div/rem (signed), 0 = divu/remu (unsigned)
-    input [XLEN-1:0] dividend,
-    input [XLEN-1:0] divisor,
+    input wire isSigned,        // 1 = div/rem (signed), 0 = divu/remu (unsigned)
+    input wire [XLEN-1:0] dividend,
+    input wire [XLEN-1:0] divisor,
     output reg busy,       // computation in progress (deasserts the same cycle `done` pulses)
     output reg done,       // one-cycle pulse: quotient/remainder valid this cycle
     output reg [XLEN-1:0] quotient,

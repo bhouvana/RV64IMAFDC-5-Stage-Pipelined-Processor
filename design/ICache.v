@@ -82,36 +82,36 @@ module ICache #(
     // without X" convention `--compare-l2`/`--compare-burst` already use.
     parameter PREFETCH_MODE = 0
 )(
-    input clk,
-    input rst,
+    input wire clk,
+    input wire rst,
 
-    input      [XLEN-1:0] readAddr,   // physical address (post-translation) -- PIPT
-    output     [XLEN-1:0] inst,       // valid when hit
-    output                hit,        // combinational: does readAddr hit this cycle
-    output                busy,       // a line fill is in progress
-    output                done,       // one-cycle pulse: a fill just completed
+    input      wire [XLEN-1:0] readAddr,   // physical address (post-translation) -- PIPT
+    output     wire [XLEN-1:0] inst,       // valid when hit
+    output                wire hit,        // combinational: does readAddr hit this cycle
+    output                wire busy,       // a line fill is in progress
+    output                wire done,       // one-cycle pulse: a fill just completed
 
     // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). Inclusion
     // probe responder -- same shape/precedent as DCache.v's own copy, but
     // simpler: I$ is read-only, nothing to pull back, so no probe_dirty/
     // probe_data ports exist here at all. Permanently dark when a caller
     // ties probe_req=0 (the default, every existing testbench).
-    input                 probe_req,
-    input      [XLEN-1:0] probe_addr,
-    output                probe_ack,
+    input                 wire probe_req,
+    input      wire [XLEN-1:0] probe_addr,
+    output                wire probe_ack,
 
     // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). New
     // Wishbone-master bus port, only meaningful when L2_ENABLE=1 -- read-
     // only (no m_we/m_data_o at all; a caller wiring this to an L2Cache.v
     // instance's own u_* slave port ties u_we=1'b0/u_data_o={XLEN{1'b0}}
     // directly at the instantiation site, since I$ never writes).
-    output                          m_cyc,
-    output                          m_stb,
-    output     [XLEN-1:0]           m_addr,
-    output     [`WB_SEL_WIDTH-1:0]  m_sel,
-    output     [2:0]                m_funct3,
-    input      [XLEN-1:0]           m_data_i,
-    input                           m_ack
+    output                          wire m_cyc,
+    output                          wire m_stb,
+    output     wire [XLEN-1:0]           m_addr,
+    output     wire [`WB_SEL_WIDTH-1:0]  m_sel,
+    output     wire [2:0]                m_funct3,
+    input      wire [XLEN-1:0]           m_data_i,
+    input                           wire m_ack
 );
 
 localparam LINE_WORDS   = LINE_BYTES / 4;

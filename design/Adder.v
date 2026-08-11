@@ -10,9 +10,9 @@ module Adder #(
                             // for a single source of truth (matching CQ-1's
                             // riscv_defs.vh spirit) rather than scattered literals.
 )(
-    input signed [XLEN-1:0] a,
-    input signed [XLEN-1:0] b,
-    output signed [XLEN-1:0] sum
+    input wire signed [XLEN-1:0] a,
+    input wire signed [XLEN-1:0] b,
+    output wire signed [XLEN-1:0] sum
 );
 
  assign sum = a + b;

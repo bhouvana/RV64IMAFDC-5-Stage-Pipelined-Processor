@@ -38,18 +38,18 @@ module Gshare #(
     parameter XLEN = 32,
     parameter NUM_ENTRIES = 32   // must be a power of 2, same convention as Bht.v/Btb.v
 )(
-    input clk,
-    input rst,
+    input wire clk,
+    input wire rst,
 
-    input      [XLEN-1:0] query_pc,
-    output                predict_taken,
+    input      wire [XLEN-1:0] query_pc,
+    output                wire predict_taken,
 
-    input      [XLEN-1:0] train_pc,
-    output                 train_predict_taken,
+    input      wire [XLEN-1:0] train_pc,
+    output                 wire train_predict_taken,
 
-    input                  update_valid,
-    input      [XLEN-1:0]  update_pc,
-    input                  update_taken
+    input                  wire update_valid,
+    input      wire [XLEN-1:0]  update_pc,
+    input                  wire update_taken
 );
 
 localparam INDEX_WIDTH = $clog2(NUM_ENTRIES);

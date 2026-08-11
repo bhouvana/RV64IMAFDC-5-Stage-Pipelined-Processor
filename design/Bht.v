@@ -40,11 +40,11 @@ module Bht #(
     parameter NUM_ENTRIES = 32   // must be a power of 2 -- indexed by a
                                    // direct PC-bit slice, no modulo
 )(
-    input clk,
-    input rst,
+    input wire clk,
+    input wire rst,
 
-    input      [XLEN-1:0] query_pc,
-    output                predict_taken,
+    input      wire [XLEN-1:0] query_pc,
+    output                wire predict_taken,
 
     // Second, independent combinational read port -- same array, a
     // different index, purely additive (existing BRANCH_PREDICTOR=1
@@ -57,12 +57,12 @@ module Bht #(
     // reg1/reg1a/reg2 -- a real, deliberate scope decision (see that
     // ADR's Design section) that keeps this phase's pipeline-wiring risk
     // to zero new latched signals.
-    input      [XLEN-1:0] train_pc,
-    output                 train_predict_taken,
+    input      wire [XLEN-1:0] train_pc,
+    output                 wire train_predict_taken,
 
-    input                  update_valid,
-    input      [XLEN-1:0]  update_pc,
-    input                  update_taken
+    input                  wire update_valid,
+    input      wire [XLEN-1:0]  update_pc,
+    input                  wire update_taken
 );
 
 localparam INDEX_WIDTH = $clog2(NUM_ENTRIES);

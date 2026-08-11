@@ -44,13 +44,13 @@ module DataMemoryBRAM #(
     // needs an explicit nonzero override instead.
     parameter ZERO_INIT_LIMIT_OVERRIDE = 0
 )(
-    input clk,
-    input rst,
-    input memWrite,
-    input memRead,
-    input [XLEN-1:0] address,
-    input [XLEN-1:0] writeData,
-    input [2:0] funct3,   // access width/signedness: 000=b(signed) 001=h(signed) 010=w 100=bu 101=hu
+    input wire clk,
+    input wire rst,
+    input wire memWrite,
+    input wire memRead,
+    input wire [XLEN-1:0] address,
+    input wire [XLEN-1:0] writeData,
+    input wire [2:0] funct3,   // access width/signedness: 000=b(signed) 001=h(signed) 010=w 100=bu 101=hu
     output reg [XLEN-1:0] readData
 );
 

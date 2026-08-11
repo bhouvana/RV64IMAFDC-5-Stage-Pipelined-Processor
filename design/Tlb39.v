@@ -25,39 +25,39 @@ module Tlb39 #(
                                    // depend on size, only hit rate does, and
                                    // this core's test programs are tiny.
 )(
-    input clk,
-    input rst,
+    input wire clk,
+    input wire rst,
 
     // Fetch-side query (combinational).
-    input      [XLEN-1:0] fetch_vaddr,
-    output                fetch_hit,
-    output     [XLEN-1:0] fetch_ppn,
-    output                fetch_perm_r,
-    output                fetch_perm_w,
-    output                fetch_perm_x,
-    output                fetch_perm_u,
+    input      wire [XLEN-1:0] fetch_vaddr,
+    output                wire fetch_hit,
+    output     wire [XLEN-1:0] fetch_ppn,
+    output                wire fetch_perm_r,
+    output                wire fetch_perm_w,
+    output                wire fetch_perm_x,
+    output                wire fetch_perm_u,
 
     // Load/store-side query (combinational).
-    input      [XLEN-1:0] ls_vaddr,
-    output                ls_hit,
-    output     [XLEN-1:0] ls_ppn,
-    output                ls_perm_r,
-    output                ls_perm_w,
-    output                ls_perm_x,
-    output                ls_perm_u,
+    input      wire [XLEN-1:0] ls_vaddr,
+    output                wire ls_hit,
+    output     wire [XLEN-1:0] ls_ppn,
+    output                wire ls_perm_r,
+    output                wire ls_perm_w,
+    output                wire ls_perm_x,
+    output                wire ls_perm_u,
 
     // Synchronous fill, driven by Ptw39.v on a successful walk.
-    input                  fill_valid,
-    input      [XLEN-1:0]  fill_vaddr,   // only bits [38:12] (the VPN) are used
-    input      [XLEN-1:0]  fill_ppn,
-    input                  fill_perm_r,
-    input                  fill_perm_w,
-    input                  fill_perm_x,
-    input                  fill_perm_u,
+    input                  wire fill_valid,
+    input      wire [XLEN-1:0]  fill_vaddr,   // only bits [38:12] (the VPN) are used
+    input      wire [XLEN-1:0]  fill_ppn,
+    input                  wire fill_perm_r,
+    input                  wire fill_perm_w,
+    input                  wire fill_perm_x,
+    input                  wire fill_perm_u,
 
     // sfence.vma -- unconditional whole-TLB flush (same scoping default as
     // Tlb.v: no selective ASID/address invalidation).
-    input                  flush_all
+    input                  wire flush_all
 );
 
 localparam INDEX_WIDTH = $clog2(NUM_ENTRIES);

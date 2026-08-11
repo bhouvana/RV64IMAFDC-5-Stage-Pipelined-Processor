@@ -14,13 +14,13 @@
 // sub-op selector" idiom riscvpipeline.v:1579 already uses for F-extension's
 // fcvt.w.s/fcvt.wu.s.
 module ALUCtrl (
-    input [1:0] ALUOp,
+    input wire [1:0] ALUOp,
 
-    input [6:0] funct7_c,  // full funct7 field (inst[31:25]) -- widened from a
+    input wire [6:0] funct7_c,  // full funct7 field (inst[31:25]) -- widened from a
                             // single bit (inst[30]) to make room for RV32M's
                             // funct7=0000001, see docs/adr/0006-rv32m.md
-    input [2:0] funct3_c,
-    input [4:0] rs2_c,     // inst[24:20] -- shamt on shift-immediate ops,
+    input wire [2:0] funct3_c,
+    input wire [4:0] rs2_c,     // inst[24:20] -- shamt on shift-immediate ops,
                             // sub-op selector on the clz/ctz/cpop/sext family
     output reg [6:0] ALUCtl
 );

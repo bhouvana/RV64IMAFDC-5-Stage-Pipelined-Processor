@@ -190,9 +190,9 @@ module PIPELINED #(
     // ICache.v/DCache.v themselves, not here).
     parameter PREFETCH_MODE = 0
 )(
-    input clk,
-    input start,
-    output [XLEN-1:0] debug_x10,   // read-only tap on x10/a0 (docs/adr/0012-fpga-
+    input wire clk,
+    input wire start,
+    output wire [XLEN-1:0] debug_x10,   // read-only tap on x10/a0 (docs/adr/0012-fpga-
                                 // readiness.md) -- a bare-metal test program's
                                 // natural "write your result here" register
                                 // under the standard RISC-V calling
@@ -205,8 +205,8 @@ module PIPELINED #(
     // as debug_x10 above -- every existing testbench that doesn't
     // instantiate its own external UART peer simply leaves rx idle-high
     // (matching a real disconnected serial line) and ignores tx.
-    output uart_tx,
-    input  uart_rx,
+    output wire uart_tx,
+    input  wire uart_rx,
 
     // docs/adr/0027-formal-verification.md (Phase L4). Formal-observability
     // taps only, same "unconnected changes nothing" shape as debug_x10
@@ -215,59 +215,59 @@ module PIPELINED #(
     // observe these two WB-stage signals from outside this module, and
     // Yosys's read_verilog can't resolve a hierarchical peek the way
     // iverilog's simulator can (confirmed by running in Phase L1/L3).
-    output debug_regwrite_commit,  // regWrite_regwb
-    output debug_valid_commit,     // valid_regwb
+    output wire debug_regwrite_commit,  // regWrite_regwb
+    output wire debug_valid_commit,     // valid_regwb
 
     // docs/adr/0036-linux-boot-attempt-phase-t.md: same "unconnected
     // changes nothing" tap shape as debug_x10 above -- the Verilator boot
     // harness has no other way to observe whether real forward progress is
     // happening (fetch-stage PC) or which privilege mode is live, short of
     // a full waveform dump.
-    output [XLEN-1:0] debug_pc,        // pc_o, fetch-stage PC
-    output [1:0] debug_priv_mode,      // priv_mode_w
-    output [XLEN-1:0] debug_mcause,    // m_CSR.mcause, same hierarchical-tap idiom debug_x10 uses on m_Register
+    output wire [XLEN-1:0] debug_pc,        // pc_o, fetch-stage PC
+    output wire [1:0] debug_priv_mode,      // priv_mode_w
+    output wire [XLEN-1:0] debug_mcause,    // m_CSR.mcause, same hierarchical-tap idiom debug_x10 uses on m_Register
     // docs/adr/0037: temporary RVC-debug taps -- same "unconnected changes
     // nothing" shape as debug_x10.
-    output debug_jump_regde,
-    output [XLEN-1:0] debug_imm_sum,
-    output [XLEN-1:0] debug_inst_regfd,
-    output [XLEN-1:0] debug_inst_raw,
-    output debug_is_compressed,
-    output [XLEN-1:0] debug_inst_final,
-    output debug_illegal_regde,
-    output [XLEN-1:0] debug_inst_regde,
-    output [XLEN-1:0] debug_pc_o_regde,
-    output [7:0] debug_trap_src,
-    output debug_exception_taken,
-    output [XLEN-1:0] debug_trap_cause_raw,
-    output [XLEN-1:0] debug_x1,
-    output debug_amo_active,
-    output debug_amo_write_phase,
-    output debug_amo_write_done,
-    output debug_amo_stall,
-    output [XLEN-1:0] debug_amo_captured_read,
+    output wire debug_jump_regde,
+    output wire [XLEN-1:0] debug_imm_sum,
+    output wire [XLEN-1:0] debug_inst_regfd,
+    output wire [XLEN-1:0] debug_inst_raw,
+    output wire debug_is_compressed,
+    output wire [XLEN-1:0] debug_inst_final,
+    output wire debug_illegal_regde,
+    output wire [XLEN-1:0] debug_inst_regde,
+    output wire [XLEN-1:0] debug_pc_o_regde,
+    output wire [7:0] debug_trap_src,
+    output wire debug_exception_taken,
+    output wire [XLEN-1:0] debug_trap_cause_raw,
+    output wire [XLEN-1:0] debug_x1,
+    output wire debug_amo_active,
+    output wire debug_amo_write_phase,
+    output wire debug_amo_write_done,
+    output wire debug_amo_stall,
+    output wire [XLEN-1:0] debug_amo_captured_read,
     // Phase W (sp/tp polling-loop investigation, docs/adr/0036's own parked-
     // loop gap): same "unconnected changes nothing" tap shape as debug_x10 --
     // a1/a2/a3/sp/tp are the exact registers the kernel's own hart-lottery
     // amoadd + secondary-hart wait_for_cpu_up loop reads.
-    output [XLEN-1:0] debug_x2,
-    output [XLEN-1:0] debug_x4,
-    output [XLEN-1:0] debug_x11,
-    output [XLEN-1:0] debug_x12,
-    output [XLEN-1:0] debug_x13,
+    output wire [XLEN-1:0] debug_x2,
+    output wire [XLEN-1:0] debug_x4,
+    output wire [XLEN-1:0] debug_x11,
+    output wire [XLEN-1:0] debug_x12,
+    output wire [XLEN-1:0] debug_x13,
     // Phase X (Sv39 instruction-page-fault investigation, the new frontier
     // docs/adr/0039 found past the sp/tp fix): same "unconnected changes
     // nothing" tap shape as debug_x10.
-    output [XLEN-1:0] debug_mtval,
-    output [XLEN-1:0] debug_satp,
-    output debug_translate_enable,
-    output debug_itlb_hit,
-    output debug_itlb_hit_fault,
-    output debug_ptw_busy,
-    output debug_ptw_done,
-    output debug_ptw_fault,
-    output [XLEN-1:0] debug_ptw_vaddr,
-    output [XLEN-1:0] debug_ptw_m_addr,
+    output wire [XLEN-1:0] debug_mtval,
+    output wire [XLEN-1:0] debug_satp,
+    output wire debug_translate_enable,
+    output wire debug_itlb_hit,
+    output wire debug_itlb_hit_fault,
+    output wire debug_ptw_busy,
+    output wire debug_ptw_done,
+    output wire debug_ptw_fault,
+    output wire [XLEN-1:0] debug_ptw_vaddr,
+    output wire [XLEN-1:0] debug_ptw_m_addr,
 
     // Gen6-N (docs/adr/0050): a real classic Wishbone MASTER port to an
     // external Mailbox.v -- the real inter-core handoff surface for a
@@ -281,14 +281,14 @@ module PIPELINED #(
     // "unconnected changes nothing" shape as every debug_* tap above --
     // no -Wall dangling-input warning breaks sim/run_tests.sh's own
     // actual compile flags, which don't use -Wall).
-    output              mailbox_m_cyc,
-    output              mailbox_m_stb,
-    output              mailbox_m_we,
-    output [XLEN-1:0]   mailbox_m_addr,
-    output [XLEN-1:0]   mailbox_m_data_o,
-    output [3:0]        mailbox_m_sel,
-    input  [XLEN-1:0]   mailbox_s_data_i,
-    input               mailbox_s_ack
+    output              wire mailbox_m_cyc,
+    output              wire mailbox_m_stb,
+    output              wire mailbox_m_we,
+    output wire [XLEN-1:0]   mailbox_m_addr,
+    output wire [XLEN-1:0]   mailbox_m_data_o,
+    output wire [3:0]        mailbox_m_sel,
+    input  wire [XLEN-1:0]   mailbox_s_data_i,
+    input               wire mailbox_s_ack
 );
 // Register-address field width, derived once and reused on every
 // pipeline-register/Register.v/Forward.v/Hazard.v instantiation below.

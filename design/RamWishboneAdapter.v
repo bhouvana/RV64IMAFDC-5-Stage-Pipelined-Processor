@@ -32,18 +32,18 @@ module RamWishboneAdapter #(
     parameter DATA_INIT_FILE = "",
     parameter ZERO_INIT_LIMIT_OVERRIDE = 0  // docs/adr/0036 -- threaded straight through to DataMemoryBRAM.v
 )(
-    input clk,
-    input rst,
+    input wire clk,
+    input wire rst,
 
-    input                          s_cyc,
-    input                          s_stb,
-    input                          s_we,
-    input      [XLEN-1:0]          s_addr,
-    input      [XLEN-1:0]          s_data_o,
-    input      [`WB_SEL_WIDTH-1:0] s_sel,   // unused: funct3 already carries width (see header)
-    input      [2:0]               funct3,  // side-band width+signedness tag
-    output     [XLEN-1:0]          s_data_i,
-    output                         s_ack
+    input                          wire s_cyc,
+    input                          wire s_stb,
+    input                          wire s_we,
+    input      wire [XLEN-1:0]          s_addr,
+    input      wire [XLEN-1:0]          s_data_o,
+    input      wire [`WB_SEL_WIDTH-1:0] s_sel,   // unused: funct3 already carries width (see header)
+    input      wire [2:0]               funct3,  // side-band width+signedness tag
+    output     wire [XLEN-1:0]          s_data_i,
+    output                         wire s_ack
 );
 
 wire mem_write = s_cyc && s_stb && s_we;

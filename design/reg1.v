@@ -13,14 +13,14 @@ module reg1 #(
                             // happens to be XLEN bits wide, coincidentally, only
                             // because both are 32 for this ISA).
 )(
-    input clk,
-    input rst,
-    input stall,
-    input [XLEN-1:0] inst,
-    input [XLEN-1:0] pc_o,
-    input branch_regde,
-    input zero,
-    input jump,       // unconditional redirect (jal) resolved in EX, same squash as a taken branch
+    input wire clk,
+    input wire rst,
+    input wire stall,
+    input wire [XLEN-1:0] inst,
+    input wire [XLEN-1:0] pc_o,
+    input wire branch_regde,
+    input wire zero,
+    input wire jump,       // unconditional redirect (jal) resolved in EX, same squash as a taken branch
     // docs/adr/0021-branch-prediction.md (Phase E4). The branch predictor's
     // guess for THIS specific fetch (queried at the same address `inst`
     // itself was fetched from), latched alongside it with exactly the same
@@ -31,8 +31,8 @@ module reg1 #(
     // the branch/jump redirect condition entirely into `jump` above instead
     // of this module's own branch_regde/zero ports in that case too (see
     // riscvpipeline.v's own comment at the reg1 instantiation).
-    input predict_taken,
-    input [XLEN-1:0] predict_target,
+    input wire predict_taken,
+    input wire [XLEN-1:0] predict_target,
     // docs/adr/00NN-mmu-sv32.md (Phase F5). Whether THIS fetch attempt's
     // resolution (a same-cycle TLB-hit permission failure, or a just-
     // concluded Ptw.v walk) was a page fault -- the "instruction" bits
@@ -44,7 +44,7 @@ module reg1 #(
     // passes decode context through, zeros only control fields) -- the
     // garbage instruction's rs1/rs2 could coincidentally trigger an
     // unrelated load-use hazard, and the fault flag must survive that.
-    input ifetch_fault,
+    input wire ifetch_fault,
     // docs/adr/0037-rvc-compressed-instructions-phase-u.md. Whether THIS
     // fetch was a 2-byte compressed instruction (inst[1:0] != 2'b11) --
     // `inst` itself has already been expanded to its standard 32-bit
@@ -55,7 +55,7 @@ module reg1 #(
     // real next sequential PC is +2 or +4 -- same decode-context-group
     // reasoning ifetch_fault above already documents (must survive a
     // load-use flush unmolested).
-    input is_compressed,
+    input wire is_compressed,
     output reg [XLEN-1:0] inst_regfd,
     output reg [XLEN-1:0] pc_o_regfd,
     output reg predict_taken_regfd,

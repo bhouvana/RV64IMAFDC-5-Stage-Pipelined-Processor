@@ -5,7 +5,7 @@
 // word and sign-extended (or, for CSR addresses, zero-extended) per RV32I's
 // spec.
 module ImmGen#(parameter Width = 32) (
-    input [Width-1:0] inst,
+    input wire [Width-1:0] inst,
     output reg signed [Width-1:0] imm
 );
 

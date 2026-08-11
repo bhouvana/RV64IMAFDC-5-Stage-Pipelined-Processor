@@ -51,8 +51,8 @@ module L2Cache #(
     // D-side instance. Mirrors VictimCache.v's own WITH_DIRTY convention.
     parameter WITH_DIRTY = 1
 )(
-    input clk,
-    input rst,
+    input wire clk,
+    input wire rst,
 
     // Upstream slave port -- Wishbone-shaped, facing the L1 cache's own
     // existing Wishbone-master output (DCache.v's `m_*` shape exactly; for
@@ -60,47 +60,47 @@ module L2Cache #(
     // Generation 4 Phase F6). Held continuously across a whole line's worth
     // of words by the caller (mirrors DCache.v's own `m_cyc =
     // (state==S_WB)||(state==S_FILL)`), one `u_ack` per word.
-    input                          u_cyc,
-    input                          u_stb,
-    input                          u_we,
-    input      [XLEN-1:0]          u_addr,
-    input      [XLEN-1:0]          u_data_o,
-    input      [`WB_SEL_WIDTH-1:0] u_sel,
-    input      [2:0]               u_funct3,
-    output     [XLEN-1:0]          u_data_i,
-    output                         u_ack,
+    input                          wire u_cyc,
+    input                          wire u_stb,
+    input                          wire u_we,
+    input      wire [XLEN-1:0]          u_addr,
+    input      wire [XLEN-1:0]          u_data_o,
+    input      wire [`WB_SEL_WIDTH-1:0] u_sel,
+    input      wire [2:0]               u_funct3,
+    output     wire [XLEN-1:0]          u_data_i,
+    output                         wire u_ack,
 
     // Downstream master port -- Wishbone-shaped, facing MemoryController.v
     // (D-side instance) or InstructionMemoryWishboneAdapter.v (I-side
     // instance, point-to-point, no shared bus involved). Always presents a
     // plain classic (non-burst) transaction shape -- no cti port at all,
     // see module header.
-    output                         m_cyc,
-    output                         m_stb,
-    output                         m_we,
-    output     [XLEN-1:0]          m_addr,
-    output     [XLEN-1:0]          m_data_o,
-    output     [`WB_SEL_WIDTH-1:0] m_sel,
-    output     [2:0]               m_funct3,
-    input      [XLEN-1:0]          m_data_i,
-    input                          m_ack,
+    output                         wire m_cyc,
+    output                         wire m_stb,
+    output                         wire m_we,
+    output     wire [XLEN-1:0]          m_addr,
+    output     wire [XLEN-1:0]          m_data_o,
+    output     wire [`WB_SEL_WIDTH-1:0] m_sel,
+    output     wire [2:0]               m_funct3,
+    input      wire [XLEN-1:0]          m_data_i,
+    input                          wire m_ack,
 
     // Inclusion probe port -- into whichever L1 this instance serves
     // (DCache.v Generation 4 Phase F3 / ICache.v Phase F4). Asserted before
     // ANY eviction of a currently-valid line (unconditional, see module
     // header) -- held until probe_ack pulses back.
-    output                         probe_req,
-    output     [XLEN-1:0]          probe_addr,
-    input                          probe_ack,
-    input                          probe_dirty,   // only meaningful if WITH_DIRTY; the I-side L1 (ICache.v) exposes no such output, tied 0 at the instantiation site
-    input      [XLEN*(LINE_BYTES/4)-1:0] probe_data,   // only meaningful if probe_dirty
+    output                         wire probe_req,
+    output     wire [XLEN-1:0]          probe_addr,
+    input                          wire probe_ack,
+    input                          wire probe_dirty,   // only meaningful if WITH_DIRTY; the I-side L1 (ICache.v) exposes no such output, tied 0 at the instantiation site
+    input      wire [XLEN*(LINE_BYTES/4)-1:0] probe_data,   // only meaningful if probe_dirty
 
     // docs/adr/0025-hpc-performance-csrs.md-style perf taps (testbench-tap
     // only this phase, see the ADR's own Future improvements -- no HPM/CSR
     // event wiring yet). Exactly-once-per-real-access, same discipline
     // DCache.v's own access_hit/access_miss already established.
-    output                         access_hit,
-    output                         access_miss,
+    output                         wire access_hit,
+    output                         wire access_miss,
 
     // docs/adr/0045-l2-cache-phase-f.md (Generation 4, Phase F). Fence's own
     // whole-cache flush needs to reach L2 too, not just L1 -- a real,
@@ -115,9 +115,9 @@ module L2Cache #(
     // stay valid/cached, just become clean, not an invalidation. Riscvpipeline.v
     // sequences this AFTER DCache.v's own flush completes (drain L1 into L2
     // first, then drain L2 into backing memory).
-    input                          flush_all,
-    output                         flush_busy,
-    output                         flush_done
+    input                          wire flush_all,
+    output                         wire flush_busy,
+    output                         wire flush_done
 );
 
 localparam LINE_WORDS    = LINE_BYTES / 4;

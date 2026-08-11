@@ -14,15 +14,15 @@ module Hazard #(
     parameter NUM_LOOKAHEAD = 1
 ) (
 
-    input [$clog2(NUM_REGS)-1:0] readReg1_fd,
-    input [$clog2(NUM_REGS)-1:0] readReg2_fd,
+    input wire [$clog2(NUM_REGS)-1:0] readReg1_fd,
+    input wire [$clog2(NUM_REGS)-1:0] readReg2_fd,
     // Per-lookahead-slot hazard sources, nearest-producer-first (see
     // riscvpipeline.v's instantiation for the default NUM_LOOKAHEAD=1
     // mapping: index 0 = the instruction now entering EX, "regde").
-    input [NUM_LOOKAHEAD-1:0] la_memRead,
-    input [NUM_LOOKAHEAD*$clog2(NUM_REGS)-1:0] la_dest,
-    output flush,
-    output stall
+    input wire [NUM_LOOKAHEAD-1:0] la_memRead,
+    input wire [NUM_LOOKAHEAD*$clog2(NUM_REGS)-1:0] la_dest,
+    output wire flush,
+    output wire stall
 );
 
 localparam REG_ADDR_WIDTH = $clog2(NUM_REGS);

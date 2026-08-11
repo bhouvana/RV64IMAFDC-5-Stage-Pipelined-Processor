@@ -38,25 +38,25 @@ module CSR #(
                              // (riscvpipeline.v, and OOOCore.v before this
                              // phase) simply gets the default, unused.
 )(
-    input clk,
-    input rst,
+    input wire clk,
+    input wire rst,
 
     // csrrw/csrrs/csrrc(+immediate variants), resolved by the caller into a
     // uniform (addr, op, wdata) triple -- riscvpipeline.v handles picking
     // rs1 vs. the zero-extended uimm before this port.
-    input csr_write_en,
-    input [11:0] csr_addr,
-    input [1:0] csr_op,      // == inst[13:12] == funct3[1:0] directly: 2'b01=write(csrrw/csrrwi)
+    input wire csr_write_en,
+    input wire [11:0] csr_addr,
+    input wire [1:0] csr_op,      // == inst[13:12] == funct3[1:0] directly: 2'b01=write(csrrw/csrrwi)
                               // 2'b10=set(csrrs/csrrsi) 2'b11=clear(csrrc/csrrci) -- no remapping
                               // needed at the call site, riscv_defs.vh's CSR_F3_* already follow
                               // this same low-2-bits pattern
-    input [XLEN-1:0] csr_wdata,
+    input wire [XLEN-1:0] csr_wdata,
     output reg [XLEN-1:0] csr_rdata,  // current value at csr_addr, combinational (old value, for rd)
 
-    input trap_taken,
-    input [XLEN-1:0] trap_pc,     // faulting instruction's own PC (exception) or the PC of the
+    input wire trap_taken,
+    input wire [XLEN-1:0] trap_pc,     // faulting instruction's own PC (exception) or the PC of the
                                     // instruction that would have executed next (interrupt) -> mepc
-    input [XLEN-1:0] trap_cause,  // low bits only (never bit31 set) -> mcause[30:0]
+    input wire [XLEN-1:0] trap_cause,  // low bits only (never bit31 set) -> mcause[30:0]
     // docs/adr/0020-soc-integration.md (Phase D9). Set by riscvpipeline.v's
     // interrupt_taken exactly when this trap is an interrupt rather than a
     // synchronous exception -> mcause[31], the spec's own
@@ -65,7 +65,7 @@ module CSR #(
     // MCAUSE_INT_* deliberately share the low-bit numbering space, per
     // their own header comment) -- this bit is the only thing that tells
     // them apart.
-    input trap_is_interrupt,
+    input wire trap_is_interrupt,
     // docs/adr/00NN-mmu-sv32.md (Phase F3). The faulting virtual address,
     // for mtval/stval -- 0 for every cause this phase itself raises (a
     // spec-legal choice; mtval's content for non-page-fault causes is
@@ -73,10 +73,10 @@ module CSR #(
     // wires the real value in for page faults with zero further changes
     // needed here, the same tie-off-then-real-wire staging D7/D8 used for
     // timer_pending/ext_pending.
-    input [XLEN-1:0] trap_value,
+    input wire [XLEN-1:0] trap_value,
 
-    input mret_taken,
-    input sret_taken,  // docs/adr/00NN-mmu-sv32.md (Phase F3) -- riscvpipeline.v
+    input wire mret_taken,
+    input wire sret_taken,  // docs/adr/00NN-mmu-sv32.md (Phase F3) -- riscvpipeline.v
                          // gates this off before it ever reaches here (see
                          // sret_real there), same as mret_taken already is
 
@@ -90,27 +90,27 @@ module CSR #(
     // RM_DYN (3'b111) before it ever reaches FALU.v/FMADDUnit.v/FDivider.v/
     // FSqrt.v -- see FALU.v's own header comment for why those modules
     // themselves only ever see an already-resolved rm.
-    input fp_flags_we,
-    input [4:0] fp_flags_in,
-    output [2:0] frm_val,
+    input wire fp_flags_we,
+    input wire [4:0] fp_flags_in,
+    output wire [2:0] frm_val,
 
     // docs/adr/0020-soc-integration.md (Phase D7/D8) originally wired
     // timer_pending/ext_pending; docs/adr/0034 (Phase R) adds msip_pending
     // -- Timer.v's own new CLINT `msip` register -- alongside them. All
     // three feed mip's three real, read-only bits.
-    input msip_pending,
-    input timer_pending,
-    input ext_pending,
+    input wire msip_pending,
+    input wire timer_pending,
+    input wire ext_pending,
 
     // docs/adr/0020-soc-integration.md (Phase D9). Consumed by
     // riscvpipeline.v's interrupt-detection condition (mstatus_mie &
     // ((mip.MEIP & mie.MEIE) | (mip.MSIP & mie.MSIE) | (mip.MTIP &
     // mie.MTIE)), Phase R) -- CSR.v's own interface needed no further
     // changes to support it, exactly as D7 anticipated.
-    output mstatus_mie,  // mstatus[3], the global trap/interrupt enable
-    output mie_msie,     // mie's machine-software-interrupt enable bit (Phase R)
-    output mie_mtie,     // mie's machine-timer-interrupt enable bit
-    output mie_meie,     // mie's machine-external-interrupt enable bit
+    output wire mstatus_mie,  // mstatus[3], the global trap/interrupt enable
+    output wire mie_msie,     // mie's machine-software-interrupt enable bit (Phase R)
+    output wire mie_mtie,     // mie's machine-timer-interrupt enable bit
+    output wire mie_meie,     // mie's machine-external-interrupt enable bit
 
     // docs/adr/0035-minimal-sbi-firmware-phase-s.md (Phase S). Real
     // consumers, not formal-observability-only: riscvpipeline.v's own
@@ -124,10 +124,10 @@ module CSR #(
     // mip_ssip/mip_stip expose mip_sw's own SSIP/STIP bits the identical
     // way timer_pending/ext_pending already expose Timer.v/Uart.v's real
     // hardware pending state.
-    output mie_ssie,     // mie's supervisor-software-interrupt enable bit
-    output mie_stie,     // mie's supervisor-timer-interrupt enable bit
-    output mip_ssip,     // mip_sw's supervisor-software-interrupt pending bit
-    output mip_stip,     // mip_sw's supervisor-timer-interrupt pending bit
+    output wire mie_ssie,     // mie's supervisor-software-interrupt enable bit
+    output wire mie_stie,     // mie's supervisor-timer-interrupt enable bit
+    output wire mip_ssip,     // mip_sw's supervisor-software-interrupt pending bit
+    output wire mip_stip,     // mip_sw's supervisor-timer-interrupt pending bit
 
     // docs/adr/0027-formal-verification.md (Phase L3) added these as
     // formal-observability-only outputs; docs/adr/0035 (Phase S) gives
@@ -141,26 +141,26 @@ module CSR #(
     // declared, driverless stand-in signal, unlike iverilog's simulator,
     // which resolves this hierarchy path natively); an ordinary port is
     // the portable way to expose it to both toolchains.
-    output mstatus_mpie,        // mstatus[7]
-    output mstatus_sie,         // mstatus[1]
-    output mstatus_spie,        // mstatus[5]
-    output mstatus_spp,         // mstatus[8]
-    output [1:0] mstatus_mpp,   // mstatus[12:11]
+    output wire mstatus_mpie,        // mstatus[7]
+    output wire mstatus_sie,         // mstatus[1]
+    output wire mstatus_spie,        // mstatus[5]
+    output wire mstatus_spp,         // mstatus[8]
+    output wire [1:0] mstatus_mpp,   // mstatus[12:11]
 
-    output [XLEN-1:0] mtvec_val,  // trap target for the redirect mux
-    output [XLEN-1:0] mepc_val,   // mret target for the redirect mux
+    output wire [XLEN-1:0] mtvec_val,  // trap target for the redirect mux
+    output wire [XLEN-1:0] mepc_val,   // mret target for the redirect mux
 
     // Phase F of the redesign (docs/adr/00NN-mmu-sv32.md; docs/adr/0011/0020
     // both explicitly deferred this).
-    output [1:0] priv_mode_val,   // current privilege -- PRIV_U/PRIV_S/PRIV_M
+    output wire [1:0] priv_mode_val,   // current privilege -- PRIV_U/PRIV_S/PRIV_M
     // docs/adr/00NN-mmu-sv32.md (Phase F3). stvec_val/sepc_val mirror
     // mtvec_val/mepc_val for the S-mode redirect targets; trap_target_is_s
     // tells riscvpipeline.v's redirect mux which pair to use for THIS
     // trap, computed here (not there) since the decision needs mideleg/
     // medeleg/priv_mode, all of which already live in this module.
-    output [XLEN-1:0] stvec_val,
-    output [XLEN-1:0] sepc_val,
-    output trap_target_is_s,
+    output wire [XLEN-1:0] stvec_val,
+    output wire [XLEN-1:0] sepc_val,
+    output wire trap_target_is_s,
 
     // docs/adr/00NN-mmu-sv32.md (Phase F5). satp's own two fields the
     // translation gate needs: MODE (bit 31 -- 0=Bare/1=Sv32) and PPN
@@ -197,16 +197,16 @@ module CSR #(
     // here is already the caller's own responsibility to gate exactly-once
     // per real event (riscvpipeline.v's own comments document each one);
     // CSR.v just counts whatever it's handed.
-    input instret_pulse,
-    input branch_retired_pulse,
-    input mispredict_pulse,
-    input icache_hit_pulse,
-    input icache_miss_pulse,
-    input dcache_hit_pulse,
-    input dcache_miss_pulse,
-    input stall_cycle_pulse,
-    input interrupt_pulse,
-    input exception_pulse,
+    input wire instret_pulse,
+    input wire branch_retired_pulse,
+    input wire mispredict_pulse,
+    input wire icache_hit_pulse,
+    input wire icache_miss_pulse,
+    input wire dcache_hit_pulse,
+    input wire dcache_miss_pulse,
+    input wire stall_cycle_pulse,
+    input wire interrupt_pulse,
+    input wire exception_pulse,
 
     // Phase K (docs/adr/0026-performance-profiler.md). Nine more countable
     // events (indices 10-18) -- the same raw per-cause wires whose OR
@@ -219,15 +219,15 @@ module CSR #(
     // I$ hit/miss (icache_hit_pulse/icache_miss_pulse), which is a
     // deliberately different question ("how many misses happened" vs.
     // "how many cycles did a miss cost").
-    input stall_hazard_pulse,      // riscvpipeline.v's own `stall` (Hazard.v/HazardNoForward.v)
-    input stall_div_pulse,         // div_stall
-    input stall_mem_pulse,         // mem_stall
-    input stall_fp_pulse,          // fp_stall
-    input stall_float_lu_pulse,    // float_load_use_hazard
-    input stall_itlb_pulse,        // itlb_miss
-    input stall_dtlb_pulse,        // dtlb_miss
-    input stall_icache_pulse,      // icache_miss
-    input stall_imem_wait_pulse,   // imem_wait
+    input wire stall_hazard_pulse,      // riscvpipeline.v's own `stall` (Hazard.v/HazardNoForward.v)
+    input wire stall_div_pulse,         // div_stall
+    input wire stall_mem_pulse,         // mem_stall
+    input wire stall_fp_pulse,          // fp_stall
+    input wire stall_float_lu_pulse,    // float_load_use_hazard
+    input wire stall_itlb_pulse,        // itlb_miss
+    input wire stall_dtlb_pulse,        // dtlb_miss
+    input wire stall_icache_pulse,      // icache_miss
+    input wire stall_imem_wait_pulse,   // imem_wait
 
     // Gen7 Pillar V Phase 1 (docs/adr/0061). vl/vsew/vlmul/vill: live
     // decoded vtype/vl state -- unconnected until a future phase's vector

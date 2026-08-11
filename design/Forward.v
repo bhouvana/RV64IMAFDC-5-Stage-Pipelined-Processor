@@ -14,13 +14,13 @@ module Forward #(
     parameter NUM_FWD_SRC = 2
 ) (
 
-    input [$clog2(NUM_REGS)-1:0] readReg1_regde,
-    input [$clog2(NUM_REGS)-1:0] readReg2_regde,
+    input wire [$clog2(NUM_REGS)-1:0] readReg1_regde,
+    input wire [$clog2(NUM_REGS)-1:0] readReg2_regde,
     // Per-source forwarding candidates, farthest-producer-first (see
     // riscvpipeline.v's instantiation for the default NUM_FWD_SRC=2 mapping:
     // index 0 = MEM/WB, index 1 = EX/MEM).
-    input [NUM_FWD_SRC-1:0] fwd_valid,
-    input [NUM_FWD_SRC*$clog2(NUM_REGS)-1:0] fwd_dest,
+    input wire [NUM_FWD_SRC-1:0] fwd_valid,
+    input wire [NUM_FWD_SRC*$clog2(NUM_REGS)-1:0] fwd_dest,
     output reg [$clog2(NUM_FWD_SRC+1)-1:0] forwardA,
     output reg [$clog2(NUM_FWD_SRC+1)-1:0] forwardB
 );

@@ -23,8 +23,8 @@
 // read does the same) rather than inventing a second illegal-instruction
 // signal path.
 module CompressedExpander (
-    input  [15:0] c,
-    output [31:0] exp
+    input  wire [15:0] c,
+    output wire [31:0] exp
 );
 
     wire [1:0] op = c[1:0];

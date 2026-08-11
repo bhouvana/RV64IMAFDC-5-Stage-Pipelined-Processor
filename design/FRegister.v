@@ -20,17 +20,17 @@ module FRegister #(
     parameter XLEN = 32,
     parameter NUM_REGS = 32
 ) (
-    input clk,
-    input rst,
-    input regWrite,
-    input [$clog2(NUM_REGS)-1:0] readReg1,
-    input [$clog2(NUM_REGS)-1:0] readReg2,
-    input [$clog2(NUM_REGS)-1:0] readReg3,
-    input [$clog2(NUM_REGS)-1:0] writeReg,
-    input [XLEN-1:0] writeData,
-    output [XLEN-1:0] readData1,
-    output [XLEN-1:0] readData2,
-    output [XLEN-1:0] readData3
+    input wire clk,
+    input wire rst,
+    input wire regWrite,
+    input wire [$clog2(NUM_REGS)-1:0] readReg1,
+    input wire [$clog2(NUM_REGS)-1:0] readReg2,
+    input wire [$clog2(NUM_REGS)-1:0] readReg3,
+    input wire [$clog2(NUM_REGS)-1:0] writeReg,
+    input wire [XLEN-1:0] writeData,
+    output wire [XLEN-1:0] readData1,
+    output wire [XLEN-1:0] readData2,
+    output wire [XLEN-1:0] readData3
 );
     reg [XLEN-1:0] regs [0:NUM_REGS-1];
     integer reset_i;

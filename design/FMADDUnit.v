@@ -35,11 +35,11 @@
 // it cannot affect the final 24-bit rounded result except through
 // inexactness.
 module FMADDUnit (
-    input [1:0] op,
-    input [2:0] rm,
-    input [31:0] a,    // rs1
-    input [31:0] b,    // rs2
-    input [31:0] c,    // rs3 (the addend)
+    input wire [1:0] op,
+    input wire [2:0] rm,
+    input wire [31:0] a,    // rs1
+    input wire [31:0] b,    // rs2
+    input wire [31:0] c,    // rs3 (the addend)
     output reg [31:0] result,
     output reg [4:0] flags    // {NV, DZ, OF, UF, NX} -- DZ never set here
 );

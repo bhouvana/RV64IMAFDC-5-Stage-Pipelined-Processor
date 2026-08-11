@@ -21,12 +21,12 @@
 module FDivider #(
     parameter XLEN = 32
 )(
-    input clk,
-    input rst,
-    input start,
-    input [2:0] rm,           // already-resolved rounding mode (see FALU.v's header comment on RM_DYN resolution)
-    input [XLEN-1:0] a,       // dividend (float bits)
-    input [XLEN-1:0] b,       // divisor (float bits)
+    input wire clk,
+    input wire rst,
+    input wire start,
+    input wire [2:0] rm,           // already-resolved rounding mode (see FALU.v's header comment on RM_DYN resolution)
+    input wire [XLEN-1:0] a,       // dividend (float bits)
+    input wire [XLEN-1:0] b,       // divisor (float bits)
     output reg busy,
     output reg done,          // one-cycle pulse
     output reg [XLEN-1:0] result,

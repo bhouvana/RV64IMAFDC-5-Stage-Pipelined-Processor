@@ -46,17 +46,17 @@ module Ptw #(
                            // bus in the core (docs/adr/0015), same as
                            // Divider.v's own XLEN parameter.
 )(
-    input clk,
-    input rst,
+    input wire clk,
+    input wire rst,
 
     // Request. `start` is a level, held by the caller for the walk's
     // entire duration (mirrors Divider.v's own `start` contract exactly).
-    input                  start,
-    input      [XLEN-1:0]  vaddr,
-    input      [21:0]      satp_ppn,   // satp's own real spec width (bits [21:0])
-    input                  is_fetch,   // 1 = instruction fetch (X access)
-    input                  is_store,   // 1 = store (W access); is_fetch=is_store=0 => load (R access)
-    input                  priv_is_u,  // 1 = current privilege is U, 0 = S (M-mode never calls this -- see header)
+    input                  wire start,
+    input      wire [XLEN-1:0]  vaddr,
+    input      wire [21:0]      satp_ppn,   // satp's own real spec width (bits [21:0])
+    input                  wire is_fetch,   // 1 = instruction fetch (X access)
+    input                  wire is_store,   // 1 = store (W access); is_fetch=is_store=0 => load (R access)
+    input                  wire priv_is_u,  // 1 = current privilege is U, 0 = S (M-mode never calls this -- see header)
 
     output reg             busy,
     output reg             done,       // one-cycle pulse: result/fault valid this cycle
@@ -68,14 +68,14 @@ module Ptw #(
     output reg             result_perm_u,
 
     // Wishbone master (own port, not yet muxed onto the shared bus -- F5).
-    output                          m_cyc,
-    output                          m_stb,
-    output                          m_we,
-    output     [XLEN-1:0]           m_addr,
-    output     [XLEN-1:0]           m_data_o,
-    output     [`WB_SEL_WIDTH-1:0]  m_sel,
-    input      [XLEN-1:0]           m_data_i,
-    input                           m_ack
+    output                          wire m_cyc,
+    output                          wire m_stb,
+    output                          wire m_we,
+    output     wire [XLEN-1:0]           m_addr,
+    output     wire [XLEN-1:0]           m_data_o,
+    output     wire [`WB_SEL_WIDTH-1:0]  m_sel,
+    input      wire [XLEN-1:0]           m_data_i,
+    input                           wire m_ack
 );
 
 localparam S_IDLE      = 3'd0;

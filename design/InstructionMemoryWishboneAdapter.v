@@ -29,17 +29,17 @@ module InstructionMemoryWishboneAdapter #(
     parameter INIT_FILE = "sim/programs/arith.mem",
     parameter ZERO_INIT_LIMIT_OVERRIDE = 0
 )(
-    input clk,
-    input rst,
+    input wire clk,
+    input wire rst,
 
-    input                          s_cyc,
-    input                          s_stb,
-    input                          s_we,      // ignored -- read-only
-    input      [XLEN-1:0]          s_addr,
-    input      [XLEN-1:0]          s_data_o,  // ignored -- read-only
-    input      [`WB_SEL_WIDTH-1:0] s_sel,     // ignored -- InstructionMemory.v has no sub-word granularity
-    output     [XLEN-1:0]          s_data_i,
-    output                         s_ack
+    input                          wire s_cyc,
+    input                          wire s_stb,
+    input                          wire s_we,      // ignored -- read-only
+    input      wire [XLEN-1:0]          s_addr,
+    input      wire [XLEN-1:0]          s_data_o,  // ignored -- read-only
+    input      wire [`WB_SEL_WIDTH-1:0] s_sel,     // ignored -- InstructionMemory.v has no sub-word granularity
+    output     wire [XLEN-1:0]          s_data_i,
+    output                         wire s_ack
 );
 
 InstructionMemory #(.INIT_FILE(INIT_FILE), .SIZE_BYTES(SIZE_BYTES), .XLEN(XLEN),

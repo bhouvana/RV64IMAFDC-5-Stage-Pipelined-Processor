@@ -16,14 +16,14 @@ module Control #(
                             // as ordinary add/sub/shift instead of trapping
                             // illegal-instruction, a real behavior change.
 )(
-    input [6:0] opcode,
+    input wire [6:0] opcode,
     //
-    input [6:0] funt7,   // full funct7 field (inst[31:25]) -- was 1 bit (inst[30]
+    input wire [6:0] funt7,   // full funct7 field (inst[31:25]) -- was 1 bit (inst[30]
                           // only), just enough to tell add from sub. RV32M needs
                           // funct7=0000001 distinguished from add/sub's 0/0100000,
                           // which the single-bit version couldn't represent.
-    input [2:0] funt3,
-    input [11:0] csr_imm12,  // inst[31:20]: a CSR address for real csrrX ops,
+    input wire [2:0] funt3,
+    input wire [11:0] csr_imm12,  // inst[31:20]: a CSR address for real csrrX ops,
                               // or the funct12 that distinguishes ecall/ebreak/mret
                               // when opcode=SYSTEM and funt3=000 (docs/adr/0011)
     //

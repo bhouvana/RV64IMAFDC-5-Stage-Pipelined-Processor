@@ -30,11 +30,11 @@ module Prefetcher #(
     parameter LINE_BYTES = 16,
     parameter MODE = 0   // PF_OFF=0 / PF_NEXT_LINE=1 / PF_STRIDE=2 / PF_STREAM=3
 )(
-    input clk, rst,
-    input                  update_valid,  // pulses once per genuine demand miss
-    input      [XLEN-1:0]  update_addr,   // that miss's line-aligned address
-    output                 pf_valid,
-    output     [XLEN-1:0]  pf_addr        // predicted next line-aligned address
+    input wire clk, rst,
+    input                  wire update_valid,  // pulses once per genuine demand miss
+    input      wire [XLEN-1:0]  update_addr,   // that miss's line-aligned address
+    output                 wire pf_valid,
+    output     wire [XLEN-1:0]  pf_addr        // predicted next line-aligned address
 );
 
 localparam PF_OFF       = 0;

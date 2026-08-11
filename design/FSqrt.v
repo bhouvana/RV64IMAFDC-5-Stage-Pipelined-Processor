@@ -33,11 +33,11 @@
 module FSqrt #(
     parameter XLEN = 32
 )(
-    input clk,
-    input rst,
-    input start,
-    input [2:0] rm,
-    input [XLEN-1:0] a,
+    input wire clk,
+    input wire rst,
+    input wire start,
+    input wire [2:0] rm,
+    input wire [XLEN-1:0] a,
     output reg busy,
     output reg done,
     output reg [XLEN-1:0] result,

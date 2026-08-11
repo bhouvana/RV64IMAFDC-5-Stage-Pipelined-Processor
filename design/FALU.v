@@ -31,11 +31,11 @@
 // X-propagation; this is not a spec requirement, just avoiding an
 // unnecessary latch/X risk here.
 module FALU (
-    input [4:0] funct5,
-    input [2:0] funct3,     // sub-selects within FUNCT5_FSGNJ/FMINMAX/FCMP/FMV_X_W_FCLASS, and doubles as the *rm* field for FADD/FSUB/FMUL/conversions
-    input [4:0] rs2_sel,    // sub-selects within FUNCT5_FCVT_W_S/FUNCT5_FCVT_S_W (which is 0 unused elsewhere)
-    input [31:0] a,         // rs1 (float bits, or integer bits for fcvt.s.w/fcvt.s.wu)
-    input [31:0] b,         // rs2 (float bits; unused for single-operand ops)
+    input wire [4:0] funct5,
+    input wire [2:0] funct3,     // sub-selects within FUNCT5_FSGNJ/FMINMAX/FCMP/FMV_X_W_FCLASS, and doubles as the *rm* field for FADD/FSUB/FMUL/conversions
+    input wire [4:0] rs2_sel,    // sub-selects within FUNCT5_FCVT_W_S/FUNCT5_FCVT_S_W (which is 0 unused elsewhere)
+    input wire [31:0] a,         // rs1 (float bits, or integer bits for fcvt.s.w/fcvt.s.wu)
+    input wire [31:0] b,         // rs2 (float bits; unused for single-operand ops)
     output reg [31:0] result,       // float bits, or an integer value -- caller (Control.v-driven routing) knows which
     output reg [4:0] flags          // {NV, DZ, OF, UF, NX} -- DZ never set here (FDIV/FSQRT-only)
 );

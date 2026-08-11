@@ -48,10 +48,10 @@
 module reg1a #(
     parameter XLEN = 32
 )(
-    input clk,
-    input rst,
-    input stall,
-    input [XLEN-1:0] pc_o,
+    input wire clk,
+    input wire rst,
+    input wire stall,
+    input wire [XLEN-1:0] pc_o,
     output reg [XLEN-1:0] pc_o_reg1a,
     // docs/adr/0021-branch-prediction.md (Phase E4). The branch predictor's
     // guess for THIS pc_o, relayed alongside it with exactly the same
@@ -62,8 +62,8 @@ module reg1a #(
     // entirely in riscvpipeline.v's redirect_squash_extend_r / reg1.v's own
     // priority chain -- see this module's own header for why a second,
     // independent squash source must never be added here.
-    input predict_taken,
-    input [XLEN-1:0] predict_target,
+    input wire predict_taken,
+    input wire [XLEN-1:0] predict_target,
     output reg predict_taken_reg1a,
     output reg [XLEN-1:0] predict_target_reg1a
 );

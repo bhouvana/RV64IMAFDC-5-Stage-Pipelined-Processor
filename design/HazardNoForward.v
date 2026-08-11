@@ -25,18 +25,18 @@
 module HazardNoForward #(
     parameter NUM_REGS = 32
 ) (
-    input [$clog2(NUM_REGS)-1:0] readReg1_fd,
-    input [$clog2(NUM_REGS)-1:0] readReg2_fd,
-    input regWrite_regde,
-    input [$clog2(NUM_REGS)-1:0] write_to_Reg_regde,
-    input regWrite_regem,
-    input [$clog2(NUM_REGS)-1:0] write_to_Reg_regem,
-    input branch_taken,   // reg2's *current* occupant (the same one hazard_ex
+    input wire [$clog2(NUM_REGS)-1:0] readReg1_fd,
+    input wire [$clog2(NUM_REGS)-1:0] readReg2_fd,
+    input wire regWrite_regde,
+    input wire [$clog2(NUM_REGS)-1:0] write_to_Reg_regde,
+    input wire regWrite_regem,
+    input wire [$clog2(NUM_REGS)-1:0] write_to_Reg_regem,
+    input wire branch_taken,   // reg2's *current* occupant (the same one hazard_ex
                            // checks) is resolving a taken branch/jal/jalr/
                            // trap/mret this cycle -- see the real bug this
                            // caught, below.
-    output flush,
-    output stall
+    output wire flush,
+    output wire stall
 );
 
 wire hazard_ex  = regWrite_regde && (write_to_Reg_regde != 0) &&

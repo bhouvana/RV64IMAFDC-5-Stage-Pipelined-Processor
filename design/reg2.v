@@ -79,22 +79,22 @@ module reg2 #(
     parameter XLEN = 32,       // docs/adr/0015-xlen-and-regcount-parameterization.md
     parameter NUM_REGS = 32
 ) (
-    input clk,
-    input rst,
-    input branch,
-    input memRead,
-    input memtoReg,
-    input memWrite,
-    input ALUSrc,
-    input regWrite,
-    input fRegWrite,  // docs/adr/0019-f-extension.md: writes FRegister.v instead of Register.v
-    input [$clog2(NUM_REGS)-1:0] writeReg,
-    input [6:0] funct7,
-    input [2:0] funct3,
-    input [1:0] ALUOp,
-    input [XLEN-1:0] pc_o_regfd,
-    input [XLEN-1:0] readData1,
-    input [XLEN-1:0] readData2,
+    input wire clk,
+    input wire rst,
+    input wire branch,
+    input wire memRead,
+    input wire memtoReg,
+    input wire memWrite,
+    input wire ALUSrc,
+    input wire regWrite,
+    input wire fRegWrite,  // docs/adr/0019-f-extension.md: writes FRegister.v instead of Register.v
+    input wire [$clog2(NUM_REGS)-1:0] writeReg,
+    input wire [6:0] funct7,
+    input wire [2:0] funct3,
+    input wire [1:0] ALUOp,
+    input wire [XLEN-1:0] pc_o_regfd,
+    input wire [XLEN-1:0] readData1,
+    input wire [XLEN-1:0] readData2,
     // docs/adr/0019-f-extension.md (Phase C6): FRegister.v's own three read
     // ports, kept entirely separate from readData1/readData2 above rather
     // than muxed/shared -- these are NOT yet forwarded (that's Phase C7;
@@ -106,13 +106,13 @@ module reg2 #(
     // share the same index -- keeping the two paths fully separate avoids
     // that cross-file ambiguity by construction instead of needing extra
     // logic to rule it out.
-    input [XLEN-1:0] freadData1,
-    input [XLEN-1:0] freadData2,
-    input [XLEN-1:0] freadData3,
-    input [XLEN-1:0] imm,
-    input [XLEN-1:0] inst_regfd,
-    input flush,
-    input branch_taken,
+    input wire [XLEN-1:0] freadData1,
+    input wire [XLEN-1:0] freadData2,
+    input wire [XLEN-1:0] freadData3,
+    input wire [XLEN-1:0] imm,
+    input wire [XLEN-1:0] inst_regfd,
+    input wire flush,
+    input wire branch_taken,
     // docs/adr/0025-hpc-performance-csrs.md (Phase J3). "Is reg1's current
     // output a real fetched instruction, or a squash-produced bubble" --
     // wired to `!id_bubble_r` at the call site (riscvpipeline.v already
@@ -122,52 +122,52 @@ module reg2 #(
     // same as every other control field), passed straight through
     // otherwise -- minstret counts a retiring instruction by this bit
     // surviving all the way to reg3 (see reg3.v/riscvpipeline.v).
-    input valid,
-    input hold,   // multi-cycle divide interlock (docs/adr/0009): freeze every
+    input wire valid,
+    input wire hold,   // multi-cycle divide interlock (docs/adr/0009): freeze every
                   // field exactly as-is while a div/rem's result isn't ready
                   // yet. Distinct from `flush`: flush *bubbles* (zeros
                   // control, keeps decode context); hold changes nothing at
                   // all, because the div/rem instruction itself must stay
                   // put in EX until the divider finishes with it.
-    input [$clog2(NUM_REGS)-1:0] readReg1,
-    input [$clog2(NUM_REGS)-1:0] readReg2,
+    input wire [$clog2(NUM_REGS)-1:0] readReg1,
+    input wire [$clog2(NUM_REGS)-1:0] readReg2,
     // docs/adr/0019-f-extension.md (Phase C7): rs3's index (inst[31:27]),
     // latched the same "always read, harmless when unused" way readReg1/
     // readReg2 already are -- only the R4-type FMADD family has a real rs3,
     // but FForward.v needs this index for every instruction to correctly
     // report "no forward" (index 0) rather than an accidental stale match.
-    input [$clog2(NUM_REGS)-1:0] readReg3,
+    input wire [$clog2(NUM_REGS)-1:0] readReg3,
     // docs/adr/0021-branch-prediction.md (Phase E4). The branch predictor's
     // guess for this instruction, latched alongside every other piece of
     // decode context (see ZERO_DECODE_CONTEXT/PASS_DECODE_CONTEXT above) so
     // it's available in EX, two cycles after fetch, to compare against the
     // real resolved outcome. Always 0/don't-care under PREDICTOR_STATIC.
-    input predict_taken,
-    input [XLEN-1:0] predict_target,
+    input wire predict_taken,
+    input wire [XLEN-1:0] predict_target,
     // docs/adr/00NN-mmu-sv32.md (Phase F5). reg1's own ifetch_fault_regfd,
     // carried one more stage to EX -- same decode-context treatment as
     // predict_taken/predict_target above, for the same reason (see
     // reg1.v's own port comment).
-    input ifetch_fault,
+    input wire ifetch_fault,
     // docs/adr/0037-rvc-compressed-instructions-phase-u.md. reg1's own
     // is_compressed_regfd, carried one more stage to EX -- same decode-
     // context treatment as ifetch_fault above, needed here because
     // riscvpipeline.v's own pc_plus4 adder (jal/jalr link value, and the
     // branch predictor's fallthrough-PC comparison) lives at this stage.
-    input is_compressed,
-    input jump,
-    input jalr,
-    input lui,
-    input auipc,
-    input isCsr,
-    input isEcall,
-    input isEbreak,
-    input isMret,
-    input isSret,        // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F3)
-    input isSfenceVma,    // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F5)
-    input isFence,        // docs/adr/0023-caches.md (Phase G1) -- no live consumer yet (G6)
-    input isAmo,          // docs/adr/0038-a-extension-phase-v.md
-    input illegalOpcode,
+    input wire is_compressed,
+    input wire jump,
+    input wire jalr,
+    input wire lui,
+    input wire auipc,
+    input wire isCsr,
+    input wire isEcall,
+    input wire isEbreak,
+    input wire isMret,
+    input wire isSret,        // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F3)
+    input wire isSfenceVma,    // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F5)
+    input wire isFence,        // docs/adr/0023-caches.md (Phase G1) -- no live consumer yet (G6)
+    input wire isAmo,          // docs/adr/0038-a-extension-phase-v.md
+    input wire illegalOpcode,
 
     output reg valid_regde,
     output reg branch_regde,

@@ -16,9 +16,9 @@ module MuxN #(
     parameter size = 32,
     parameter NUM_SRC = 2
 ) (
-    input [$clog2(NUM_SRC+1)-1:0] sel,
-    input signed [size-1:0] s0,
-    input signed [NUM_SRC*size-1:0] src,
+    input wire [$clog2(NUM_SRC+1)-1:0] sel,
+    input wire signed [size-1:0] s0,
+    input wire signed [NUM_SRC*size-1:0] src,
     output reg signed [size-1:0] out
 );
 

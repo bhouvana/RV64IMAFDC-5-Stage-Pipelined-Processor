@@ -11,9 +11,9 @@
 module ALU #(
     parameter XLEN = 32   // docs/adr/0015-xlen-and-regcount-parameterization.md
 )(
-    input [6:0] ALUCtl,
-    input [XLEN-1:0] A,B,
-    input wordOp,  // Generation 2 (Phase M, docs/adr/0028-rv64-migration-
+    input wire [6:0] ALUCtl,
+    input wire [XLEN-1:0] A,B,
+    input wire wordOp,  // Generation 2 (Phase M, docs/adr/0028-rv64-migration-
                     // phase-m.md): RV64I's "w"-suffixed family (addw/subw/
                     // sllw/srlw/sraw/mulw, and addiw/slliw/srliw/sraiw via
                     // the same ADD/SLL/SRL/SRA arms) -- compute on the low

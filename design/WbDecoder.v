@@ -29,24 +29,24 @@ module WbDecoder #(
     parameter [NUM_SLAVES*XLEN-1:0] SIZE = 0
 )(
     // Master side (from riscvpipeline.v's LSU-to-bus adapter)
-    input                              m_cyc,
-    input                              m_stb,
-    input                              m_we,
-    input      [XLEN-1:0]              m_addr,
-    input      [XLEN-1:0]              m_data_o,
-    input      [`WB_SEL_WIDTH-1:0]     m_sel,
+    input                              wire m_cyc,
+    input                              wire m_stb,
+    input                              wire m_we,
+    input      wire [XLEN-1:0]              m_addr,
+    input      wire [XLEN-1:0]              m_data_o,
+    input      wire [`WB_SEL_WIDTH-1:0]     m_sel,
     output reg [XLEN-1:0]              m_data_i,
     output reg                         m_ack,
 
     // Slave side, flattened NUM_SLAVES-wide (index order matches BASE/SIZE)
-    output     [NUM_SLAVES-1:0]        s_cyc,
-    output     [NUM_SLAVES-1:0]        s_stb,
-    output                             s_we,
-    output     [XLEN-1:0]              s_addr,
-    output     [XLEN-1:0]              s_data_o,
-    output     [`WB_SEL_WIDTH-1:0]     s_sel,
-    input      [NUM_SLAVES*XLEN-1:0]   s_data_i,
-    input      [NUM_SLAVES-1:0]        s_ack
+    output     wire [NUM_SLAVES-1:0]        s_cyc,
+    output     wire [NUM_SLAVES-1:0]        s_stb,
+    output                             wire s_we,
+    output     wire [XLEN-1:0]              s_addr,
+    output     wire [XLEN-1:0]              s_data_o,
+    output     wire [`WB_SEL_WIDTH-1:0]     s_sel,
+    input      wire [NUM_SLAVES*XLEN-1:0]   s_data_i,
+    input      wire [NUM_SLAVES-1:0]        s_ack
 );
 
 // we/addr/data_o/sel are identical for every slave -- only cyc/stb (below)

@@ -19,13 +19,13 @@ module Register #(
                                    // this to its own MEM_SIZE_BYTES so the
                                    // two can't silently drift apart.
 ) (
-    input clk,
-    input rst,
-    input regWrite,
-    input [$clog2(NUM_REGS)-1:0] readReg1,
-    input [$clog2(NUM_REGS)-1:0] readReg2,
-    input [$clog2(NUM_REGS)-1:0] writeReg,
-    input [XLEN-1:0] writeData,
+    input wire clk,
+    input wire rst,
+    input wire regWrite,
+    input wire [$clog2(NUM_REGS)-1:0] readReg1,
+    input wire [$clog2(NUM_REGS)-1:0] readReg2,
+    input wire [$clog2(NUM_REGS)-1:0] writeReg,
+    input wire [XLEN-1:0] writeData,
     // Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
     // A second, independent write port for MSHR-completion writeback -- a
     // load that retired early (see Scoreboard.v) needs its result written
@@ -38,11 +38,11 @@ module Register #(
     // rather than silently dropping one write, matching this project's own
     // "never fail silently" discipline (docs/adr/0043's own stuck-ack bug
     // went undetected for exactly this class of reason).
-    input we2,
-    input [$clog2(NUM_REGS)-1:0] waddr2,
-    input [XLEN-1:0] wdata2,
-    output [XLEN-1:0] readData1,
-    output [XLEN-1:0] readData2
+    input wire we2,
+    input wire [$clog2(NUM_REGS)-1:0] waddr2,
+    input wire [XLEN-1:0] wdata2,
+    output wire [XLEN-1:0] readData1,
+    output wire [XLEN-1:0] readData2
 );
     reg [XLEN-1:0] regs [0:NUM_REGS-1];
     integer reset_i;

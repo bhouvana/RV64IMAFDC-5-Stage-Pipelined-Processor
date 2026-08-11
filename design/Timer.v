@@ -45,20 +45,20 @@
 module Timer #(
     parameter XLEN = 32
 )(
-    input clk,
-    input rst,
+    input wire clk,
+    input wire rst,
 
-    input                          s_cyc,
-    input                          s_stb,
-    input                          s_we,
-    input      [XLEN-1:0]          s_addr,
-    input      [XLEN-1:0]          s_data_o,
-    input      [`WB_SEL_WIDTH-1:0] s_sel,
+    input                          wire s_cyc,
+    input                          wire s_stb,
+    input                          wire s_we,
+    input      wire [XLEN-1:0]          s_addr,
+    input      wire [XLEN-1:0]          s_data_o,
+    input      wire [`WB_SEL_WIDTH-1:0] s_sel,
     output reg [XLEN-1:0]          s_data_i,
-    output                         s_ack,
+    output                         wire s_ack,
 
-    output pending,       // mtime >= mtimecmp -- Phase R's mip.MTIP source
-    output msip_pending   // msip[0] -- Phase R's mip.MSIP source
+    output wire pending,       // mtime >= mtimecmp -- Phase R's mip.MTIP source
+    output wire msip_pending   // msip[0] -- Phase R's mip.MSIP source
 );
 
 wire bus_write = s_cyc && s_stb && s_we;

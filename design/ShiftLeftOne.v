@@ -14,8 +14,8 @@ module ShiftLeftOne #(
                              // actually instantiated PIPELINED at XLEN=64,
                              // not anticipated in the plan.
 )(
-    input signed [Width-1:0] i,
-    output signed [Width-1:0] o
+    input wire signed [Width-1:0] i,
+    output wire signed [Width-1:0] o
 );
 
    assign o = i << 1;

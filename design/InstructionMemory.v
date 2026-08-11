@@ -49,8 +49,8 @@ module InstructionMemory #(
     // instead of changing the shared default.
     parameter ZERO_INIT_LIMIT_OVERRIDE = 0
 ) (
-    input [XLEN-1:0] readAddr,
-    output [XLEN-1:0] inst
+    input wire [XLEN-1:0] readAddr,
+    output wire [XLEN-1:0] inst
 );
 
     reg [7:0] insts [0:SIZE_BYTES-1];

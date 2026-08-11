@@ -61,3 +61,17 @@ __pycache__/
 
 # Local Claude Code project settings, not project source.
 /.claude/
+
+# Vivado FPGA workflow (fpga/vivado/, docs/superpowers/plans/
+# 2026-08-11-vivado-fpga-synthesis-workflow.md) -- project builds/runs/caches
+# are regenerable from fpga/vivado/create_project.tcl + run_all.tcl, not
+# source. Only fpga/vivado/reports/ (hand-picked .rpt copies) is checked in.
+/fpga/vivado/build/
+*.jou
+*.log
+*.str
+.Xil/
+*.wdb
+webtalk*.jou
+webtalk*.log
+*.lic

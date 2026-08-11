@@ -9,10 +9,10 @@
 module PC #(
     parameter XLEN = 32   // docs/adr/0015-xlen-and-regcount-parameterization.md
 )(
-    input clk,
-    input rst,
-    input stall,
-    input [XLEN-1:0] pc_i,
+    input wire clk,
+    input wire rst,
+    input wire stall,
+    input wire [XLEN-1:0] pc_i,
     output reg [XLEN-1:0] pc_o
 );
 

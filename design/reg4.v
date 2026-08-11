@@ -11,30 +11,30 @@ module reg4 #(
     parameter XLEN = 32,       // docs/adr/0015-xlen-and-regcount-parameterization.md
     parameter NUM_REGS = 32
 ) (
-    input clk,
-    input rst,
-    input memtoReg_regem,
-    input regWrite_regem,
-    input fRegWrite_regem,  // docs/adr/0019-f-extension.md: writes FRegister.v, not Register.v
+    input wire clk,
+    input wire rst,
+    input wire memtoReg_regem,
+    input wire regWrite_regem,
+    input wire fRegWrite_regem,  // docs/adr/0019-f-extension.md: writes FRegister.v, not Register.v
     // docs/adr/0027-formal-verification.md (Phase L2). Trivial passthrough,
     // identical shape to regWrite_regwb's own -- closes the loop reg2/reg3
     // already opened (docs/adr/0025 Phase J3's valid_regde/valid_regem) so
     // a WB-stage "this is a real, non-squashed instruction" signal exists
     // for the whole-pipeline formal property to assert against
     // (regWrite_regwb implies valid_regwb).
-    input valid_regem,
-    input [XLEN-1:0] readData,
-    input [XLEN-1:0] ALUOut_regem,
-    input [$clog2(NUM_REGS)-1:0] write_to_Reg_regem,
-    input jump_regem,
-    input [XLEN-1:0] pc_plus4_regem,
+    input wire valid_regem,
+    input wire [XLEN-1:0] readData,
+    input wire [XLEN-1:0] ALUOut_regem,
+    input wire [$clog2(NUM_REGS)-1:0] write_to_Reg_regem,
+    input wire jump_regem,
+    input wire [XLEN-1:0] pc_plus4_regem,
     // docs/adr/0038-a-extension-phase-v.md: gates the WB-stage writeback
     // mux's own new AMO arm (riscvpipeline.v reads amo_captured_read_r --
     // a plain top-level register, not threaded through this module -- once
     // this flag says the occupant now in WB really is the lr/sc/amo* that
     // register was captured for).
-    input isAmo_regem,
-    input hold,   // MEM-stage interlock (docs/adr/0013-mem-stage-retiming.md):
+    input wire isAmo_regem,
+    input wire hold,   // MEM-stage interlock (docs/adr/0013-mem-stage-retiming.md):
                   // freeze every field exactly as-is while a load sitting in
                   // reg3 (this register's own source) hasn't come back from
                   // DataMemoryBRAM yet. Same empty-branch idiom as reg2/reg3's

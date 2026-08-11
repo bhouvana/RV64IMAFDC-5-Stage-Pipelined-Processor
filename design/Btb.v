@@ -28,16 +28,16 @@ module Btb #(
     parameter XLEN = 32,
     parameter NUM_ENTRIES = 32   // must be a power of 2 -- same convention as Bht.v
 )(
-    input clk,
-    input rst,
+    input wire clk,
+    input wire rst,
 
-    input      [XLEN-1:0] query_pc,
-    output                 hit,
-    output     [XLEN-1:0]  target,
+    input      wire [XLEN-1:0] query_pc,
+    output                 wire hit,
+    output     wire [XLEN-1:0]  target,
 
-    input                  update_valid,
-    input      [XLEN-1:0]  update_pc,
-    input      [XLEN-1:0]  update_target
+    input                  wire update_valid,
+    input      wire [XLEN-1:0]  update_pc,
+    input      wire [XLEN-1:0]  update_target
 );
 
 localparam INDEX_WIDTH = $clog2(NUM_ENTRIES);
