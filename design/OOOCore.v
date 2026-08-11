@@ -288,7 +288,7 @@ wire is_branch = branch_c;
 // pass: both need their own careful design (interrupts need a real
 // retire-boundary injection point; the MMU touches fetch AND
 // LoadStoreQueue.v's own address path).
-wire has_exception = illegalOpcode_c || isEcall_c || vec_arith_illegal;   // Gen7-V Phase 2a: a reserved OP-V funct6 (e.g. vsub.vi, vrsub.vv) is a real illegal-instruction condition Control.v itself can't see (no funct6 input port there)
+wire has_exception = illegalOpcode_c || isEcall_c || vec_arith_illegal || vec_unaligned;   // Gen7-V: a reserved OP-V funct6 (Phase 2a) or a misaligned vd/vs1/vs2 register group (Phase 2b) are real illegal-instruction conditions Control.v itself can't see (no funct6/vtype input there)
 // Gen6-P2 (docs/adr/0053): an ITLB fault fits this SAME dispatch-time-only
 // trap shape unmodified -- unlike a D-side page fault (discovered only
 // once the LSQ's already-dispatched head entry gets to it, needing new
@@ -375,9 +375,88 @@ wire [XLEN-1:0] vec_cfg_vlmax = vec_cfg_reserved ? {XLEN{1'b0}} : (VLEN[XLEN-1:0
 wire is_vec_arith = isVecArith_c;
 wire [5:0] vec_arith_funct6 = inst_word[31:26];
 wire       vec_arith_vm     = inst_word[25];
-wire [4:0] vec_vs2_areg     = inst_word[24:20];
-wire [4:0] vec_vs1_areg     = inst_word[19:15];   // .vv: vector source; .vx/.vi: reused below for the scalar/imm cases
-wire [4:0] vec_vd_areg      = inst_word[11:7];
+wire [4:0] vec_vs2_areg_raw = inst_word[24:20];
+wire [4:0] vec_vs1_areg_raw = inst_word[19:15];   // .vv: vector source; .vx/.vi: reused below for the scalar/imm cases
+wire [4:0] vec_vd_areg_raw  = inst_word[11:7];
+
+// ==========================================================================
+// Generation 7, Pillar V, Phase 2b (docs/adr/0063). Full LMUL grouping --
+// a macro vector instruction with LMUL=g cracks into g independent
+// micro-ops (one per architectural sub-register in the vd/vs1/vs2
+// group), dispatched ONE PER CYCLE through the existing single-issue
+// slot0 path -- pc_r held constant across all g cycles (see the PC-
+// advance block's own new vec_crack_holds_pc arm below), each crack-op
+// getting its own real ROB entry + RS_VALU entry + VALU.v run, exactly
+// like an ordinary LMUL=1 instruction Phase 2a already proved.
+//
+// vlmul_group_count: real spec's own vlmul field is a two's-complement
+// log2(LMUL) (000/001/010/011 -> LMUL 1/2/4/8; 101/110/111 -> fractional
+// LMUL 1/8,1/4,1/2, which still touch exactly ONE physical register, so
+// group_count=1 for those too; 100 is reserved).
+wire [3:0] vec_group_count_fresh = vlmul_live[2] ? 4'd1 : ({1'b0, vlmul_live[1:0]} + 4'd1);
+
+reg              vec_crack_active_r;
+reg [3:0]        vec_crack_group_count_r;
+reg [3:0]        vec_crack_idx_r;   // which crack-op THIS cycle is, 0-based
+
+wire [4:0] vec_crack_offset = vec_crack_active_r ? {1'b0, vec_crack_idx_r} : 5'd0;
+wire [4:0] vec_vs2_areg = vec_vs2_areg_raw + vec_crack_offset;
+wire [4:0] vec_vs1_areg = vec_vs1_areg_raw + vec_crack_offset;
+wire [4:0] vec_vd_areg  = vec_vd_areg_raw  + vec_crack_offset;
+
+// Real spec: vd/vs1/vs2 register-GROUP operands must be aligned to a
+// multiple of the real group count, else the encoding is reserved --
+// checked only when STARTING a fresh macro instruction (the raw,
+// undecorated areg fields), not on a continuing crack-op (which is by
+// construction already base+offset of an already-confirmed-aligned base).
+wire [4:0] vec_align_mask = {1'b0, vec_group_count_fresh} - 5'd1;
+// vs1_areg_raw is a REAL vector register field only for .vv (OPIVV) --
+// for .vx/.vi it's rs1's own field/the raw simm5 bits, not a register
+// number at all, and must NOT be alignment-checked (a real bug found by
+// running the LMUL=2 directed test before trusting this: an OPIVI's own
+// simm5=7=0b00111 happened to be odd, tripping this check for every
+// single .vi instruction regardless of real vd/vs2 alignment).
+wire vec_unaligned = is_vec_arith && !vec_crack_active_r &&
+    (((vec_vd_areg_raw  & vec_align_mask) != 5'd0) ||
+     (!vec_arith_use_scalar && ((vec_vs1_areg_raw & vec_align_mask) != 5'd0)) ||
+     ((vec_vs2_areg_raw & vec_align_mask) != 5'd0));
+
+// This dispatch cycle is the LAST crack-op of its own macro instruction
+// (fires pc_r's own advance) -- either genuinely mid-crack and just
+// reached the final index, or a fresh LMUL=1 instruction (never cracks
+// at all, "last" the same cycle it starts).
+wire vec_crack_last = vec_crack_active_r ? (vec_crack_idx_r == vec_crack_group_count_r - 4'd1)
+                                          : (vec_group_count_fresh == 4'd1);
+wire vec_crack_holds_pc = is_vec_arith && !vec_unaligned && !vec_crack_last;
+
+always @(posedge clk) begin
+    if (~rst) begin
+        vec_crack_active_r <= 1'b0;
+    end
+    else begin
+        if (do_dispatch && is_vec_arith && !vec_crack_active_r && !vec_unaligned && (vec_group_count_fresh > 4'd1)) begin
+            vec_crack_active_r     <= 1'b1;
+            vec_crack_group_count_r <= vec_group_count_fresh;
+            vec_crack_idx_r        <= 4'd1;   // this cycle dispatched index 0; next cycle is index 1
+        end
+        else if (do_dispatch && is_vec_arith && vec_crack_active_r) begin
+            if (vec_crack_idx_r == vec_crack_group_count_r - 4'd1)
+                vec_crack_active_r <= 1'b0;
+            else
+                vec_crack_idx_r <= vec_crack_idx_r + 4'd1;
+        end
+    end
+end
+
+// Per-crack-op LOCAL vl: real spec vl applies to the WHOLE logical
+// vector (0..VLMAX-1 across the group); this crack-op's own physical
+// register only covers elements [i*elems_per_reg, (i+1)*elems_per_reg).
+// elems_per_reg = VLEN/SEW, independent of LMUL (a fixed physical
+// capacity), matching VALU.v's own internal elems_this_sew formula.
+wire [9:0] vec_elems_per_reg = VLEN[9:0] >> ({7'd0, vsew_live} + 3'd3);
+wire [XLEN-1:0] vec_elem_base = {{(XLEN-4){1'b0}}, vec_crack_offset[3:0]} * {{(XLEN-10){1'b0}}, vec_elems_per_reg};
+wire [XLEN-1:0] vec_local_vl = (vl_o <= vec_elem_base) ? {XLEN{1'b0}} :
+    (((vl_o - vec_elem_base) > {{(XLEN-10){1'b0}}, vec_elems_per_reg}) ? {{(XLEN-10){1'b0}}, vec_elems_per_reg} : (vl_o - vec_elem_base));
 wire vec_arith_is_vx = is_vec_arith && (funct3_c == `F3_OPIVX);
 wire vec_arith_is_vi = is_vec_arith && (funct3_c == `F3_OPIVI);
 wire vec_arith_use_scalar = vec_arith_is_vx || vec_arith_is_vi;
@@ -1169,7 +1248,16 @@ ReorderBuffer #(.ROB_ENTRIES(ROB_ENTRIES), .AREG_BITS(AREG_BITS), .PREG_BITS(PRE
     // construction -- an instruction is never both fp and vec).
     .alloc_en0(do_dispatch), .alloc_has_dest0(needs_dest || is_fp_op || is_vec_arith), .alloc_is_fp_dest0(is_fp_op),
     .alloc_is_vec_dest0(is_vec_arith),
-    .alloc_areg0(rd_areg), .alloc_preg0(is_fp_op ? fl_f_alloc_preg0 : (is_vec_arith ? fl_v_alloc_preg0 : (needs_dest ? fl_alloc_preg0 : {PREG_BITS{1'b0}}))),
+    // Gen7-V Phase 2b: alloc_areg0 must use the crack-adjusted
+    // vec_vd_areg (vd+offset), NOT the raw rd_areg -- a real bug found
+    // by running the LMUL=2 directed test: rd_areg is inst_word[11:7]
+    // directly, identical for every crack-op of the same macro
+    // instruction (inst_word never changes while pc_r is held), so
+    // without this every crack-op's own ROB entry recorded the SAME
+    // architectural register, silently overwriting v2's own retire-time
+    // rename with crack1's value and leaving v3 untouched at its reset
+    // identity mapping.
+    .alloc_areg0(is_vec_arith ? vec_vd_areg : rd_areg), .alloc_preg0(is_fp_op ? fl_f_alloc_preg0 : (is_vec_arith ? fl_v_alloc_preg0 : (needs_dest ? fl_alloc_preg0 : {PREG_BITS{1'b0}}))),
     .alloc_old_preg0(is_fp_op ? rat_f_old_preg0 : (is_vec_arith ? rat_v_old_preg0 : rat_old_preg0)), .alloc_tag0(rob_alloc_tag0),
     // Gen6-K: slot1 is always a plain ALU op (try_dual_issue's own
     // definition) -- never FP, never vector, never a real dest-less op
@@ -2394,8 +2482,13 @@ wire [PREG_BITS-1:0] issue_src1_preg_valu, issue_src2_preg_valu;
 wire [PREG_BITS-1:0] issue_dest_preg_valu_wide;
 wire [VPREG_BITS-1:0] issue_dest_preg_valu;
 wire [ROB_IDX_BITS-1:0] issue_rob_tag_valu;
-// {funct6[5:0], vm, use_scalar, is_vi, vsew[2:0], imm_sext[63:0]} = 6+1+1+1+3+64 = 76 bits.
-wire [75:0] issue_payload_valu;
+// {funct6[5:0], vm, use_scalar, is_vi, vsew[2:0], vl[6:0], imm_sext[63:0]}
+// = 6+1+1+1+3+7+64 = 83 bits. vl (Gen7-V Phase 2b) is this crack-op's own
+// LOCAL element count (vec_local_vl, computed at dispatch from the
+// crack sequencer's own idx) -- must ride the payload for the identical
+// reason the .vi immediate does (a queued RS_VALU entry's own dispatch-
+// time value must survive unmolested to its own later issue cycle).
+wire [82:0] issue_payload_valu;
 wire issue_valid_valu;
 wire [$clog2(8+1)-1:0] rs_valu_count;   // debug visibility only
 
@@ -2414,9 +2507,9 @@ wire                 valu_disp_src2_ready = vec_arith_is_vi ? 1'b1 : (vec_arith_
 // time from anything else -- only the payload survives from dispatch to
 // issue) so VALU's own operand-B mux can tell a real .vi immediate apart
 // from a still-in-flight .vx integer read landing at the same preg tag.
-wire [75:0] valu_disp_payload = {vec_arith_funct6, vec_arith_vm, vec_arith_use_scalar, vec_arith_is_vi, vsew_live, vec_arith_imm_sext};
+wire [82:0] valu_disp_payload = {vec_arith_funct6, vec_arith_vm, vec_arith_use_scalar, vec_arith_is_vi, vsew_live, vec_local_vl[6:0], vec_arith_imm_sext};
 
-ReservationStation #(.RS_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(76)) m_RS_VALU(
+ReservationStation #(.RS_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(83)) m_RS_VALU(
     .clk(clk), .rst(rst),
     .disp_en0(do_dispatch && is_vec_arith),
     .disp_src1_preg0(valu_disp_src1_preg), .disp_src1_ready0(valu_disp_src1_ready),
@@ -2426,7 +2519,7 @@ ReservationStation #(.RS_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_ID
     .disp_en1(1'b0),
     .disp_src1_preg1({PREG_BITS{1'b0}}), .disp_src1_ready1(1'b0),
     .disp_src2_preg1({PREG_BITS{1'b0}}), .disp_src2_ready1(1'b0),
-    .disp_dest_preg1({PREG_BITS{1'b0}}), .disp_rob_tag1({ROB_IDX_BITS{1'b0}}), .disp_payload1(76'd0),
+    .disp_dest_preg1({PREG_BITS{1'b0}}), .disp_rob_tag1({ROB_IDX_BITS{1'b0}}), .disp_payload1(83'd0),
     // CDB snoop: port0 self (back-to-back vector chaining); port1/2/3
     // integer completions (issue_valid/lsq_complete/div_complete) -- a
     // .vx form's own src2 (an INTEGER preg) can be in-flight at dispatch
@@ -2445,11 +2538,12 @@ ReservationStation #(.RS_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_ID
 );
 assign issue_dest_preg_valu = issue_dest_preg_valu_wide[VPREG_BITS-1:0];
 
-wire [5:0]  issue_valu_funct6     = issue_payload_valu[75:70];
-wire        issue_valu_vm         = issue_payload_valu[69];
-wire        issue_valu_use_scalar = issue_payload_valu[68];
-wire        issue_valu_is_vi      = issue_payload_valu[67];
-wire [2:0]  issue_valu_vsew       = issue_payload_valu[66:64];
+wire [5:0]  issue_valu_funct6     = issue_payload_valu[82:77];
+wire        issue_valu_vm         = issue_payload_valu[76];
+wire        issue_valu_use_scalar = issue_payload_valu[75];
+wire        issue_valu_is_vi      = issue_payload_valu[74];
+wire [2:0]  issue_valu_vsew       = issue_payload_valu[73:71];
+wire [6:0]  issue_valu_vl         = issue_payload_valu[70:64];
 wire [63:0] issue_valu_imm        = issue_payload_valu[63:0];
 
 wire valu_busy;
@@ -2469,7 +2563,7 @@ VALU #(.VLEN(VLEN)) m_VALU(
     .clk(clk), .rst(rst), .start(valu_start),
     .vs2_data(prf_v_rdata2), .vs1_data(prf_v_rdata3), .scalar_data(valu_scalar_data),
     .use_scalar(issue_valu_use_scalar), .v0_data(prf_v_rdata4), .vm(issue_valu_vm),
-    .vsew(issue_valu_vsew), .vl(vl_o[$clog2(VLEN/8+1)-1:0]),
+    .vsew(issue_valu_vsew), .vl(issue_valu_vl),
     .funct6(issue_valu_funct6),
     .busy(valu_busy), .done(valu_done), .result(valu_result)
 );
@@ -2640,6 +2734,15 @@ always @(posedge clk) begin
         pc_r <= is_jal ? (pc_r + (imm_d << 1)) :
                 is_jalr ? jr_predicted_target :
                 (is_branch && predicted_taken) ? predicted_target :
+                // Gen7-V Phase 2b (docs/adr/0063): a mid-crack vector
+                // instruction (real LMUL>1) holds pc_r across every one
+                // of its own crack-op dispatch cycles -- fetch/decode
+                // keeps re-reading the SAME inst_word (harmless, no side
+                // effects of its own), only the crack sequencer's own
+                // idx register above actually advances. Never coincides
+                // with do_dispatch_slot1 (is_vec_arith excludes dual-
+                // issue, slot0_is_plain_alu's own exclusion).
+                vec_crack_holds_pc ? pc_r :
                 (do_dispatch_slot1 ? (pc_r + 8) : (pc_r + 4));
 end
 
