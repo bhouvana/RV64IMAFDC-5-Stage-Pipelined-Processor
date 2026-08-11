@@ -332,7 +332,17 @@ wire is_fp_pure = fRegWrite_c && (
     fp_funct5 == `FUNCT5_FSGNJ || fp_funct5 == `FUNCT5_FMINMAX
 );
 wire is_fp_intmove = fRegWrite_c && (fp_funct5 == `FUNCT5_FMV_W_X);
-wire is_fp_op = is_fp_pure || is_fp_intmove;
+// Gen6-P4 (docs/adr/0055): fdiv.s/fsqrt.s -- multi-cycle, so they need
+// their OWN reservation station + in-flight tracking (RS_FDIV, mirroring
+// Gen6-F's own RS_DIV/Divider.v shape exactly), not RS_FALU's single-
+// cycle path. is_fp_op itself widens to include them (needs_dest-style
+// rename allocation/ROB fp-dest tracking is identical regardless of
+// WHICH unit ends up computing the result) -- only the EXECUTION routing
+// (which RS gets disp_en0) distinguishes is_fp_multicycle below.
+wire is_fp_div  = fRegWrite_c && (fp_funct5 == `FUNCT5_FDIV);
+wire is_fp_sqrt = fRegWrite_c && (fp_funct5 == `FUNCT5_FSQRT);
+wire is_fp_multicycle = is_fp_div || is_fp_sqrt;
+wire is_fp_op = is_fp_pure || is_fp_intmove || is_fp_multicycle;
 
 // ==========================================================================
 // Gen6-G: branch speculation. Reuses Gen1's own Bht.v/Btb.v exactly
@@ -687,7 +697,8 @@ wire [$clog2(NUM_PREGS - NUM_AREGS):0] fl_free_count;   // unused beyond
     // free_count port exactly ([CAP_BITS:0], CAP_BITS = $clog2(CAPACITY)).
 
 wire dispatch_stall = rob_full
-                      || (is_mem_op ? lsq_full : (is_div_op ? rs_div_full : (is_fp_op ? rs_falu_full : rs_alu_full)))
+                      || (is_mem_op ? lsq_full : (is_div_op ? rs_div_full :
+                          (is_fp_op ? (is_fp_multicycle ? rs_fdiv_full : rs_falu_full) : rs_alu_full)))
                       || (needs_dest && !fl_alloc_ok0)
                       || (is_fp_op && !fl_f_alloc_ok0)   // Gen6-H
                       || br_inflight_valid_r    // Gen6-G: single-outstanding-
@@ -928,6 +939,7 @@ ReorderBuffer #(.ROB_ENTRIES(ROB_ENTRIES), .AREG_BITS(AREG_BITS), .PREG_BITS(PRE
     .complete_tag1(dside_fault_pulse ? lsq_head_rob_tag : lsq_complete_rob_tag),
     .complete_en2(div_complete_valid), .complete_tag2(div_complete_rob_tag),
     .complete_en3(falu_complete_valid), .complete_tag3(falu_complete_rob_tag),
+    .complete_en4(fdiv_complete_valid), .complete_tag4(fdiv_complete_rob_tag),
     .retire_valid0(rob_retire_valid0), .retire_has_dest0(rob_retire_has_dest0), .retire_is_fp_dest0(rob_retire_is_fp_dest0),
     .retire_areg0(rob_retire_areg0), .retire_preg0(rob_retire_preg0), .retire_old_preg0(rob_retire_old_preg0),
     .retire_tag0(rob_retire_tag0),
@@ -1122,6 +1134,7 @@ end
 // same forward-reference convention every other Gen6-* section in this
 // file already uses for wires produced/consumed across sections).
 wire mstatus_mie, mie_msie, mie_mtie, mie_meie;
+wire [2:0] frm_live;   // Gen6-P4 (docs/adr/0055): CSR.v's own live frm, for RM_DYN resolution
 
 CSR #(.XLEN(XLEN)) m_CSR(
     .clk(clk), .rst(rst),
@@ -1142,7 +1155,14 @@ CSR #(.XLEN(XLEN)) m_CSR(
     .trap_is_interrupt(interrupt_take),
     .trap_value({XLEN{1'b0}}),
     .mret_taken(csr_mret_taken), .sret_taken(1'b0),
-    .fp_flags_we(1'b0), .fp_flags_in(5'd0), .frm_val(),
+    // Gen6-P4 (docs/adr/0055): frm_val wired for real -- FDivider.v/FSqrt.v
+    // both need the resolved rounding mode (RM_DYN, funct3==111, means
+    // "use frm's own live value" -- resolved once, at issue time, below,
+    // the same single resolution point PIPELINED's own fpu_rm already
+    // established). fp_flags_we/fp_flags_in stay tied off (Gen6-H's own
+    // pre-existing scope -- fflags accumulation was never wired for FALU
+    // either; not revisited here).
+    .fp_flags_we(1'b0), .fp_flags_in(5'd0), .frm_val(frm_live),
     // Gen6-P3 (docs/adr/0054): routed straight through from this module's
     // own top-level ports.
     .msip_pending(msip_pending), .timer_pending(timer_pending), .ext_pending(ext_pending),
@@ -1745,6 +1765,153 @@ assign div_complete_dest_preg = div_inflight_dest_preg_r;
 assign div_complete_data      = div_inflight_select_rem_r ? div_remainder : div_quotient;
 
 // ==========================================================================
+// Gen6-P4 (docs/adr/0055): fdiv.s/fsqrt.s -- RS_FDIV + FDivider.v/FSqrt.v,
+// mirroring RS_DIV/Divider.v's own proven busy/done/in-flight-latch shape
+// exactly (both modules were already built for PIPELINED, reused here
+// completely unmodified, same "integration, not new hardware design"
+// framing docs/adr/0053 already established for Tlb39.v/Ptw39.v). ONE
+// shared RS entry type for both instructions (mirrors RS_DIV's own single
+// entry type serving DIV/DIVU/REM/REMU via a payload bit) -- a payload
+// bit picks which of the two REAL, SEPARATE hardware units `start`s;
+// fsqrt.s's own rs2 field is unused by spec (must be 0), so its own
+// src2_ready is simply tied always-ready rather than waiting on an
+// operand the instruction never reads.
+//
+// `# ponytail`-tagged scope cut, same class Gen6-H's own header already
+// flagged for RS_FALU: this RS's own CDB snoop covers self (fdiv/fsqrt
+// chains) + RS_ALU's + LoadStoreQueue.v's completions, but NOT RS_FALU's
+// own single-cycle results -- an fdiv.s/fsqrt.s whose operand is still an
+// in-flight FADD/FSUB/FMUL/FSGNJ/FMINMAX/FMV.W.X result at dispatch time
+// won't wake up from THAT specific completion. Narrow, real, bounded,
+// same shape as the existing RS_FALU-side gap; this phase's own directed
+// test sources its fdiv/fsqrt operands from already-committed values, not
+// a same-window FALU result, so it doesn't hit this either. A real 4th
+// CDB port on ReservationStation.v itself (affecting every RS instance)
+// is the eventual fix, real future work, not attempted here.
+wire [PREG_BITS-1:0] issue_src1_preg_fdiv, issue_src2_preg_fdiv;
+wire [PREG_BITS-1:0] issue_dest_preg_fdiv_wide;
+wire [FPREG_BITS-1:0] issue_dest_preg_fdiv;
+wire [ROB_IDX_BITS-1:0] issue_rob_tag_fdiv;
+wire [3:0] issue_payload_fdiv;   // {is_sqrt, rm[2:0]}
+wire issue_valid_fdiv;
+wire [$clog2(8+1)-1:0] rs_fdiv_count;   // debug visibility only
+wire rs_fdiv_full;
+
+// RM_DYN resolved once, at DISPATCH time, against frm_live -- mirrors
+// PIPELINED's own single fpu_rm resolution point exactly (docs/adr/0019
+// Phase C8's own finding: resolving once, before the FPU, is correct and
+// sufficient, no need to re-resolve at issue time since frm can't change
+// while this entry sits queued the same "captured once, trusted for the
+// whole in-flight duration" reasoning Gen6-P1's own AMO-RMW old-value
+// capture already relies on for a different register).
+wire [2:0] fdiv_disp_rm = (funct3_c == `RM_DYN) ? frm_live : funct3_c;
+
+ReservationStation #(.RS_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(4)) m_RS_FDIV(
+    .clk(clk), .rst(rst),
+    .disp_en0(do_dispatch && is_fp_multicycle),
+    .disp_src1_preg0({{(PREG_BITS-FPREG_BITS){1'b0}}, rat_f_rpreg0}), .disp_src1_ready0(prf_f_rvalid0),
+    .disp_src2_preg0({{(PREG_BITS-FPREG_BITS){1'b0}}, rat_f_rpreg1}),
+    .disp_src2_ready0(is_fp_sqrt ? 1'b1 : prf_f_rvalid1),
+    .disp_dest_preg0({{(PREG_BITS-FPREG_BITS){1'b0}}, fl_f_alloc_preg0}),
+    .disp_rob_tag0(rob_alloc_tag0), .disp_payload0({is_fp_sqrt, fdiv_disp_rm}),
+    .disp_en1(1'b0),
+    .disp_src1_preg1({PREG_BITS{1'b0}}), .disp_src1_ready1(1'b0),
+    .disp_src2_preg1({PREG_BITS{1'b0}}), .disp_src2_ready1(1'b0),
+    .disp_dest_preg1({PREG_BITS{1'b0}}), .disp_rob_tag1({ROB_IDX_BITS{1'b0}}), .disp_payload1(4'd0),
+    // Gen6-P4: cdb_valid1 is falu_complete_valid, NOT lsq_complete_valid
+    // (unlike every OTHER RS instance's own copy of this port) -- a real
+    // bug found by running, not anticipated in the design write-up:
+    // fdiv.s/fsqrt.s's own operands are ALWAYS float pregs, and flw
+    // doesn't exist yet (real future work, see this section's own
+    // header), so lsq_complete_valid can never possibly matter here,
+    // while FMV.W.X (the only way to get a float value from an integer
+    // source right now, and this phase's own directed test's exact
+    // operand path) completes via RS_FALU/falu_complete_valid instead --
+    // completely uncovered by any of RS_FDIV's other two ports. Without
+    // this, an fdiv.s/fsqrt.s whose operand was JUST produced by FMV.W.X
+    // (dispatched too soon after it for the value to already be PRF-valid
+    // at dispatch time) would never wake up, a genuine permanent
+    // deadlock -- observed directly via cycle-by-cycle tracing of
+    // fdiv_start/fsqrt_busy/rob_retire_valid0 (both f3 and f4 stuck at
+    // their own reset-default identity preg mapping, never renamed),
+    // root-caused before guessing at a fix.
+    .cdb_valid0(issue_valid), .cdb_preg0(issue_dest_preg),
+    .cdb_valid1(falu_complete_valid), .cdb_preg1({{(PREG_BITS-FPREG_BITS){1'b0}}, falu_complete_dest_preg}),
+    .cdb_valid2(fdiv_complete_valid), .cdb_preg2({{(PREG_BITS-FPREG_BITS){1'b0}}, fdiv_complete_dest_preg}),
+    .issue_valid(issue_valid_fdiv),
+    .issue_src1_preg(issue_src1_preg_fdiv), .issue_src2_preg(issue_src2_preg_fdiv), .issue_dest_preg(issue_dest_preg_fdiv_wide),
+    .issue_rob_tag(issue_rob_tag_fdiv), .issue_payload(issue_payload_fdiv),
+    .issue_ack(fdiv_start),   // only accepted the cycle BOTH units are free
+    .rs_count(rs_fdiv_count), .rs_full(rs_fdiv_full)
+);
+assign issue_dest_preg_fdiv = issue_dest_preg_fdiv_wide[FPREG_BITS-1:0];
+
+wire issue_fdiv_is_sqrt = issue_payload_fdiv[3];
+wire [2:0] issue_fdiv_rm = issue_payload_fdiv[2:0];
+
+wire [FLEN-1:0] prf_f_rdata4, prf_f_rdata5;   // FDivider.v's/FSqrt.v's own operand read, issue-time
+
+// Real, genuinely separate hardware units (not one module with an
+// internal mode bit) -- `start` is mutually exclusive by construction
+// (issue_fdiv_is_sqrt picks exactly one), so busy/done/result/flags mux
+// cleanly on the SAME registered selector bit the in-flight latch below
+// already needs to keep alive regardless.
+wire fdiv_start = issue_valid_fdiv && !fdivider_busy && !fdivider_done && !fsqrt_busy && !fsqrt_done;
+wire fdivider_busy, fdivider_done;
+wire [FLEN-1:0] fdivider_result;
+wire [4:0] fdivider_flags;
+wire fsqrt_busy, fsqrt_done;
+wire [FLEN-1:0] fsqrt_result;
+wire [4:0] fsqrt_flags;
+
+FDivider #(.XLEN(FLEN)) m_FDivider(
+    .clk(clk), .rst(rst),
+    .start(fdiv_start && !issue_fdiv_is_sqrt), .rm(issue_fdiv_rm),
+    .a(prf_f_rdata4), .b(prf_f_rdata5),
+    .busy(fdivider_busy), .done(fdivider_done),
+    .result(fdivider_result), .flags(fdivider_flags)
+);
+
+FSqrt #(.XLEN(FLEN)) m_FSqrt(
+    .clk(clk), .rst(rst),
+    .start(fdiv_start && issue_fdiv_is_sqrt), .rm(issue_fdiv_rm),
+    .a(prf_f_rdata4),
+    .busy(fsqrt_busy), .done(fsqrt_done),
+    .result(fsqrt_result), .flags(fsqrt_flags)
+);
+
+wire fdiv_busy = fdivider_busy || fsqrt_busy;
+wire fdiv_done = fdivider_done || fsqrt_done;
+
+// dest_preg/rob_tag/is_sqrt genuinely DO need latching -- same reasoning
+// div_inflight_*_r's own comment already gives: neither FDivider.v nor
+// FSqrt.v has any concept of them, and the RS_FDIV entry that originally
+// carried them is long gone (cleared the same cycle issue_ack fired).
+// is_sqrt IS safe to latch (unlike Divider.v's own isSigned bug class)
+// since it's only ever consumed AFTER done, to pick which unit's result/
+// flags to read -- never fed live into either unit's own combinational
+// input path the way isSigned/dividend/divisor need to be.
+reg [ROB_IDX_BITS-1:0] fdiv_inflight_rob_tag_r;
+reg [FPREG_BITS-1:0]   fdiv_inflight_dest_preg_r;
+reg                    fdiv_inflight_is_sqrt_r;
+always @(posedge clk) begin
+    if (rst && fdiv_start) begin
+        fdiv_inflight_rob_tag_r   <= issue_rob_tag_fdiv;
+        fdiv_inflight_dest_preg_r <= issue_dest_preg_fdiv;
+        fdiv_inflight_is_sqrt_r   <= issue_fdiv_is_sqrt;
+    end
+end
+
+wire                    fdiv_complete_valid;
+wire [FPREG_BITS-1:0]   fdiv_complete_dest_preg;
+wire [FLEN-1:0]         fdiv_complete_data;
+wire [ROB_IDX_BITS-1:0] fdiv_complete_rob_tag;
+assign fdiv_complete_valid     = fdiv_done;
+assign fdiv_complete_rob_tag   = fdiv_inflight_rob_tag_r;
+assign fdiv_complete_dest_preg = fdiv_inflight_dest_preg_r;
+assign fdiv_complete_data      = fdiv_inflight_is_sqrt_r ? fsqrt_result : fdivider_result;
+
+// ==========================================================================
 // Gen6-H: RS_FALU + the SAME existing FALU.v this project's PIPELINED
 // core already uses -- single-cycle, exactly like RS_ALU/ALU.v, no
 // in-flight tracking needed (unlike Divider.v).
@@ -1775,7 +1942,9 @@ wire [13:0]           falu_disp_payload = {is_fp_intmove, fp_funct5, funct3_c, r
 
 ReservationStation #(.RS_ENTRIES(RS_FALU_ENTRIES), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(14)) m_RS_FALU(
     .clk(clk), .rst(rst),
-    .disp_en0(do_dispatch && is_fp_op),
+    // Gen6-P4: excludes is_fp_multicycle -- fdiv.s/fsqrt.s route to
+    // RS_FDIV instead (below), never RS_FALU.
+    .disp_en0(do_dispatch && is_fp_op && !is_fp_multicycle),
     .disp_src1_preg0(falu_disp_src1_preg), .disp_src1_ready0(falu_disp_src1_ready),
     .disp_src2_preg0({{(PREG_BITS-FPREG_BITS){1'b0}}, rat_f_rpreg1}), .disp_src2_ready0(is_fp_intmove ? 1'b1 : prf_f_rvalid1),
     .disp_dest_preg0({{(PREG_BITS-FPREG_BITS){1'b0}}, fl_f_alloc_preg0}),
@@ -1824,20 +1993,24 @@ wire            prf_f_rvalid0, prf_f_rvalid1;
 PhysicalRegisterFile #(.XLEN(FLEN), .NUM_PREGS(NUM_FPREGS), .NUM_AREGS(NUM_FREGS), .HARDWIRE_PREG0(0), .SP_INIT(0)) m_PRF_Float(
     .clk(clk), .rst(rst),
     // Port 0/1: dispatch-time readiness query. Port 2/3: RS_FALU's own
-    // issue-time operand fetch.
+    // issue-time operand fetch. Port 4/5 (Gen6-P4): RS_FDIV's own
+    // issue-time operand fetch (FDivider.v's dividend/divisor, or
+    // FSqrt.v's single radicand via port 4 alone).
     .raddr0(rat_f_rpreg0), .raddr1(rat_f_rpreg1),
     .raddr2(issue_src1_preg_falu[FPREG_BITS-1:0]), .raddr3(issue_src2_preg_falu[FPREG_BITS-1:0]),
-    .raddr4({FPREG_BITS{1'b0}}), .raddr5({FPREG_BITS{1'b0}}), .raddr6({FPREG_BITS{1'b0}}), .raddr7({FPREG_BITS{1'b0}}), .raddr8({FPREG_BITS{1'b0}}),
+    .raddr4(issue_src1_preg_fdiv[FPREG_BITS-1:0]), .raddr5(issue_src2_preg_fdiv[FPREG_BITS-1:0]),
+    .raddr6({FPREG_BITS{1'b0}}), .raddr7({FPREG_BITS{1'b0}}), .raddr8({FPREG_BITS{1'b0}}),
     // Gen6-K never dual-issues FP (slot1_is_plain_alu excludes is_fp_op_1
     // by construction) -- ports 9/10 are simply tied off here.
     .raddr9({FPREG_BITS{1'b0}}), .raddr10({FPREG_BITS{1'b0}}),
     .rdata0(prf_f_rdata0), .rdata1(prf_f_rdata1), .rdata2(prf_f_rdata2), .rdata3(prf_f_rdata3),
-    .rdata4(), .rdata5(), .rdata6(), .rdata7(), .rdata8(), .rdata9(), .rdata10(),
+    .rdata4(prf_f_rdata4), .rdata5(prf_f_rdata5), .rdata6(), .rdata7(), .rdata8(), .rdata9(), .rdata10(),
     .rvalid0(prf_f_rvalid0), .rvalid1(prf_f_rvalid1), .rvalid2(), .rvalid3(), .rvalid4(), .rvalid5(), .rvalid6(), .rvalid7(), .rvalid8(), .rvalid9(), .rvalid10(),
-    // CDB writeback -- FALU's own instant result is the ONLY completion
-    // source for the float PRF this phase (no FDIV/FSQRT/FMADD/FLW yet).
+    // CDB writeback -- port0 FALU's own instant result; port1 (Gen6-P4)
+    // FDivider.v's/FSqrt.v's own multi-cycle completion (no FMADD/FLW
+    // yet, so port2 stays tied off).
     .wen0(falu_complete_valid), .waddr0(falu_complete_dest_preg), .wdata0(falu_complete_data),
-    .wen1(1'b0), .waddr1({FPREG_BITS{1'b0}}), .wdata1({FLEN{1'b0}}),
+    .wen1(fdiv_complete_valid), .waddr1(fdiv_complete_dest_preg), .wdata1(fdiv_complete_data),
     .wen2(1'b0), .waddr2({FPREG_BITS{1'b0}}), .wdata2({FLEN{1'b0}}),
     .alloc_en0(do_dispatch && is_fp_op), .alloc_preg0(fl_f_alloc_preg0),
     .alloc_en1(1'b0), .alloc_preg1({FPREG_BITS{1'b0}})

@@ -78,6 +78,24 @@ module ReorderBuffer #(
     input  wire                  complete_en3,   // Gen6-H: RS_FALU's own
                                                    // instant broadcast
     input  wire [IDX_BITS-1:0]   complete_tag3,
+    input  wire                  complete_en4,   // Gen6-P4: FDivider.v/
+                                                   // FSqrt.v's own shared
+                                                   // multi-cycle completion
+                                                   // -- genuinely can't
+                                                   // share complete_en3
+                                                   // with falu_complete_valid
+                                                   // (both are real,
+                                                   // independent sources
+                                                   // that could complete
+                                                   // the identical cycle
+                                                   // by coincidence, unlike
+                                                   // docs/adr/0053's own
+                                                   // dside_fault_pulse/
+                                                   // lsq_complete_valid
+                                                   // pairing, which was
+                                                   // provably mutually
+                                                   // exclusive)
+    input  wire [IDX_BITS-1:0]   complete_tag4,
 
     // Retire, up to 2/cycle, STRICTLY in program order from the head.
     // slot1 can only ALSO retire the same cycle slot0 does -- a
@@ -241,6 +259,8 @@ always @(posedge clk) begin
             e_done[complete_tag2] <= 1'b1;
         if (complete_en3)
             e_done[complete_tag3] <= 1'b1;
+        if (complete_en4)
+            e_done[complete_tag4] <= 1'b1;
 
         // Retire: free the entries just vacated. A retiring entry's own
         // e_valid clear isn't strictly needed for correctness (head_r

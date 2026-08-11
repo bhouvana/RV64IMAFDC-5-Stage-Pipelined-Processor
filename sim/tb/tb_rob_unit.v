@@ -50,8 +50,8 @@ module tb_rob_unit;
     reg  [5:0] alloc_preg1 = 0, alloc_old_preg1 = 0;
     wire [1:0] alloc_tag0, alloc_tag1;
 
-    reg        complete_en0 = 0, complete_en1 = 0, complete_en2 = 0, complete_en3 = 0;
-    reg  [1:0] complete_tag0 = 0, complete_tag1 = 0, complete_tag2 = 0, complete_tag3 = 0;
+    reg        complete_en0 = 0, complete_en1 = 0, complete_en2 = 0, complete_en3 = 0, complete_en4 = 0;
+    reg  [1:0] complete_tag0 = 0, complete_tag1 = 0, complete_tag2 = 0, complete_tag3 = 0, complete_tag4 = 0;
 
     wire       retire_valid0, retire_has_dest0;
     wire [4:0] retire_areg0;
@@ -77,6 +77,7 @@ module tb_rob_unit;
         .complete_en1(complete_en1), .complete_tag1(complete_tag1),
         .complete_en2(complete_en2), .complete_tag2(complete_tag2),
         .complete_en3(complete_en3), .complete_tag3(complete_tag3),
+        .complete_en4(complete_en4), .complete_tag4(complete_tag4),
         .retire_valid0(retire_valid0), .retire_has_dest0(retire_has_dest0), .retire_is_fp_dest0(), .retire_tag0(),
         .retire_areg0(retire_areg0), .retire_preg0(retire_preg0), .retire_old_preg0(retire_old_preg0),
         .retire_valid1(retire_valid1), .retire_has_dest1(retire_has_dest1), .retire_is_fp_dest1(), .retire_tag1(),

@@ -5,6 +5,8 @@
 `include "ImmGen.v"
 `include "ALU.v"
 `include "FALU.v"
+`include "FDivider.v"
+`include "FSqrt.v"
 `include "RegisterAliasTable.v"
 `include "FreeList.v"
 `include "PhysicalRegisterFile.v"

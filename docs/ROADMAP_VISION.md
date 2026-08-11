@@ -549,6 +549,29 @@ CSR.v's own pre-existing convention puts it at bit 31, not spec's
 bit-63, unrelated to this phase). 133/133 directed suite, zero-warning
 compile.
 
+**Gen6-P4 (`docs/adr/0055`), partial: fdiv.s/fsqrt.s in OOOCore.v.**
+Fourth sub-phase, real scope narrowing within one backlog item: closes
+FDIV.S/FSQRT.S only, re-flagging FMADD/FLW/FSW/FCVT/FCMP as still-open
+future work (matching Gen6-H's own original scoping precedent).
+FDivider.v/FSqrt.v reused completely unmodified; RS_FDIV mirrors RS_DIV's
+own shape (one shared reservation station, a payload bit picks which of
+the two real, separate hardware units gets `start`).
+`ReorderBuffer.v` gained a genuine 5th completion port
+(`complete_en4`/`complete_tag4`) — RS_FALU's single-cycle and RS_FDIV's
+multi-cycle completions are real, independent sources that could
+complete the identical cycle by coincidence, unlike `docs/adr/0053`'s
+own provably-mutually-exclusive pairing. Found and fixed a genuine
+deadlock by direct cycle tracing: RS_FDIV's own CDB snoop mirrored every
+other RS's default shape (watching `lsq_complete_valid`, dead weight
+since flw doesn't exist), completely missing `falu_complete_valid` — the
+ONLY way fdiv.s/fsqrt.s's own float operands ever arrive right now
+(FMV.W.X). Swapped the unused port for the one actually needed.
+`tb_ooocore_fdiv_p4.v`: `6.0f/2.0f` and `sqrt(2.0f)`, both real
+multi-cycle computations end to end — 4/4 after the CDB fix (and after
+fixing the test program's own missing halt loop, the same
+falls-off-the-end/restart bug class found before). 134/134 directed
+suite, zero-warning compile.
+
 ---
 
 ## Generation 7 — Vector Processing (v7.0)
