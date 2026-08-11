@@ -76,6 +76,15 @@ module Control #(
     // (mirrors is_vec_cfg's own precedent) -- this module only flags
     // "this is a real, recognized vector arithmetic op."
     output reg isVecArith,
+    // Gen7 Pillar V Phase 3 (docs/adr/0064). vle/vse (unit-stride) --
+    // real funct3-based disambiguation from scalar flw/fsw at the SAME
+    // opcode (OPCODE_LOAD_FP/STORE_FP): flw/fsw's own funct3 is always
+    // 010 (W, matching lw's width encoding); vle/vse's own funct3 is one
+    // of {000,101,110,111} (the real EEW width-select field), a
+    // genuinely disjoint set -- checked below, never colliding with the
+    // pre-existing (Gen6-H, still real) flw/fsw decode.
+    output reg isVecLoad,
+    output reg isVecStore,
     output reg illegalOpcode, // opcode itself unrecognized -- see riscvpipeline.v for the
                                // other exception source (ALUCtl==ILLEGAL, a recognized
                                // opcode with an unrecognized funct7/funct3)
@@ -112,6 +121,8 @@ always@(*)begin
     isAmo     = 0;
     isVecCfg  = 0;
     isVecArith = 0;
+    isVecLoad  = 0;
+    isVecStore = 0;
     illegalOpcode = 0;
     fRegWrite = 0;
 
@@ -289,18 +300,33 @@ case(opcode)
         endcase
     end
 
-    `OPCODE_LOAD_FP:  // flw: same shape as OPCODE_LOAD, but the loaded value goes to FRegister.v
+    `OPCODE_LOAD_FP:
     begin
-        memRead  = 1;
-        memtoReg = 1;
-        ALUSrc   = 1;
-        fRegWrite = 1;
+        if (funt3 == 3'b010) begin  // flw: same shape as OPCODE_LOAD, but the loaded value goes to FRegister.v
+            memRead  = 1;
+            memtoReg = 1;
+            ALUSrc   = 1;
+            fRegWrite = 1;
+        end
+        // Gen7-V Phase 3: vle8/16/32/64.v (unit-stride) -- funct3 selects
+        // the real EEW width, {000,101,110,111}; every other funct3 at
+        // this opcode (001,010 already flw,011,100) is reserved.
+        else if (funt3 == 3'b000 || funt3 == 3'b101 || funt3 == 3'b110 || funt3 == 3'b111)
+            isVecLoad = 1;
+        else
+            illegalOpcode = 1;
     end
 
-    `OPCODE_STORE_FP:  // fsw: same shape as OPCODE_STORE (rs1 is still the INTEGER address base)
+    `OPCODE_STORE_FP:
     begin
-        memWrite = 1;
-        ALUSrc   = 1;
+        if (funt3 == 3'b010) begin  // fsw: same shape as OPCODE_STORE (rs1 is still the INTEGER address base)
+            memWrite = 1;
+            ALUSrc   = 1;
+        end
+        else if (funt3 == 3'b000 || funt3 == 3'b101 || funt3 == 3'b110 || funt3 == 3'b111)
+            isVecStore = 1;
+        else
+            illegalOpcode = 1;
     end
 
     `OPCODE_MADD, `OPCODE_MSUB, `OPCODE_NMSUB, `OPCODE_NMADD:  // fmadd.s/fmsub.s/fnmsub.s/fnmadd.s

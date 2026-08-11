@@ -119,6 +119,21 @@ module ReorderBuffer #(
                                                    // (docs/adr/0055,
                                                    // 0057).
     input  wire [IDX_BITS-1:0]   complete_tag5,
+    input  wire                  complete_en6,   // Gen7 Pillar V Phase 3
+                                                   // (docs/adr/0064):
+                                                   // VLSU.v's own multi-
+                                                   // cycle completion --
+                                                   // NOT provably mutually
+                                                   // exclusive with
+                                                   // complete_en5 (VALU
+                                                   // and VLSU are separate
+                                                   // functional units,
+                                                   // both single-instance,
+                                                   // that can genuinely
+                                                   // finish the same
+                                                   // cycle), same "own
+                                                   // port" rule.
+    input  wire [IDX_BITS-1:0]   complete_tag6,
 
     // Retire, up to 2/cycle, STRICTLY in program order from the head.
     // slot1 can only ALSO retire the same cycle slot0 does -- a
@@ -293,6 +308,8 @@ always @(posedge clk) begin
             e_done[complete_tag4] <= 1'b1;
         if (complete_en5)
             e_done[complete_tag5] <= 1'b1;
+        if (complete_en6)
+            e_done[complete_tag6] <= 1'b1;
 
         // Retire: free the entries just vacated. A retiring entry's own
         // e_valid clear isn't strictly needed for correctness (head_r

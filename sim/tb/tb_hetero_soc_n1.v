@@ -53,6 +53,7 @@
 `include "MemoryLatencyModel.v"
 `include "OOOCore.v"
 `include "VALU.v"
+`include "VLSU.v"
 `include "RegisterAliasTable.v"
 `include "FreeList.v"
 `include "PhysicalRegisterFile.v"

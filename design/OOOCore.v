@@ -191,6 +191,7 @@ wire [6:0] funct7_c;
 wire jump_c, jalr_c, lui_c, auipc_c, isCsr_c, isEcall_c, isEbreak_c, isMret_c, isSret_c, isSfenceVma_c, isFence_c, isAmo_c, illegalOpcode_c, fRegWrite_c;
 wire isVecCfg_c;   // Gen7 Pillar V Phase 1 (docs/adr/0061)
 wire isVecArith_c;  // Gen7 Pillar V Phase 2a (docs/adr/0062)
+wire isVecLoad_c, isVecStore_c;  // Gen7 Pillar V Phase 3 (docs/adr/0064)
 
 Control #(.XLEN(XLEN)) m_Control(
     .opcode(inst_word[6:0]),
@@ -204,6 +205,7 @@ Control #(.XLEN(XLEN)) m_Control(
     .isCsr(isCsr_c), .isEcall(isEcall_c), .isEbreak(isEbreak_c), .isMret(isMret_c),
     .isSret(isSret_c), .isSfenceVma(isSfenceVma_c), .isFence(isFence_c), .isAmo(isAmo_c),
     .isVecCfg(isVecCfg_c), .isVecArith(isVecArith_c),
+    .isVecLoad(isVecLoad_c), .isVecStore(isVecStore_c),
     .illegalOpcode(illegalOpcode_c), .fRegWrite(fRegWrite_c)
 );
 
@@ -415,11 +417,19 @@ wire [4:0] vec_align_mask = {1'b0, vec_group_count_fresh} - 5'd1;
 // number at all, and must NOT be alignment-checked (a real bug found by
 // running the LMUL=2 directed test before trusting this: an OPIVI's own
 // simm5=7=0b00111 happened to be odd, tripping this check for every
-// single .vi instruction regardless of real vd/vs2 alignment).
-wire vec_unaligned = is_vec_arith && !vec_crack_active_r &&
+// single .vi instruction regardless of real vd/vs2 alignment). vle/vse
+// (Phase 3, docs/adr/0064) only ever touch vd/vs3 (vec_vd_areg_raw) --
+// vs1/vs2 aren't real vector fields for those opcodes at all (rs1 is the
+// INTEGER base address, checked for readiness but never alignment-
+// checked the way a real vector-register-group source is), so the
+// vs1/vs2 terms below stay is_vec_arith-only; vec_is_cracked_class
+// covers both classes for the vd term and the crack-sequencer's own
+// start/continue conditions further down.
+wire vec_is_cracked_class = is_vec_arith || is_vec_ls;
+wire vec_unaligned = vec_is_cracked_class && !vec_crack_active_r &&
     (((vec_vd_areg_raw  & vec_align_mask) != 5'd0) ||
-     (!vec_arith_use_scalar && ((vec_vs1_areg_raw & vec_align_mask) != 5'd0)) ||
-     ((vec_vs2_areg_raw & vec_align_mask) != 5'd0));
+     (is_vec_arith && !vec_arith_use_scalar && ((vec_vs1_areg_raw & vec_align_mask) != 5'd0)) ||
+     (is_vec_arith && ((vec_vs2_areg_raw & vec_align_mask) != 5'd0)));
 
 // This dispatch cycle is the LAST crack-op of its own macro instruction
 // (fires pc_r's own advance) -- either genuinely mid-crack and just
@@ -427,19 +437,19 @@ wire vec_unaligned = is_vec_arith && !vec_crack_active_r &&
 // at all, "last" the same cycle it starts).
 wire vec_crack_last = vec_crack_active_r ? (vec_crack_idx_r == vec_crack_group_count_r - 4'd1)
                                           : (vec_group_count_fresh == 4'd1);
-wire vec_crack_holds_pc = is_vec_arith && !vec_unaligned && !vec_crack_last;
+wire vec_crack_holds_pc = vec_is_cracked_class && !vec_unaligned && !vec_crack_last;
 
 always @(posedge clk) begin
     if (~rst) begin
         vec_crack_active_r <= 1'b0;
     end
     else begin
-        if (do_dispatch && is_vec_arith && !vec_crack_active_r && !vec_unaligned && (vec_group_count_fresh > 4'd1)) begin
+        if (do_dispatch && vec_is_cracked_class && !vec_crack_active_r && !vec_unaligned && (vec_group_count_fresh > 4'd1)) begin
             vec_crack_active_r     <= 1'b1;
             vec_crack_group_count_r <= vec_group_count_fresh;
             vec_crack_idx_r        <= 4'd1;   // this cycle dispatched index 0; next cycle is index 1
         end
-        else if (do_dispatch && is_vec_arith && vec_crack_active_r) begin
+        else if (do_dispatch && vec_is_cracked_class && vec_crack_active_r) begin
             if (vec_crack_idx_r == vec_crack_group_count_r - 4'd1)
                 vec_crack_active_r <= 1'b0;
             else
@@ -478,6 +488,21 @@ wire vec_arith_funct6_legal =
     (vec_arith_funct6 == `VFUNCT6_MAXU) || (vec_arith_funct6 == `VFUNCT6_MAX) ||
     (vec_arith_funct6 == `VFUNCT6_AND) || (vec_arith_funct6 == `VFUNCT6_OR) || (vec_arith_funct6 == `VFUNCT6_XOR);
 wire vec_arith_illegal = is_vec_arith && !vec_arith_funct6_legal;
+
+// ==========================================================================
+// Generation 7, Pillar V, Phase 3 (docs/adr/0064). vle/vse (unit-stride)
+// decode. rs1 (the base address, an ordinary INTEGER register) reuses
+// rs1_areg/rat_rpreg0/prf_rvalid0 -- the SAME wires vec_arith's own .vx
+// cross-file read already established, no new integer-side plumbing
+// needed. vd/vs3 (the vector load-dest/store-source register) sits at
+// the IDENTICAL bit position [11:7] real vec_vd_areg already decodes
+// (crack-adjusted, generic w.r.t. which functional unit consumes it) --
+// reused directly, unmodified.
+// ==========================================================================
+wire is_vec_load  = isVecLoad_c;
+wire is_vec_store = isVecStore_c;
+wire is_vec_ls    = is_vec_load || is_vec_store;
+wire [2:0] vec_ls_eew = funct3_c;   // real vle/vse funct3 IS the EEW select field directly
 
 // ==========================================================================
 // Gen6-H: F-extension, scoped to a real, tested, but deliberately narrow
@@ -729,6 +754,7 @@ wire [6:0] funct7_c_1;
 wire jump_c_1, jalr_c_1, lui_c_1, auipc_c_1, isCsr_c_1, isEcall_c_1, isEbreak_c_1, isMret_c_1, isSret_c_1, isSfenceVma_c_1, isFence_c_1, isAmo_c_1, illegalOpcode_c_1, fRegWrite_c_1;
 wire isVecCfg_c_1;   // Gen7 Pillar V Phase 1 (docs/adr/0061)
 wire isVecArith_c_1;  // Gen7 Pillar V Phase 2a (docs/adr/0062)
+wire isVecLoad_c_1, isVecStore_c_1;  // Gen7 Pillar V Phase 3 (docs/adr/0064)
 
 Control #(.XLEN(XLEN)) m_Control_1(
     .opcode(inst_word1[6:0]),
@@ -742,6 +768,7 @@ Control #(.XLEN(XLEN)) m_Control_1(
     .isCsr(isCsr_c_1), .isEcall(isEcall_c_1), .isEbreak(isEbreak_c_1), .isMret(isMret_c_1),
     .isSret(isSret_c_1), .isSfenceVma(isSfenceVma_c_1), .isFence(isFence_c_1), .isAmo(isAmo_c_1),
     .isVecCfg(isVecCfg_c_1), .isVecArith(isVecArith_c_1),
+    .isVecLoad(isVecLoad_c_1), .isVecStore(isVecStore_c_1),
     .illegalOpcode(illegalOpcode_c_1), .fRegWrite(fRegWrite_c_1)
 );
 
@@ -788,13 +815,13 @@ wire is_fp_op_1 = fRegWrite_c_1 && (
 
 // Both slots must be plain ALU (regWrite integer OP/OP-IMM, no other
 // side effects) for dual-issue to even be considered this cycle.
-wire slot0_is_plain_alu = !is_mem_op && !is_div_op && !is_fp_op && !is_branch && !is_trap_related && !is_lui_auipc_jal_jalr_csr && !is_vec_cfg && !is_vec_arith;   // Gen7-V: vsetvli/vsetivli/vector-arith all need single-issue-only exclusion (own rename stack / forced-value machinery / RS_VALU, none of it dual-issue-aware)
+wire slot0_is_plain_alu = !is_mem_op && !is_div_op && !is_fp_op && !is_branch && !is_trap_related && !is_lui_auipc_jal_jalr_csr && !is_vec_cfg && !is_vec_arith && !is_vec_ls;   // Gen7-V: vsetvli/vsetivli/vector-arith/vle/vse all need single-issue-only exclusion (own rename stack / forced-value machinery / RS_VALU/VLSU, none of it dual-issue-aware)
 // Gen6-O: slot1's own equivalent exclusion -- lui_c_1/auipc_c_1/jump_c_1/
 // jalr_c_1/isCsr_c_1 are slot1's own decode outputs (Gen6-K's own second
 // Control.v instance), already computed, never consumed until now for
 // the identical reason slot0's own versions weren't before this phase.
 wire is_lui_auipc_jal_jalr_csr_1 = lui_c_1 || auipc_c_1 || jump_c_1 || jalr_c_1 || isCsr_c_1;
-wire slot1_is_plain_alu = !is_mem_op_1 && !is_div_op_1 && !is_fp_op_1 && !is_branch_1 && !is_trap_related_1 && !is_lui_auipc_jal_jalr_csr_1 && !isVecCfg_c_1 && !isVecArith_c_1;   // Gen7-V: a vsetvli/vsetivli or real vector-arith op in the pc+4 slot must never be silently swept into slot1's own vector-unaware payload pack -- same exclusion reasoning as is_lui_auipc_jal_jalr_csr_1 (Phase 1's own real bug, same class)
+wire slot1_is_plain_alu = !is_mem_op_1 && !is_div_op_1 && !is_fp_op_1 && !is_branch_1 && !is_trap_related_1 && !is_lui_auipc_jal_jalr_csr_1 && !isVecCfg_c_1 && !isVecArith_c_1 && !isVecLoad_c_1 && !isVecStore_c_1;   // Gen7-V: a vsetvli/vsetivli/vector-arith/vle/vse op in the pc+4 slot must never be silently swept into slot1's own vector-unaware payload pack -- same exclusion reasoning as is_lui_auipc_jal_jalr_csr_1 (Phase 1's own real bug, same class)
 // Gen6-P2 (docs/adr/0053): real, deliberate scope cut, same category as
 // every other Gen6-K exclusion above -- dual-issue and live Sv39
 // translation don't coexist this phase. m_IMem1's own speculative fetch
@@ -922,10 +949,11 @@ wire [$clog2(NUM_PREGS - NUM_AREGS):0] fl_free_count;   // unused beyond
 wire dispatch_stall = rob_full
                       || (is_mem_op ? lsq_full : (is_div_op ? rs_div_full :
                           (is_fp_op ? (is_fp_multicycle ? rs_fdiv_full : rs_falu_full) :
-                          (is_vec_arith ? rs_valu_full : rs_alu_full))))   // Gen7-V Phase 2a
+                          (is_vec_arith ? rs_valu_full :
+                          (is_vec_ls ? rs_vlsu_full : rs_alu_full)))))   // Gen7-V Phase 2a/3
                       || (needs_dest && !fl_alloc_ok0)
                       || (is_fp_op && !fl_f_alloc_ok0)   // Gen6-H
-                      || (is_vec_arith && !fl_v_alloc_ok0)   // Gen7-V Phase 2a
+                      || ((is_vec_arith || is_vec_load) && !fl_v_alloc_ok0)   // Gen7-V Phase 2a/3
                       || br_inflight_valid_r    // Gen6-G: single-outstanding-
                                                   // branch scope cut, see the
                                                   // branch-speculation
@@ -1016,15 +1044,32 @@ wire dispatch_stall = rob_full
                                                   // waits for, is what
                                                   // actually fires the
                                                   // redirect).
-                      || vec_cfg_inflight_valid_r;   // Gen7-V Phase 1
-                                                  // (docs/adr/0061): same
-                                                  // single-outstanding
-                                                  // shape as every source
-                                                  // above -- vtype/vl can
-                                                  // never change mid-flight
-                                                  // under a future vector
-                                                  // instruction's own
-                                                  // dispatch-time decode.
+                      || vec_cfg_inflight_valid_r     // Gen7-V Phase 1
+                      // Gen7-V Phase 3 (docs/adr/0064): a REAL, load-
+                      // bearing single-outstanding gate, not just
+                      // symmetry with vec_cfg -- RS_VLSU's own out-of-
+                      // order issue selection ("lowest-ready-index",
+                      // ReservationStation.v's own established, correct-
+                      // for-register-ops-only precedent) is UNSAFE for
+                      // memory ops: a real bug found by running the
+                      // vle/vse directed test caught it directly -- a
+                      // vse32.v whose own vs3 operand wasn't ready yet
+                      // (still waiting on an in-flight vadd.vi) let a
+                      // LATER, always-ready vle32.v from the SAME
+                      // program issue and complete FIRST, reading stale
+                      // pre-store memory content. Blocking ALL further
+                      // dispatch while any vle/vse is in flight
+                      // guarantees strict program-order memory access,
+                      // the same real correctness requirement
+                      // LoadStoreQueue.v's own in-order/single-
+                      // outstanding-head design already exists to
+                      // provide for ordinary scalar loads/stores.
+                      // Excludes a CONTINUING crack-op of the SAME
+                      // already-in-flight macro vle/vse (vec_crack_active_r
+                      // already active) -- otherwise a real LMUL>1 vle/vse
+                      // would deadlock on its own first crack-op's own
+                      // inflight flag before ever dispatching crack1.
+                      || (vlsu_inflight_valid_r && !(is_vec_ls && vec_crack_active_r));
 wire do_dispatch     = !dispatch_stall;
 
 // Gen6-K: room for a SECOND dispatch this cycle, checked independently
@@ -1157,8 +1202,15 @@ RegisterAliasTable #(.NUM_AREGS(NUM_FREGS), .NUM_PREGS(NUM_FPREGS), .HARDWIRE_RE
 // ==========================================================================
 wire [VPREG_BITS-1:0] fl_v_alloc_preg0;
 wire                  fl_v_alloc_ok0;
-wire [VPREG_BITS-1:0] rat_v_rpreg0, rat_v_rpreg1, rat_v_rpreg_v0;
+wire [VPREG_BITS-1:0] rat_v_rpreg0, rat_v_rpreg1, rat_v_rpreg_v0, rat_v_rpreg_vs3;
 wire [VPREG_BITS-1:0] rat_v_old_preg0;
+// Gen7 Pillar V Phase 3 (docs/adr/0064): VLSU.v's own completion,
+// forward-declared for the identical reason (consumed by dispatch_stall/
+// ROB above, instantiated below).
+wire                     vlsu_complete_valid;
+wire [VPREG_BITS-1:0]    vlsu_complete_dest_preg;
+wire [ROB_IDX_BITS-1:0]  vlsu_complete_rob_tag;
+wire                     rs_vlsu_full;
 
 // Gen7 Pillar V Phase 2a (docs/adr/0062): first real dispatch wiring for
 // this triad (Phase 1 left it all tied 0). Single-issue only (Gen7-V
@@ -1166,10 +1218,14 @@ wire [VPREG_BITS-1:0] rat_v_old_preg0;
 // exclusion) -- slot1 ports stay tied off.
 FreeList #(.NUM_PREGS(NUM_VPREGS), .NUM_AREGS(NUM_VREGS)) m_FreeList_Vec(
     .clk(clk), .rst(rst),
-    .alloc_en0(is_vec_arith), .alloc_en1(1'b0),
+    // Gen7-V Phase 3: is_vec_load ORed in -- a real vector destination
+    // needs a fresh preg exactly like is_vec_arith; is_vec_store does
+    // NOT (no destination at all, matches an ordinary store's own
+    // has_dest=0 shape).
+    .alloc_en0(is_vec_arith || is_vec_load), .alloc_en1(1'b0),
     .alloc_preg0(fl_v_alloc_preg0), .alloc_preg1(),
     .alloc_ok0(fl_v_alloc_ok0), .alloc_ok1(),
-    .commit_en0(do_dispatch && is_vec_arith), .commit_en1(1'b0),
+    .commit_en0(do_dispatch && (is_vec_arith || is_vec_load)), .commit_en1(1'b0),
     .free_en0(rob_retire_valid0 && rob_retire_has_dest0 && rob_retire_is_vec_dest0), .free_preg0(rob_retire_old_preg0),
     .free_en1(rob_retire_valid1 && rob_retire_has_dest1 && rob_retire_is_vec_dest1), .free_preg1(rob_retire_old_preg1),
     .free_count()
@@ -1181,17 +1237,20 @@ RegisterAliasTable #(.NUM_AREGS(NUM_VREGS), .NUM_PREGS(NUM_VPREGS), .HARDWIRE_RE
     // raddr2 fixed at areg 0 (v0, the real RVV mask register) -- its own
     // current rename, needed by RS_VALU's own issue-time mask read
     // (m_PRF_Vec's own raddr4 below) every cycle a vector op issues,
-    // regardless of vm (harmless when unmasked).
-    .raddr2({VAREG_BITS{1'b0}}), .raddr3({VAREG_BITS{1'b0}}),
-    .rpreg0(rat_v_rpreg0), .rpreg1(rat_v_rpreg1), .rpreg2(rat_v_rpreg_v0), .rpreg3(),
-    .wen0(do_dispatch && is_vec_arith), .waddr0(vec_vd_areg), .wpreg0(fl_v_alloc_preg0), .old_preg0(rat_v_old_preg0),
+    // regardless of vm (harmless when unmasked). raddr3 (Gen7-V Phase 3):
+    // vec_vd_areg's own current rename, needed for vse's own vs3 (source
+    // data) read -- vd/vs3 share the identical bit position, already
+    // crack-adjusted.
+    .raddr2({VAREG_BITS{1'b0}}), .raddr3(vec_vd_areg),
+    .rpreg0(rat_v_rpreg0), .rpreg1(rat_v_rpreg1), .rpreg2(rat_v_rpreg_v0), .rpreg3(rat_v_rpreg_vs3),
+    .wen0(do_dispatch && (is_vec_arith || is_vec_load)), .waddr0(vec_vd_areg), .wpreg0(fl_v_alloc_preg0), .old_preg0(rat_v_old_preg0),
     .wen1(1'b0), .waddr1({VAREG_BITS{1'b0}}), .wpreg1({VPREG_BITS{1'b0}}), .old_preg1(),
     .cwen0(rob_retire_valid0 && rob_retire_has_dest0 && rob_retire_is_vec_dest0), .cwaddr0(rob_retire_areg0), .cwpreg0(rob_retire_preg0),
     .cwen1(rob_retire_valid1 && rob_retire_has_dest1 && rob_retire_is_vec_dest1), .cwaddr1(rob_retire_areg1), .cwpreg1(rob_retire_preg1),
     .restore_en(1'b0)
 );
 
-wire [VLEN-1:0] prf_v_rdata0, prf_v_rdata1, prf_v_rdata2, prf_v_rdata3, prf_v_rdata4;
+wire [VLEN-1:0] prf_v_rdata0, prf_v_rdata1, prf_v_rdata2, prf_v_rdata3, prf_v_rdata4, prf_v_rdata5;
 wire            prf_v_rvalid0, prf_v_rvalid1, prf_v_rvalid2, prf_v_rvalid3;
 
 // SP_INIT explicitly sized to VLEN bits -- an unsized `0` override would
@@ -1215,16 +1274,20 @@ PhysicalRegisterFile #(.XLEN(VLEN), .NUM_PREGS(NUM_VPREGS), .NUM_AREGS(NUM_VREGS
     .clk(clk), .rst(rst),
     .raddr0(rat_v_rpreg0), .raddr1(rat_v_rpreg1),
     .raddr2(issue_src1_preg_valu), .raddr3(issue_src2_preg_valu), .raddr4(rat_v_rpreg_v0),
-    .raddr5({VPREG_BITS{1'b0}}), .raddr6({VPREG_BITS{1'b0}}), .raddr7({VPREG_BITS{1'b0}}),
-    .raddr8({VPREG_BITS{1'b0}}), .raddr9({VPREG_BITS{1'b0}}), .raddr10({VPREG_BITS{1'b0}}), .raddr11({VPREG_BITS{1'b0}}),
+    // raddr5 (Gen7-V Phase 3): RS_VLSU's own issue-time vs3 (store data)
+    // read -- issue_src2_preg_vlsu holds the vs3 vector preg only when
+    // is_vec_store (tied to 0 for loads, a harmless unused read there).
+    .raddr5(issue_src2_preg_vlsu), .raddr6({VPREG_BITS{1'b0}}), .raddr7({VPREG_BITS{1'b0}}),
+    .raddr8({VPREG_BITS{1'b0}}), .raddr9({VPREG_BITS{1'b0}}), .raddr10({VPREG_BITS{1'b0}}), .raddr11({VPREG_BITS{1'b0}}), .raddr12({VPREG_BITS{1'b0}}),
     .rdata0(prf_v_rdata0), .rdata1(prf_v_rdata1), .rdata2(prf_v_rdata2), .rdata3(prf_v_rdata3), .rdata4(prf_v_rdata4),
-    .rdata5(), .rdata6(), .rdata7(), .rdata8(), .rdata9(), .rdata10(), .rdata11(),
+    .rdata5(prf_v_rdata5), .rdata6(), .rdata7(), .rdata8(), .rdata9(), .rdata10(), .rdata11(), .rdata12(),
     .rvalid0(prf_v_rvalid0), .rvalid1(prf_v_rvalid1), .rvalid2(prf_v_rvalid2), .rvalid3(prf_v_rvalid3), .rvalid4(),
-    .rvalid5(), .rvalid6(), .rvalid7(), .rvalid8(), .rvalid9(), .rvalid10(), .rvalid11(),
+    .rvalid5(), .rvalid6(), .rvalid7(), .rvalid8(), .rvalid9(), .rvalid10(), .rvalid11(), .rvalid12(),
     .wen0(valu_complete_valid), .waddr0(valu_complete_dest_preg), .wdata0(valu_result),
-    .wen1(1'b0), .waddr1({VPREG_BITS{1'b0}}), .wdata1({VLEN{1'b0}}),
+    // Gen7-V Phase 3: wen1 is VLSU's own load completion.
+    .wen1(vlsu_complete_valid), .waddr1(vlsu_complete_dest_preg), .wdata1(vlsu_result),
     .wen2(1'b0), .waddr2({VPREG_BITS{1'b0}}), .wdata2({VLEN{1'b0}}),
-    .alloc_en0(do_dispatch && is_vec_arith), .alloc_preg0(fl_v_alloc_preg0),
+    .alloc_en0(do_dispatch && (is_vec_arith || is_vec_load)), .alloc_preg0(fl_v_alloc_preg0),
     .alloc_en1(1'b0), .alloc_preg1({VPREG_BITS{1'b0}})
 );
 
@@ -1242,12 +1305,14 @@ wire [$clog2(ROB_ENTRIES+1)-1:0] rob_count;
 
 ReorderBuffer #(.ROB_ENTRIES(ROB_ENTRIES), .AREG_BITS(AREG_BITS), .PREG_BITS(PREG_BITS)) m_ROB(
     .clk(clk), .rst(rst),
-    // Gen7-V Phase 2a: is_vec_arith folded into alloc_has_dest0/
-    // alloc_is_vec_dest0/alloc_preg0/alloc_old_preg0, same 3-way mux
-    // shape is_fp_op already established (mutually exclusive by
-    // construction -- an instruction is never both fp and vec).
-    .alloc_en0(do_dispatch), .alloc_has_dest0(needs_dest || is_fp_op || is_vec_arith), .alloc_is_fp_dest0(is_fp_op),
-    .alloc_is_vec_dest0(is_vec_arith),
+    // Gen7-V Phase 2a/3: is_vec_arith/is_vec_load folded into
+    // alloc_has_dest0/alloc_is_vec_dest0/alloc_preg0/alloc_old_preg0,
+    // same 3-way mux shape is_fp_op already established (mutually
+    // exclusive by construction -- an instruction is never both fp and
+    // vec). is_vec_store deliberately excluded -- no destination at all,
+    // matches an ordinary store's own has_dest=0 shape.
+    .alloc_en0(do_dispatch), .alloc_has_dest0(needs_dest || is_fp_op || is_vec_arith || is_vec_load), .alloc_is_fp_dest0(is_fp_op),
+    .alloc_is_vec_dest0(is_vec_arith || is_vec_load),
     // Gen7-V Phase 2b: alloc_areg0 must use the crack-adjusted
     // vec_vd_areg (vd+offset), NOT the raw rd_areg -- a real bug found
     // by running the LMUL=2 directed test: rd_areg is inst_word[11:7]
@@ -1257,8 +1322,8 @@ ReorderBuffer #(.ROB_ENTRIES(ROB_ENTRIES), .AREG_BITS(AREG_BITS), .PREG_BITS(PRE
     // architectural register, silently overwriting v2's own retire-time
     // rename with crack1's value and leaving v3 untouched at its reset
     // identity mapping.
-    .alloc_areg0(is_vec_arith ? vec_vd_areg : rd_areg), .alloc_preg0(is_fp_op ? fl_f_alloc_preg0 : (is_vec_arith ? fl_v_alloc_preg0 : (needs_dest ? fl_alloc_preg0 : {PREG_BITS{1'b0}}))),
-    .alloc_old_preg0(is_fp_op ? rat_f_old_preg0 : (is_vec_arith ? rat_v_old_preg0 : rat_old_preg0)), .alloc_tag0(rob_alloc_tag0),
+    .alloc_areg0((is_vec_arith || is_vec_ls) ? vec_vd_areg : rd_areg), .alloc_preg0(is_fp_op ? fl_f_alloc_preg0 : ((is_vec_arith || is_vec_load) ? fl_v_alloc_preg0 : (needs_dest ? fl_alloc_preg0 : {PREG_BITS{1'b0}}))),
+    .alloc_old_preg0(is_fp_op ? rat_f_old_preg0 : ((is_vec_arith || is_vec_load) ? rat_v_old_preg0 : rat_old_preg0)), .alloc_tag0(rob_alloc_tag0),
     // Gen6-K: slot1 is always a plain ALU op (try_dual_issue's own
     // definition) -- never FP, never vector, never a real dest-less op
     // class, so alloc_is_fp_dest1/alloc_is_vec_dest1 stay hardwired 0
@@ -1284,6 +1349,12 @@ ReorderBuffer #(.ROB_ENTRIES(ROB_ENTRIES), .AREG_BITS(AREG_BITS), .PREG_BITS(PRE
     .complete_en3(falu_complete_valid), .complete_tag3(falu_complete_rob_tag),
     .complete_en4(fdiv_complete_valid), .complete_tag4(fdiv_complete_rob_tag),
     .complete_en5(valu_complete_valid), .complete_tag5(valu_complete_rob_tag),   // Gen7-V Phase 2a
+    // Gen7-V Phase 3: complete_en6 fires UNCONDITIONALLY on vlsu_done
+    // (both loads AND stores need their own ROB entry marked done to
+    // retire) -- distinct from vlsu_complete_valid (PRF_Vec's own wen1
+    // gate below, load-only, a store never writes a destination
+    // register).
+    .complete_en6(vlsu_rob_complete_valid), .complete_tag6(vlsu_complete_rob_tag),
     .retire_valid0(rob_retire_valid0), .retire_has_dest0(rob_retire_has_dest0), .retire_is_fp_dest0(rob_retire_is_fp_dest0),
     .retire_is_vec_dest0(rob_retire_is_vec_dest0),
     .retire_areg0(rob_retire_areg0), .retire_preg0(rob_retire_preg0), .retire_old_preg0(rob_retire_old_preg0),
@@ -1931,7 +2002,11 @@ LoadStoreQueue #(.XLEN(XLEN), .LSQ_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_B
     // side. dtlb_stall alone (before ptw_busy even goes high) is what
     // catches the very first cycle of a miss -- ptw_busy alone wouldn't
     // freeze the head until a walk has actually started.
-    .mem_stall_ext(ptw_busy || dtlb_stall),
+    // Gen7-V Phase 3 (docs/adr/0064): vlsu_busy ORed in -- VLSU.v is now
+    // a 3rd requester on the shared m_DMem port (below), same "back off
+    // while the other requester holds the shared port" reasoning
+    // ptw_busy already established for the walker.
+    .mem_stall_ext(ptw_busy || dtlb_stall || vlsu_busy),
     // Gen6-P2: see LoadStoreQueue.v's own force_retire_ext port comment --
     // fires exactly once, the same cycle dside_fault_pulse (MMU section)
     // reports the fault to the ROB, closing what would otherwise be a
@@ -1996,14 +2071,38 @@ assign lsq_mem_readData = mailbox_hit_r ? mailbox_readData : dmem_readData;
 // a qualifying hit; falling back to the untranslated VA on a miss/fault/
 // disabled cycle is harmless since mem_stall_ext already prevents a real
 // access from ever reaching m_DMem on any of those cycles anyway).
+// Gen7-V Phase 3 (docs/adr/0064): widened from 2-way to 3-way -- VLSU.v
+// is a genuinely new, 3rd requester on this shared port, mirroring the
+// exact precedent Gen6-P2 already established widening this same mux
+// from 1-way to 2-way for the walker. Priority: ptw_busy (translation
+// must resolve first) > vlsu_busy > ordinary LSQ traffic (lowest,
+// mem_stall_ext already guarantees the LSQ itself never contends during
+// either of the other two's own window). VLSU's own accesses are NOT
+// mailbox-aware (real, narrow, flagged gap -- vle/vse only ever target
+// ordinary RAM in this phase, matching how no current test combines a
+// vector load/store with the mailbox range) and do NOT themselves defer
+// to a PTW walk that starts mid-run (also flagged -- no current test
+// combines vle/vse with live Sv39 translation).
+// Gen7-V Phase 3: the mux selector is vlsu_mem_memRead||vlsu_mem_memWrite
+// (a real REQUEST this exact cycle), NOT vlsu_busy (an FSM STATUS bit) --
+// a real bug found by running the vle/vse directed test: VLSU.v's own
+// LAST element of a run sets both its own final mem_memWrite/mem_address
+// pulse AND state_r<=S_IDLE (hence vlsu_busy<=0) in the SAME clock edge,
+// so by the time that pulse is externally visible, vlsu_busy already
+// reads 0 -- keying the mux on busy silently dropped every vle/vse's own
+// LAST element access, routing the arbitrated bus to LSQ's (idle)
+// traffic instead for exactly that one cycle. Keying on the real request
+// signals directly is correct regardless of this timing relationship.
+wire vlsu_wants_bus = vlsu_mem_memRead || vlsu_mem_memWrite;
 wire [XLEN-1:0] dmem_arb_address   = ptw_busy ? ptw_m_addr :
-    ((translate_enable && ls_hit) ? {ls_ppn[19:0], lsq_mem_address[11:0]} : lsq_mem_address);
-wire [XLEN-1:0] dmem_arb_writeData = ptw_busy ? ptw_m_data_o : lsq_mem_writeData;
-wire [2:0]      dmem_arb_funct3    = ptw_busy ? `F3_LOAD_LD  : lsq_mem_funct3;
+    (vlsu_wants_bus ? vlsu_mem_address :
+    ((translate_enable && ls_hit) ? {ls_ppn[19:0], lsq_mem_address[11:0]} : lsq_mem_address));
+wire [XLEN-1:0] dmem_arb_writeData = ptw_busy ? ptw_m_data_o : (vlsu_wants_bus ? vlsu_mem_writeData : lsq_mem_writeData);
+wire [2:0]      dmem_arb_funct3    = ptw_busy ? `F3_LOAD_LD  : (vlsu_wants_bus ? vlsu_mem_funct3 : lsq_mem_funct3);
 wire            dmem_arb_memWrite  = ptw_busy ? (ptw_m_cyc && ptw_m_stb && ptw_m_we)
-                                               : (lsq_mem_memWrite && !mailbox_hit);
+                                               : (vlsu_wants_bus ? vlsu_mem_memWrite : (lsq_mem_memWrite && !mailbox_hit));
 wire            dmem_arb_memRead   = ptw_busy ? (ptw_m_cyc && ptw_m_stb && !ptw_m_we)
-                                               : (lsq_mem_memRead && !mailbox_hit);
+                                               : (vlsu_wants_bus ? vlsu_mem_memRead : (lsq_mem_memRead && !mailbox_hit));
 assign ptw_m_data_i = dmem_readData;
 
 DataMemoryBRAM #(.SIZE_BYTES(DMEM_SIZE_BYTES), .XLEN(XLEN)) m_DMem(
@@ -2585,6 +2684,138 @@ assign valu_complete_valid     = valu_done;
 assign valu_complete_rob_tag   = valu_inflight_rob_tag_r;
 assign valu_complete_dest_preg = valu_inflight_dest_preg_r;
 
+// ==========================================================================
+// Generation 7, Pillar V, Phase 3 (docs/adr/0064). RS_VLSU + VLSU.v --
+// real vle/vse unit-stride load/store. src1 is ALWAYS rs1's own INTEGER
+// preg (the base address, cross-file read, same pattern .vx's own rs1
+// read already established). src2 is a genuine 2-way case: vs3's own
+// VECTOR preg for a real store (vd_areg doubles as vs3 at the identical
+// bit position), or tied always-ready for a load (no second operand at
+// all -- the destination is fresh, not read).
+wire [PREG_BITS-1:0] vlsu_disp_src1_preg = rat_rpreg0;
+wire                 vlsu_disp_src1_ready = prf_rvalid0;
+wire [PREG_BITS-1:0] vlsu_disp_src2_preg = is_vec_store ? {{(PREG_BITS-VPREG_BITS){1'b0}}, rat_v_rpreg_vs3} : {PREG_BITS{1'b0}};
+wire                 vlsu_disp_src2_ready = is_vec_store ? prf_v_rvalid3 : 1'b1;   // prf_v_rvalid3 mirrors RS_VALU's own vs1 dispatch-readiness query shape, reused here for vs3's identical bit-position read
+// {is_store(1), eew(3), vm(1)} = 5 bits -- vm rides the payload same as
+// eew/is_store (real spec masking applies to vle/vse exactly like
+// vector arithmetic, not a simplification to skip).
+wire [4:0] vlsu_disp_payload = {is_vec_store, vec_ls_eew, vec_arith_vm};
+
+wire [PREG_BITS-1:0] issue_src1_preg_vlsu, issue_src2_preg_vlsu;
+wire [PREG_BITS-1:0] issue_dest_preg_vlsu_wide;
+wire [VPREG_BITS-1:0] issue_dest_preg_vlsu;
+wire [ROB_IDX_BITS-1:0] issue_rob_tag_vlsu;
+wire [4:0] issue_payload_vlsu;
+wire issue_valid_vlsu;
+wire [$clog2(8+1)-1:0] rs_vlsu_count;   // debug visibility only
+
+ReservationStation #(.RS_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(5)) m_RS_VLSU(
+    .clk(clk), .rst(rst),
+    .disp_en0(do_dispatch && is_vec_ls),
+    .disp_src1_preg0(vlsu_disp_src1_preg), .disp_src1_ready0(vlsu_disp_src1_ready),
+    .disp_src2_preg0(vlsu_disp_src2_preg), .disp_src2_ready0(vlsu_disp_src2_ready),
+    // is_vec_store has no real destination (mirrors an ordinary store's
+    // own has_dest=0 shape) -- disp_dest_preg0 is meaningless there,
+    // tied to whatever fl_v_alloc_preg0 currently holds is harmless
+    // (never consumed for a store's own completion, which the ROB
+    // routes as has_dest=0).
+    .disp_dest_preg0({{(PREG_BITS-VPREG_BITS){1'b0}}, fl_v_alloc_preg0}),
+    .disp_rob_tag0(rob_alloc_tag0), .disp_payload0(vlsu_disp_payload),
+    .disp_en1(1'b0),
+    .disp_src1_preg1({PREG_BITS{1'b0}}), .disp_src1_ready1(1'b0),
+    .disp_src2_preg1({PREG_BITS{1'b0}}), .disp_src2_ready1(1'b0),
+    .disp_dest_preg1({PREG_BITS{1'b0}}), .disp_rob_tag1({ROB_IDX_BITS{1'b0}}), .disp_payload1(5'd0),
+    // CDB snoop: port0 self (chained vle->vse or back-to-back vector
+    // memory ops); port1 VALU's own completion (a vector arithmetic
+    // result feeding directly into a vse); port2 the integer ALU (rs1's
+    // own base-address chain); port3 a completed integer load (rs1
+    // sourced from a prior scalar load). A real, narrow, flagged gap
+    // (matching RS_FALU's own original 3-port scope before its own P6
+    // fix): DIV/REM is NOT covered here -- a vle/vse whose own rs1 is
+    // still an in-flight DIV/REM result won't wake up. Port scarcity
+    // (4 ports, 5 real candidate sources) forced a choice; DIV/REM
+    // feeding a memory base address directly is a genuinely rare real
+    // pattern, chosen as the one to defer.
+    .cdb_valid0(vlsu_complete_valid), .cdb_preg0({{(PREG_BITS-VPREG_BITS){1'b0}}, vlsu_complete_dest_preg}),
+    .cdb_valid1(valu_complete_valid), .cdb_preg1({{(PREG_BITS-VPREG_BITS){1'b0}}, valu_complete_dest_preg}),
+    .cdb_valid2(issue_valid), .cdb_preg2(issue_dest_preg),
+    .cdb_valid3(lsq_complete_valid && lsq_complete_is_load), .cdb_preg3(lsq_complete_dest_preg),
+    .issue_valid(issue_valid_vlsu),
+    .issue_src1_preg(issue_src1_preg_vlsu), .issue_src2_preg(issue_src2_preg_vlsu),
+    .issue_dest_preg(issue_dest_preg_vlsu_wide), .issue_rob_tag(issue_rob_tag_vlsu), .issue_payload(issue_payload_vlsu),
+    .issue_ack(vlsu_start),   // VLSU.v is genuinely multi-cycle -- only accepted the cycle it's actually free
+    .rs_count(rs_vlsu_count), .rs_full(rs_vlsu_full)
+);
+assign issue_dest_preg_vlsu = issue_dest_preg_vlsu_wide[VPREG_BITS-1:0];
+
+wire        issue_vlsu_is_store = issue_payload_vlsu[4];
+wire [2:0]  issue_vlsu_eew      = issue_payload_vlsu[3:1];
+wire        issue_vlsu_vm       = issue_payload_vlsu[0];
+
+wire vlsu_busy;
+wire vlsu_start = issue_valid_vlsu && !vlsu_busy;
+
+wire vlsu_mem_memRead, vlsu_mem_memWrite;
+wire [XLEN-1:0] vlsu_mem_address, vlsu_mem_writeData;
+wire [2:0] vlsu_mem_funct3;
+wire [VLEN-1:0] vlsu_result;
+wire vlsu_done;
+
+VLSU #(.VLEN(VLEN), .XLEN(XLEN)) m_VLSU(
+    .clk(clk), .rst(rst), .start(vlsu_start),
+    .is_store(issue_vlsu_is_store), .base_addr(prf_rdata12), .store_data(prf_v_rdata5),
+    .eew(issue_vlsu_eew), .v0_data(prf_v_rdata4), .vm(issue_vlsu_vm),
+    .vl(vl_o[$clog2(VLEN/8+1)-1:0]),
+    .mem_memRead(vlsu_mem_memRead), .mem_memWrite(vlsu_mem_memWrite),
+    .mem_address(vlsu_mem_address), .mem_writeData(vlsu_mem_writeData), .mem_funct3(vlsu_mem_funct3),
+    .mem_readData(dmem_readData),
+    .busy(vlsu_busy), .done(vlsu_done), .result(vlsu_result)
+);
+
+reg [ROB_IDX_BITS-1:0] vlsu_inflight_rob_tag_r;
+reg [VPREG_BITS-1:0]   vlsu_inflight_dest_preg_r;
+always @(posedge clk) begin
+    if (rst && vlsu_start) begin
+        vlsu_inflight_rob_tag_r   <= issue_rob_tag_vlsu;
+        vlsu_inflight_dest_preg_r <= issue_dest_preg_vlsu;
+    end
+end
+
+assign vlsu_complete_valid     = vlsu_done && !issue_vlsu_is_store_inflight_r;   // stores have no real destination -- never a PRF_Vec write, only a ROB completion (below, unconditional)
+assign vlsu_complete_rob_tag   = vlsu_inflight_rob_tag_r;
+assign vlsu_complete_dest_preg = vlsu_inflight_dest_preg_r;
+
+reg issue_vlsu_is_store_inflight_r;
+always @(posedge clk) begin
+    if (rst && vlsu_start)
+        issue_vlsu_is_store_inflight_r <= issue_vlsu_is_store;
+end
+
+// The ROB's own completion (complete_en6, unconditional on load-vs-store)
+// is separate from the PRF_Vec write gate (vlsu_complete_valid, load-only)
+// -- a store still needs its ROB entry marked done so it can retire, it
+// just never writes a destination register.
+wire vlsu_rob_complete_valid = vlsu_done;
+
+// Gen7-V Phase 3: single-outstanding gate (see dispatch_stall's own
+// header comment for the real bug this fixes). Set the first cycle a
+// FRESH macro vle/vse begins dispatching; cleared only once RS_VLSU is
+// genuinely fully drained (nothing queued, VLSU itself idle) -- "no
+// dispatch of anything new" already guarantees nothing races to set it
+// again before the clear condition is checked.
+reg vlsu_inflight_valid_r;
+always @(posedge clk) begin
+    if (~rst) begin
+        vlsu_inflight_valid_r <= 1'b0;
+    end
+    else begin
+        if (do_dispatch && is_vec_ls && !vlsu_inflight_valid_r)
+            vlsu_inflight_valid_r <= 1'b1;
+        else if (vlsu_inflight_valid_r && (rs_vlsu_count == 0) && !vlsu_busy && !(do_dispatch && is_vec_ls))
+            vlsu_inflight_valid_r <= 1'b0;
+    end
+end
+
 wire [FLEN-1:0] prf_f_rdata0, prf_f_rdata1;
 wire            prf_f_rvalid0, prf_f_rvalid1;
 
@@ -2600,10 +2831,10 @@ PhysicalRegisterFile #(.XLEN(FLEN), .NUM_PREGS(NUM_FPREGS), .NUM_AREGS(NUM_FREGS
     .raddr6({FPREG_BITS{1'b0}}), .raddr7({FPREG_BITS{1'b0}}), .raddr8({FPREG_BITS{1'b0}}),
     // Gen6-K never dual-issues FP (slot1_is_plain_alu excludes is_fp_op_1
     // by construction) -- ports 9/10 are simply tied off here.
-    .raddr9({FPREG_BITS{1'b0}}), .raddr10({FPREG_BITS{1'b0}}), .raddr11({FPREG_BITS{1'b0}}),
+    .raddr9({FPREG_BITS{1'b0}}), .raddr10({FPREG_BITS{1'b0}}), .raddr11({FPREG_BITS{1'b0}}), .raddr12({FPREG_BITS{1'b0}}),
     .rdata0(prf_f_rdata0), .rdata1(prf_f_rdata1), .rdata2(prf_f_rdata2), .rdata3(prf_f_rdata3),
-    .rdata4(prf_f_rdata4), .rdata5(prf_f_rdata5), .rdata6(), .rdata7(), .rdata8(), .rdata9(), .rdata10(), .rdata11(),
-    .rvalid0(prf_f_rvalid0), .rvalid1(prf_f_rvalid1), .rvalid2(), .rvalid3(), .rvalid4(), .rvalid5(), .rvalid6(), .rvalid7(), .rvalid8(), .rvalid9(), .rvalid10(), .rvalid11(),
+    .rdata4(prf_f_rdata4), .rdata5(prf_f_rdata5), .rdata6(), .rdata7(), .rdata8(), .rdata9(), .rdata10(), .rdata11(), .rdata12(),
+    .rvalid0(prf_f_rvalid0), .rvalid1(prf_f_rvalid1), .rvalid2(), .rvalid3(), .rvalid4(), .rvalid5(), .rvalid6(), .rvalid7(), .rvalid8(), .rvalid9(), .rvalid10(), .rvalid11(), .rvalid12(),
     // CDB writeback -- port0 FALU's own instant result; port1 (Gen6-P4)
     // FDivider.v's/FSqrt.v's own multi-cycle completion (no FMADD/FLW
     // yet, so port2 stays tied off).
@@ -2616,6 +2847,7 @@ PhysicalRegisterFile #(.XLEN(FLEN), .NUM_PREGS(NUM_FPREGS), .NUM_AREGS(NUM_FREGS
 
 wire [XLEN-1:0] prf_rdata4, prf_rdata5;
 wire [XLEN-1:0] prf_rdata11;   // Gen7-V Phase 2a: RS_VALU's own .vx cross-file scalar read
+wire [XLEN-1:0] prf_rdata12;   // Gen7-V Phase 3: RS_VLSU's own rs1 (base address) cross-file read
 wire            prf_rvalid9, prf_rvalid10;
 
 PhysicalRegisterFile #(.XLEN(XLEN), .NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS), .SP_INIT(SP_INIT)) m_PRF(
@@ -2642,11 +2874,15 @@ PhysicalRegisterFile #(.XLEN(XLEN), .NUM_PREGS(NUM_PREGS), .NUM_AREGS(NUM_AREGS)
     // operand read, issue-time -- mirrors port8's own FMV.W.X cross-file
     // read precedent (Gen6-H).
     .raddr11(issue_src2_preg_valu[PREG_BITS-1:0]),
+    // Gen7-V Phase 3: raddr12 is RS_VLSU's own rs1 (base address)
+    // cross-file read, issue-time -- mirrors port11's own identical
+    // shape for RS_VALU's .vx.
+    .raddr12(issue_src1_preg_vlsu[PREG_BITS-1:0]),
     .rdata0(prf_rdata0), .rdata1(prf_rdata1), .rdata2(prf_rdata2), .rdata3(prf_rdata3),
     .rdata4(prf_rdata4), .rdata5(prf_rdata5), .rdata6(prf_rdata6), .rdata7(prf_rdata7),
-    .rdata8(prf_rdata8), .rdata9(), .rdata10(), .rdata11(prf_rdata11),
+    .rdata8(prf_rdata8), .rdata9(), .rdata10(), .rdata11(prf_rdata11), .rdata12(prf_rdata12),
     .rvalid0(prf_rvalid0), .rvalid1(prf_rvalid1), .rvalid2(), .rvalid3(), .rvalid4(), .rvalid5(), .rvalid6(), .rvalid7(), .rvalid8(),
-    .rvalid9(prf_rvalid9), .rvalid10(prf_rvalid10), .rvalid11(),
+    .rvalid9(prf_rvalid9), .rvalid10(prf_rvalid10), .rvalid11(), .rvalid12(),
     // CDB writeback -- port0 the ALU's own result (single-cycle execute,
     // no latency); port1 (Gen6-E) a completed LOAD's result (a store has
     // no destination register, so lsq_complete_is_load gates this);

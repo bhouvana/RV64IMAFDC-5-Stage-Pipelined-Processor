@@ -23,13 +23,14 @@
 `include "Tlb39.v"
 `include "Ptw39.v"
 
-// Generation 7, Pillar V, Phase 2b (Gen7-V, docs/adr/0063). Real LMUL=2
-// crack-into-microops proof through OOOCore.v's real dispatch path --
-// ONE macro vadd.vi instruction must produce TWO real, independently-
-// renamed physical vector registers (v2 AND v3), with per-crack-op
-// local vl correctly clamped (proving the crack sequencer's own
-// per-register element-range math, not just "it ran twice").
-module tb_ooocore_vector_lmul2_v2b;
+// Generation 7, Pillar V, Phase 3 (Gen7-V, docs/adr/0064). Real vle32.v/
+// vse32.v round-trip through OOOCore.v's real dispatch/rename/RS_VLSU/
+// VLSU.v/CDB/ROB-retire path, sharing the same DataMemoryBRAM.v port the
+// scalar LSQ already uses (real 3-way arbitration, not a separate
+// memory). VLSU.v's own per-element/masking/tail-agnostic semantics are
+// already proven standalone in tb_vlsu_unit.v, not re-tested here --
+// this test proves the WIRING.
+module tb_ooocore_vector_ls_v3;
     reg clk = 0;
     always #5 clk = ~clk;
 
@@ -56,7 +57,7 @@ module tb_ooocore_vector_lmul2_v2b;
 
     task check_vreg_elem;
         input [4:0] areg;
-        input [3:0] elem;        // SEW32 element index within this physical register
+        input [3:0] elem;
         input [31:0] expected;
         input [1023:0] label;
         reg [5:0] preg;
@@ -78,7 +79,7 @@ module tb_ooocore_vector_lmul2_v2b;
     OOOCore #(
         .XLEN(64), .NUM_AREGS(32), .NUM_PREGS(64),
         .ROB_ENTRIES(16), .RS_ALU_ENTRIES(8),
-        .IMEM_SIZE_BYTES(128), .IMEM_INIT_FILE("sim/programs/ooocore_vector_lmul2_v2b.mem"),
+        .IMEM_SIZE_BYTES(128), .IMEM_INIT_FILE("sim/programs/ooocore_vector_ls_v3.mem"),
         .DMEM_SIZE_BYTES(256)
     ) dut (.clk(clk), .rst(rst), .mailbox_readData(64'b0), .msip_pending(1'b0), .timer_pending(1'b0), .ext_pending(1'b0));
 
@@ -87,24 +88,22 @@ module tb_ooocore_vector_lmul2_v2b;
         @(posedge clk); rst <= 0;
         @(posedge clk); rst <= 1;
 
-        for (i = 0; i < 700; i = i + 1)
+        // Generous fixed wait -- 6 real instructions, several genuinely
+        // multi-cycle (VALU.v ~16 cycles for the vadd.vi; VLSU.v ~16*3
+        // cycles each for the vse32/vle32, one 3-cycle load or 1-cycle
+        // store per element) -- 1500 cycles is a real, generous margin.
+        for (i = 0; i < 1500; i = i + 1)
             @(posedge clk);
         #1;
 
-        check_areg(5'd5, 64'h0000000000000014, "vsetvli x5,x10,e32,m2: vl=20 (unclamped, <VLMAX=32)");
-        // crack0 (v2): local_vl=16, elements 0 and 15 both active (real proof of a full 16-element run).
-        check_vreg_elem(5'd2, 4'd0,  32'h00000007, "v2 elem0 (crack0, always active) = 0+7=7");
-        check_vreg_elem(5'd2, 4'd15, 32'h00000007, "v2 elem15 (crack0, last of local_vl=16) = 7");
-        // crack1 (v3): local_vl=20-16=4 -- elements 0-3 active, element4+ tail-agnostic ZERO
-        // (the real proof this crack-op got its OWN clamped vl, not the macro instruction's raw 20).
-        check_vreg_elem(5'd3, 4'd0, 32'h00000007, "v3 elem0 (crack1, active, local_vl=4) = 0+7=7");
-        check_vreg_elem(5'd3, 4'd3, 32'h00000007, "v3 elem3 (crack1, last active elem of local_vl=4) = 7");
-        check_vreg_elem(5'd3, 4'd4, 32'h00000000, "v3 elem4 (crack1, PAST local_vl=4, tail-agnostic zero)");
-        check_vreg_elem(5'd3, 4'd15, 32'h00000000, "v3 elem15 (crack1, well past local_vl=4, zero)");
+        check_areg(5'd5, 64'h0000000000000010, "vsetvli x5,x10,e32,m1: vl=16");
+        check_vreg_elem(5'd1, 4'd0, 32'h00000005, "vadd.vi v1,v0,5: v1 elem0=5");
+        check_vreg_elem(5'd2, 4'd0, 32'h00000005, "vle32.v v2,(x11) elem0: round-trip=5");
+        check_vreg_elem(5'd2, 4'd15, 32'h00000005, "vle32.v v2,(x11) elem15: round-trip=5 (full 16-element store+load)");
 
         $display("=== %0d/%0d checks passed ===", checks - fails, checks);
-        if (fails == 0) $display("PASS  ooocore_vector_lmul2_v2b (%0d checks)", checks);
-        else $display("FAIL  ooocore_vector_lmul2_v2b (%0d/%0d checks failed)", fails, checks);
+        if (fails == 0) $display("PASS  ooocore_vector_ls_v3 (%0d checks)", checks);
+        else $display("FAIL  ooocore_vector_ls_v3 (%0d/%0d checks failed)", fails, checks);
         $finish;
     end
 endmodule
