@@ -681,4 +681,79 @@
 `define VFUNCT6_MSGTU 6'h1e   // .vx/.vi only
 `define VFUNCT6_MSGT  6'h1f   // .vx/.vi only
 
+// ---- Generation 7, Pillar K: RISC-V scalar cryptography, full Zkn ----
+// (Zbkb+Zbkc+Zbkx+Zkne+Zknd+Zknh). Encodings verified against the real
+// riscv/riscv-opcodes repo (extensions/rv64_zknh, rv_zknh, rv64_zkne,
+// rv64_zknd, rv_zbkb, rv64_zbkb, rv_zbkc, rv_zbkx), fetched directly this
+// session -- not from memory, per docs/adr/0059's own "no invented
+// instructions" bar. Semantics (ALU.v) verified against the ratified
+// spec's own Sail model, docs/superpowers/specs/2026-08-11-pillar-k-
+// crypto-design.md records the exact sources.
+//
+// ALUCtl widened 6->7 bits (was 6-bit, docs/adr/0060) -- ~9 free 6-bit
+// codes were short of the ~22 new K-ext codes needed. New codes continue
+// sequentially from the old max (SLLI_UW=6'b111010=58) at the new width,
+// not backfilled into old gaps -- simplest correct choice, mirrors ADR
+// 0060's own "widen for headroom" reasoning.
+`define ALUCTL_CLMUL      7'b1000000  // 64
+`define ALUCTL_CLMULH     7'b1000001  // 65
+`define ALUCTL_PACK       7'b1000010  // 66 -- shared by pack/packw, wordOp-split (see ALU.v)
+`define ALUCTL_PACKH      7'b1000011  // 67
+`define ALUCTL_BREV8      7'b1000100  // 68
+`define ALUCTL_SHA256SUM0 7'b1000101  // 69
+`define ALUCTL_SHA256SUM1 7'b1000110  // 70
+`define ALUCTL_SHA256SIG0 7'b1000111  // 71
+`define ALUCTL_SHA256SIG1 7'b1001000  // 72
+`define ALUCTL_SHA512SUM0 7'b1001001  // 73
+`define ALUCTL_SHA512SUM1 7'b1001010  // 74
+`define ALUCTL_SHA512SIG0 7'b1001011  // 75
+`define ALUCTL_SHA512SIG1 7'b1001100  // 76
+`define ALUCTL_XPERM4     7'b1001101  // 77
+`define ALUCTL_XPERM8     7'b1001110  // 78
+`define ALUCTL_AES64ESM   7'b1001111  // 79
+`define ALUCTL_AES64ES    7'b1010000  // 80
+`define ALUCTL_AES64DSM   7'b1010001  // 81
+`define ALUCTL_AES64DS    7'b1010010  // 82
+`define ALUCTL_AES64KS1I  7'b1010011  // 83
+`define ALUCTL_AES64KS2   7'b1010100  // 84
+`define ALUCTL_AES64IM    7'b1010101  // 85
+
+// funct7 groups (OP opcode, R-type). clmul/clmulh land in FUNCT7_ZBB_MINMAX's
+// own two still-free funct3 slots (000/001/010/011 free; min/minu/max/maxu
+// already use 100/101/110/111). Verified against rv_zbc: `clmul rd rs1 rs2
+// 31..25=5 14..12=1`, `clmulh ... 14..12=3` -- 31..25=5 decimal = 0000101 =
+// FUNCT7_ZBB_MINMAX exactly, no new funct7 constant needed.
+`define FUNCT7_ZBKB_PACK   7'b0000100  // pack(f3=100)/packh(f3=111), OP opcode.
+                                          // Same 7-bit value as FUNCT7_ZBA_ADD_UW,
+                                          // but that one is OP-32-only (funct3=000)
+                                          // -- no collision (opcode-scoped by ALUOp/wordOp).
+`define FUNCT7_ZBKX_XPERM  7'b0010100  // xperm4(f3=010)/xperm8(f3=100), OP opcode.
+                                          // Same bit pattern as FUNCT7_ZBS_BSET (whose own
+                                          // funct3=001) -- no collision, different funct3.
+
+// funct6 groups (OP-IMM opcode, unary/rnum-carrying ops). Both verified free
+// against every existing FUNCT6_* value in this file.
+`define FUNCT6_ZKNH_SHA 6'b000100  // sha256/512 sig0/1,sum0/1 -- all share this ONE
+                                      // funct6 (real spec: funct7=0001000 for every one),
+                                      // discriminated entirely by rs2_c (0-3=sha256
+                                      // sum0/sum1/sig0/sig1, 4-7=sha512 sum0/sum1/sig0/sig1).
+`define FUNCT6_ZKNE_AES64 6'b001100  // aes64ks1i (rs2_c[4]=1, rs2_c[3:0]=rnum) /
+                                       // aes64im (rs2_c==0), funct3=001 both.
+
+// rs2-field (inst[24:20]) sub-selectors within FUNCT6_ZKNH_SHA/f3=001
+`define RS2_SHA256SUM0 5'b00000
+`define RS2_SHA256SUM1 5'b00001
+`define RS2_SHA256SIG0 5'b00010
+`define RS2_SHA256SIG1 5'b00011
+`define RS2_SHA512SUM0 5'b00100
+`define RS2_SHA512SUM1 5'b00101
+`define RS2_SHA512SIG0 5'b00110
+`define RS2_SHA512SIG1 5'b00111
+
+// brev8 shares FUNCT6_ZBB_REV8(0x1A)/funct3=101 with rev8/binvi, discriminated
+// by rs2_c: rev8 fixed 5'b11000(0x18), brev8 fixed 5'b00111(0x07) -- verified
+// against rv_zbkb: `brev8 rd rs1 31..20=0x687 ...` -> imm12[11:6]=0x1A,
+// imm12[4:0]=0x07.
+`define RS2_BREV8 5'b00111
+
 `endif
