@@ -411,10 +411,24 @@ Bht #(.XLEN(XLEN), .NUM_ENTRIES(BHT_BTB_ENTRIES)) m_Bht(
     .train_pc({XLEN{1'b0}}), .train_predict_taken(),
     .update_valid(br_resolve), .update_pc(br_inflight_pc_r), .update_taken(br_actual_taken)
 );
+// Gen6-P5 (docs/adr/0056): jalr now ALSO trains/queries this SAME shared
+// BTB instance (untagged by instruction class, per Btb.v's own header --
+// any instruction can train or query it) -- jr_resolve joins br_resolve&&
+// br_actual_taken as a second, independent training source. jalr "always
+// taken" (it's an unconditional jump, no BHT direction-predictor
+// involvement needed, unlike a conditional branch), so jr_resolve alone
+// (no additional taken-gate) is the right training condition. Both
+// sources are mutually exclusive by construction (br_resolve/jr_resolve
+// each require their OWN *_inflight_valid_r, and this whole generation's
+// own single-outstanding scope cut means at most one of branch/jalr can
+// ever be in flight at a time -- see both sections' own header comments).
+wire jr_train_now = jr_resolve;
 Btb #(.XLEN(XLEN), .NUM_ENTRIES(BHT_BTB_ENTRIES)) m_Btb(
     .clk(clk), .rst(rst),
     .query_pc(pc_r), .hit(btb_hit), .target(btb_target),
-    .update_valid(br_resolve && br_actual_taken), .update_pc(br_inflight_pc_r), .update_target(br_actual_target)
+    .update_valid((br_resolve && br_actual_taken) || jr_train_now),
+    .update_pc(jr_train_now ? jr_inflight_pc_r : br_inflight_pc_r),
+    .update_target(jr_train_now ? jr_target : br_actual_target)
 );
 
 // Both BHT (direction) and BTB (target) must agree before trusting a
@@ -454,24 +468,32 @@ always @(posedge clk) begin
 end
 
 // ==========================================================================
-// Gen6-O4 (docs/adr/0051): jalr, single-outstanding scope cut -- same
-// shape as trap_inflight_valid_r (Gen6-I), NOT br_inflight's own BTB-
-// predicted speculative one: jalr's own target is register-dependent
-// (rs1+imm), genuinely unknowable at decode the way jal's own PC+imm
-// is, but ALSO not worth a real BTB-predicted speculative window for
-// this phase's own scope (jalr is far rarer in real code than a
-// conditional branch, and "predict + verify + squash-free recovery"
-// doesn't save anything if fetch/dispatch simply holds still instead
-// of ever speculating past an unresolved jalr at all -- the exact same
-// "no deep wrong-path window" real scope cut this whole generation
-// already uses for traps). Real future work: a genuine BTB-predicted
-// jalr, same shape as conditional branches, if profiling ever shows
-// this stall costing real cycles on a workload using function-pointer/
-// return-style jalr densely.
+// Gen6-P5 (docs/adr/0056): jalr, now BTB-predicted -- same predict/verify/
+// recover shape br_inflight's own branch speculation already established
+// (docs/adr/0021), reusing the SAME shared m_Btb instance (widened just
+// above to also train on jr_resolve). Still single-outstanding (at most
+// one branch OR jalr in flight at a time, dispatch of everything else
+// stalls until it resolves) -- docs/adr/0051's own original deferral
+// reasoning still applies to why this core doesn't attempt DEEP
+// speculation here, just real target prediction instead of a blind
+// stall. Honest finding, not assumed: because dispatch stays blocked
+// regardless of prediction (the same single-outstanding scope cut
+// conditional branches already live with), and this core's own frontend
+// is purely combinational with no fetch/dispatch decoupling (Gen6-D's
+// own documented scope), a correct prediction saves ZERO cycles over the
+// old stall-and-wait design in THIS core as it stands today -- pc_r
+// already sat at jr_target the cycle jr_resolve fired either way. The
+// real value here is architectural consistency with branches (one
+// prediction/recovery mechanism, not two different shapes for two kinds
+// of indirect control flow) and a genuine foundation for whichever
+// future phase relaxes the single-outstanding scope cut into real deep
+// speculation, where decoupled fetch WOULD actually benefit from this.
 // ==========================================================================
 reg                     jr_inflight_valid_r;
 reg [ROB_IDX_BITS-1:0]  jr_inflight_rob_tag_r;
 reg [XLEN-1:0]          jr_inflight_imm_r;
+reg [XLEN-1:0]          jr_inflight_pc_r;
+reg [XLEN-1:0]          jr_inflight_predicted_target_r;
 
 wire jr_resolve = issue_valid && jr_inflight_valid_r && (issue_rob_tag == jr_inflight_rob_tag_r);
 // JALR spec: target = (rs1 + imm) & ~1. prf_rdata2 is rs1's own raw PRF
@@ -480,6 +502,13 @@ wire jr_resolve = issue_valid && jr_inflight_valid_r && (issue_rob_tag == jr_inf
 // never prf_rdata2 itself).
 wire [XLEN-1:0] jr_target_raw = prf_rdata2 + jr_inflight_imm_r;
 wire [XLEN-1:0] jr_target = {jr_target_raw[XLEN-1:1], 1'b0};
+// A cold/missed BTB entry has no real target at all -- "predict" pc+4 (a
+// near-certain misprediction, same honest non-guess PIPELINED's own
+// conditional-branch BTB miss defaults to) rather than fabricate one;
+// correctness is guaranteed by jr_mispredict's own verify+recover
+// regardless of prediction quality, only the RECOVERY COST differs.
+wire [XLEN-1:0] jr_predicted_target = btb_hit ? btb_target : (pc_r + {{(XLEN-3){1'b0}}, 3'd4});
+wire jr_mispredict = jr_resolve && (jr_target != jr_inflight_predicted_target_r);
 
 always @(posedge clk) begin
     if (~rst) begin
@@ -487,11 +516,13 @@ always @(posedge clk) begin
     end
     else begin
         if (do_dispatch && is_jalr) begin
-            jr_inflight_valid_r   <= 1'b1;
-            jr_inflight_rob_tag_r <= rob_alloc_tag0;
-            jr_inflight_imm_r     <= imm_d;   // plain I-type, NOT <<1 --
-                                                // see ImmGen.v's own jalr
-                                                // case comment
+            jr_inflight_valid_r            <= 1'b1;
+            jr_inflight_rob_tag_r          <= rob_alloc_tag0;
+            jr_inflight_imm_r              <= imm_d;   // plain I-type, NOT <<1 --
+                                                          // see ImmGen.v's own jalr
+                                                          // case comment
+            jr_inflight_pc_r               <= pc_r;
+            jr_inflight_predicted_target_r <= jr_predicted_target;
         end
         else if (jr_resolve) begin
             jr_inflight_valid_r <= 1'b0;
@@ -2097,15 +2128,22 @@ always @(posedge clk) begin
         pc_r <= csr_trap_taken ? csr_mtvec_val : csr_mepc_val;
     else if (br_resolve && br_mispredict)
         pc_r <= br_correct_target;
-    else if (jr_resolve)   // Gen6-O4: jalr's own resolve-time redirect --
-                             // same "can't coincide with do_dispatch"
-                             // argument as br_resolve/trap_resolve's own
-                             // (jr_inflight_valid_r is folded into
-                             // dispatch_stall too) -- always redirects,
-                             // no "mispredict" concept needed since
-                             // nothing ever speculates past an
-                             // unresolved jalr in the first place (see
-                             // jr_inflight's own section above).
+    else if (jr_resolve && jr_mispredict)   // Gen6-P5: only redirects on a
+                                              // genuine misprediction now
+                                              // -- same "can't coincide
+                                              // with do_dispatch" argument
+                                              // as br_resolve/trap_resolve's
+                                              // own (jr_inflight_valid_r is
+                                              // folded into dispatch_stall
+                                              // too). A CORRECT prediction
+                                              // needs no action here: pc_r
+                                              // already sits at jr_target
+                                              // (written at DISPATCH time
+                                              // now, below), same "correct
+                                              // prediction -> no redirect
+                                              // needed" shape br_resolve's
+                                              // own br_mispredict gate
+                                              // already established.
         pc_r <= jr_target;
     else if (do_dispatch)
         // Gen6-K: do_dispatch_slot1 only ever fires alongside try_dual_issue,
@@ -2117,7 +2155,12 @@ always @(posedge clk) begin
         // deliberately outputs the pre-shift value, see br_inflight_imm_r's
         // own identical comment above) -- no prediction needed, this is
         // always correct, unlike is_branch's own predicted_target.
+        // Gen6-P5: is_jalr's own predicted target (jr_predicted_target,
+        // the SAME value just latched into jr_inflight_predicted_target_r
+        // above) speculatively redirects pc_r immediately, mirroring
+        // is_branch's own predicted_target arm exactly.
         pc_r <= is_jal ? (pc_r + (imm_d << 1)) :
+                is_jalr ? jr_predicted_target :
                 (is_branch && predicted_taken) ? predicted_target :
                 (do_dispatch_slot1 ? (pc_r + 8) : (pc_r + 4));
 end

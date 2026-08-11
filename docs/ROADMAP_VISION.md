@@ -572,6 +572,26 @@ fixing the test program's own missing halt loop, the same
 falls-off-the-end/restart bug class found before). 134/134 directed
 suite, zero-warning compile.
 
+**Gen6-P5 (`docs/adr/0056`): BTB-predicted jalr.** Fifth sub-phase.
+Reuses the SAME shared BTB conditional branches already query/train --
+jalr needs no BHT (direction) involvement, unconditional by nature.
+Predicts speculatively at dispatch (`pc_r` redirects immediately on a
+BTB hit, same as a predicted-taken branch); verifies at resolve,
+redirecting only on a genuine mismatch. Honest finding, worked out by
+design rather than assumed: because dispatch of everything else stays
+blocked regardless of prediction quality (the same single-outstanding
+scope cut branches already live with) and this core's own frontend has
+zero fetch/dispatch decoupling, a correct prediction saves nothing
+measurable over the old stall-and-wait design *as this core stands
+today* -- the real value is architectural consistency with branches and
+a foundation for whichever future phase adds real deep speculation.
+`tb_ooocore_jalr_btb_p5.v`: the same jalr executes twice via a real
+loop -- iteration 1 a genuine cold-BTB miss+mispredict+recover,
+iteration 2 a genuine BTB hit+correct-predict+no-redirect, both proven
+directly via a live per-cycle monitor on `jr_mispredict`, not inferred.
+6/6 first run, zero new bugs found. 135/135 directed suite,
+zero-warning compile.
+
 ---
 
 ## Generation 7 — Vector Processing (v7.0)
