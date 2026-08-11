@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Shared disassembler for this core's exact ISA (RV32I + RV32M + its specific
-deviations -- ble/bgt custom branches, ctz custom op, CSR/ecall/ebreak/mret).
+Shared disassembler for this core's exact ISA (RV32I + RV32M + the B
+extension, docs/adr/0060, + its specific deviations -- ble/bgt custom
+branches, CSR/ecall/ebreak/mret). ctz used to be a custom op; it now
+disassembles via its real Zbb encoding (docs/adr/0060).
 Single source of truth for turning a raw instruction word into a mnemonic
 string, used by sim/tools/gen_trace.py (pipeline viewer) and
 sim/tools/debugger.py (interactive ISS debugger, docs/ROADMAP.md Phase 8) --
@@ -26,7 +28,7 @@ OPCODE_JAL = 0b1101111
 OPCODE_JALR = 0b1100111
 OPCODE_LUI = 0b0110111
 OPCODE_AUIPC = 0b0010111
-OPCODE_CUSTOM = 0b0001011  # docs/adr/0041: was 0b0101010, RVC-collision bug, see asm.py's own comment
+OPCODE_CUSTOM = 0b0001011  # reserved (real RISC-V custom-0 space) -- unused since docs/adr/0060 moved ctz to its real Zbb encoding
 OPCODE_SYSTEM = 0b1110011
 
 # Generation 2 (Phase M, docs/adr/0028-rv64-migration-phase-m.md).
@@ -103,8 +105,15 @@ def disasm(word, xlen=32):
             names = {0: "mul", 1: "mulh", 2: "mulhsu", 3: "mulhu",
                       4: "div", 5: "divu", 6: "rem", 7: "remu"}
             return f"{names[f3]} x{rd},x{rs1},x{rs2}"
-        if f7 == FUNCT7_ALT and f3 == 0b111:
-            return f"ctz x{rd},x{rs1}"
+        # B extension (docs/adr/0060) -- FUNCT7_ALT+111/110/100 are real
+        # andn/orn/xnor, not the retired custom ctz.
+        bext_names = {(FUNCT7_ALT, 0b111): "andn", (FUNCT7_ALT, 0b110): "orn", (FUNCT7_ALT, 0b100): "xnor",
+                      (0b0000101, 0b100): "min", (0b0000101, 0b101): "minu", (0b0000101, 0b110): "max", (0b0000101, 0b111): "maxu",
+                      (0b0110000, 0b001): "rol", (0b0110000, 0b101): "ror",
+                      (0b0010000, 0b010): "sh1add", (0b0010000, 0b100): "sh2add", (0b0010000, 0b110): "sh3add",
+                      (0b0100100, 0b001): "bclr", (0b0100100, 0b101): "bext", (0b0110100, 0b001): "binv", (0b0010100, 0b001): "bset"}
+        if (f7, f3) in bext_names:
+            return f"{bext_names[(f7, f3)]} x{rd},x{rs1},x{rs2}"
         names = {(FUNCT7_BASE, 0): "add", (FUNCT7_ALT, 0): "sub", (FUNCT7_BASE, 1): "sll",
                   (FUNCT7_BASE, 2): "slt", (FUNCT7_BASE, 3): "sltu", (FUNCT7_BASE, 4): "xor",
                   (FUNCT7_BASE, 5): "srl", (FUNCT7_ALT, 5): "sra", (FUNCT7_BASE, 6): "or",
@@ -113,6 +122,28 @@ def disasm(word, xlen=32):
         return f"{mn} x{rd},x{rs1},x{rs2}"
 
     if op == OPCODE_I:
+        imm12 = (word >> 20) & 0xFFF
+        f6 = (word >> 26) & 0x3F  # funct7[6:1] -- real for every XLEN, see riscv_defs.vh's FUNCT6_ALT comment
+        # B extension (docs/adr/0060).
+        if f3 == 1 and f6 == 0b010010:
+            return f"bclri x{rd},x{rs1},{imm12 & 0x3F}"
+        if f3 == 5 and f6 == 0b010010:
+            return f"bexti x{rd},x{rs1},{imm12 & 0x3F}"
+        if f3 == 1 and f6 == 0b011010:
+            return f"binvi x{rd},x{rs1},{imm12 & 0x3F}"
+        if f3 == 1 and f6 == 0b001010:
+            return f"bseti x{rd},x{rs1},{imm12 & 0x3F}"
+        if f3 == 1 and f6 == 0b011000:
+            sub = imm12 & 0x1F
+            sub_names = {0: "clz", 1: "ctz", 2: "cpop", 4: "sext.b", 5: "sext.h"}
+            if sub in sub_names:
+                return f"{sub_names[sub]} x{rd},x{rs1}"
+        if f3 == 5 and f6 == 0b011000:
+            return f"rori x{rd},x{rs1},{imm12 & 0x3F}"
+        if f3 == 5 and imm12 == 0x287:
+            return f"orc.b x{rd},x{rs1}"
+        if f3 == 5 and imm12 in (0x698, 0x6B8):
+            return f"rev8 x{rd},x{rs1}"
         if f3 in (1, 5):
             # Generation 2: 6-bit shamt (inst[25:20]) + 6-bit funct6
             # (inst[31:26]) at xlen>=64, matching design/ImmGen.v/
@@ -120,7 +151,6 @@ def disasm(word, xlen=32):
             # the default xlen=32 (bit-exact with every prior call site).
             if xlen >= 64:
                 shamt = (word >> 20) & 0x3F
-                f6 = (word >> 26) & 0x3F
                 mn = {1: "slli", 5: ("srai" if f6 == 0b010000 else "srli")}[f3]
             else:
                 shamt = (word >> 20) & 0x1F
@@ -134,6 +164,12 @@ def disasm(word, xlen=32):
         if f7 == FUNCT7_MULDIV:
             names = {0: "mulw", 4: "divw", 5: "divuw", 6: "remw", 7: "remuw"}
             return f"{names.get(f3, 'op32muldiv?')} x{rd},x{rs1},x{rs2}"
+        # B extension, RV64-only word variants (docs/adr/0060).
+        w_bext = {(0b0110000, 0b001): "rolw", (0b0110000, 0b101): "rorw",
+                  (0b0000100, 0b000): "add.uw",
+                  (0b0010000, 0b010): "sh1add.uw", (0b0010000, 0b100): "sh2add.uw", (0b0010000, 0b110): "sh3add.uw"}
+        if (f7, f3) in w_bext:
+            return f"{w_bext[(f7, f3)]} x{rd},x{rs1},x{rs2}"
         names = {(FUNCT7_BASE, 0): "addw", (FUNCT7_ALT, 0): "subw", (FUNCT7_BASE, 1): "sllw",
                   (FUNCT7_BASE, 5): "srlw", (FUNCT7_ALT, 5): "sraw"}
         mn = names.get((f7, f3), f"op32?(f7={f7:#04x},f3={f3})")
@@ -143,6 +179,18 @@ def disasm(word, xlen=32):
         # Generation 2. shamt always exactly 5 bits, unlike OPCODE_I's
         # xlen-dependent split above (this opcode only ever means a 32-bit
         # result, regardless of xlen).
+        imm12 = (word >> 20) & 0xFFF
+        f6 = (word >> 26) & 0x3F
+        # B extension, RV64-only word variants (docs/adr/0060).
+        if f3 == 1 and f7 == 0b0110000:
+            sub = imm12 & 0x1F
+            sub_names = {0: "clzw", 1: "ctzw", 2: "cpopw"}
+            if sub in sub_names:
+                return f"{sub_names[sub]} x{rd},x{rs1}"
+        if f3 == 5 and f7 == 0b0110000:
+            return f"roriw x{rd},x{rs1},{imm12 & 0x1F}"
+        if f3 == 1 and f6 == 0b000010:
+            return f"slli.uw x{rd},x{rs1},{imm12 & 0x3F}"
         if f3 in (1, 5):
             shamt = (word >> 20) & 0x1F
             mn = {1: "slliw", 5: ("sraiw" if f7 == FUNCT7_ALT else "srliw")}[f3]
@@ -184,9 +232,6 @@ def disasm(word, xlen=32):
 
     if op == OPCODE_AUIPC:
         return f"auipc x{rd},0x{(word >> 12) & 0xFFFFF:x}"
-
-    if op == OPCODE_CUSTOM:
-        return f"ctz x{rd},x{rs1}"
 
     if op == OPCODE_SYSTEM:
         csr_addr = (word >> 20) & 0xFFF
