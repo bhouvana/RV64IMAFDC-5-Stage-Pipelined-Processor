@@ -338,7 +338,7 @@ wire [XLEN-1:0] readData2;
 wire [XLEN-1:0] pc_final;
 wire [XLEN-1:0] imm_reg_val;
 wire zero;
-wire [5:0] ALUCtl;
+wire [6:0] ALUCtl;
 wire [XLEN-1:0] imm;
 wire [XLEN-1:0] ALUOut;
 wire [XLEN-1:0] imm_sum;
@@ -2419,7 +2419,7 @@ endgenerate
     // across the whole suite by the Python driver. Zero synthesis/simulation
     // impact when the macro isn't defined.
     `ifdef COVERAGE
-    integer cov_alu_ctl [0:63];  // widened 32->64 -- ALUCtl grew 5->6 bits (docs/adr/0060)
+    integer cov_alu_ctl [0:127];  // widened 64->128 -- ALUCtl grew 6->7 bits (Gen7-K2)
     integer cov_branch_taken [0:7];
     integer cov_branch_not_taken [0:7];
     integer cov_stall_cycles;

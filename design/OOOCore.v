@@ -106,7 +106,7 @@ module OOOCore #(
     // (vsetvli/vsetivli's own vl=min(AVL,VLMAX) computation) instead of
     // ALU.v's own result -- reuses this exact escape-hatch mechanism,
     // same reasoning as lui/auipc/jal/jalr/csrrX above.
-    parameter PAYLOAD_BITS = 1 + 1 + 1 + XLEN + 1 + 6 + XLEN
+    parameter PAYLOAD_BITS = 1 + 1 + 1 + XLEN + 1 + 7 + XLEN  // ALUCtl slot widened 6->7 (Gen7-K2)
 )(
     input wire clk,
     input wire rst,   // active-low, same convention as every other
@@ -209,7 +209,7 @@ Control #(.XLEN(XLEN)) m_Control(
     .illegalOpcode(illegalOpcode_c), .fRegWrite(fRegWrite_c)
 );
 
-wire [5:0] ALUCtl_d;
+wire [6:0] ALUCtl_d;
 ALUCtrl m_ALUCtrl(.ALUOp(ALUOp_c), .funct7_c(funct7_c), .funct3_c(funct3_c), .rs2_c(rs2_areg), .ALUCtl(ALUCtl_d));
 
 wire [XLEN-1:0] imm_d;
@@ -796,7 +796,7 @@ Control #(.XLEN(XLEN)) m_Control_1(
     .illegalOpcode(illegalOpcode_c_1), .fRegWrite(fRegWrite_c_1)
 );
 
-wire [5:0] ALUCtl_d_1;
+wire [6:0] ALUCtl_d_1;
 ALUCtrl m_ALUCtrl_1(.ALUOp(ALUOp_c_1), .funct7_c(funct7_c_1), .funct3_c(funct3_c_1), .rs2_c(rs2_areg_1), .ALUCtl(ALUCtl_d_1));
 
 wire [XLEN-1:0] imm_d_1;
@@ -2154,10 +2154,11 @@ DataMemoryBRAM #(.SIZE_BYTES(DMEM_SIZE_BYTES), .XLEN(XLEN)) m_DMem(
 // ready bits are set), so this is always live, never garbage, data.
 // ==========================================================================
 // Gen6-O: use_forced_a/use_link_b/forced_a_value sit ABOVE the original
-// {ALUSrc, ALUCtl, imm} sub-layout (which keeps its own original bit
-// positions unchanged, [XLEN+6:0] -- widened from [XLEN+5:0] when ALUCtl
-// grew 5->6 bits, docs/adr/0060) -- see this module's own
-// PAYLOAD_BITS comment for the exact layout.
+// {ALUSrc, ALUCtl, imm} sub-layout, whose own LOW bit position (imm at
+// [XLEN-1:0]) never moves -- only its own top edge (ALUSrc's own bit index)
+// shifts when ALUCtl's own width changes: [XLEN+5:0] (5-bit ALUCtl) ->
+// [XLEN+6:0] (6-bit, docs/adr/0060) -> [XLEN+7:0] (7-bit, Gen7-K2) -- see
+// this module's own PAYLOAD_BITS comment for the exact layout.
 // Gen7-V Phase 1: is_vsetvl sits ABOVE use_forced_a/use_link_b/
 // forced_a_value (a new top bit -- every extraction below shifted down
 // by 1 vs. before this phase); the {ALUSrc,ALUCtl,imm} sub-layout keeps
@@ -2166,8 +2167,8 @@ wire issue_is_vsetvl       = issue_payload[PAYLOAD_BITS-1];
 wire issue_use_forced_a    = issue_payload[PAYLOAD_BITS-2];
 wire issue_use_link_b      = issue_payload[PAYLOAD_BITS-3];
 wire [XLEN-1:0] issue_forced_a_value = issue_payload[PAYLOAD_BITS-4 -: XLEN];
-wire issue_alusrc         = issue_payload[XLEN+6];  // unchanged -- fixed low-position sub-layout
-wire [5:0] issue_aluctl    = issue_payload[XLEN+5 -: 6];
+wire issue_alusrc         = issue_payload[XLEN+7];  // moved up by 1 -- ALUCtl grew 6->7 bits (Gen7-K2)
+wire [6:0] issue_aluctl    = issue_payload[XLEN+6 -: 7];
 wire [XLEN-1:0] issue_imm  = issue_payload[XLEN-1:0];
 
 wire [XLEN-1:0] alu_a = issue_use_forced_a ? issue_forced_a_value : prf_rdata2;

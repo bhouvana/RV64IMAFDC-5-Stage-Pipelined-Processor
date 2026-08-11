@@ -22,7 +22,7 @@ module ALUCtrl (
     input [2:0] funct3_c,
     input [4:0] rs2_c,     // inst[24:20] -- shamt on shift-immediate ops,
                             // sub-op selector on the clz/ctz/cpop/sext family
-    output reg [5:0] ALUCtl
+    output reg [6:0] ALUCtl
 );
 wire [2:0] funct3 = funct3_c;
 wire [6:0] funct7 = funct7_c;

@@ -103,7 +103,8 @@
 `define ALUCTL_BLTU 6'b010001
 `define ALUCTL_BGEU 6'b010010
 `define ALUCTL_CTZ  6'b010101  // now reached via ctz's REAL Zbb encoding, not the retired custom opcode -- see docs/adr/0060
-`define ALUCTL_ILLEGAL 6'b111111
+`define ALUCTL_ILLEGAL 7'b1111111  // widened 6->7 bits for Pillar K headroom (Gen7-K2, mirrors
+                                     // docs/adr/0060's own 5->6 bump) -- all-ones-of-current-width
 
 // ---- RV32M (docs/adr/0006-rv32m.md) ----
 `define ALUCTL_MUL    6'b010011
