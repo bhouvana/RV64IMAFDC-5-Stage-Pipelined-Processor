@@ -583,4 +583,70 @@
 `define SV39_PTE_PPN0_HI 18
 `define SV39_PTE_PPN0_LO 10
 
+// ---- Generation 7, Pillar V: RISC-V Vector, Phase 1 (config only) ----
+// (docs/adr/0061, C:\Users\poorn\.claude\plans\gen7-v-vector-phase1.md).
+// Encodings verified against the real riscv/riscv-opcodes repo
+// (extensions/rv_v), fetched directly this session, per docs/adr/0059's
+// own "no invented instructions" bar -- not from memory alone.
+`define OPCODE_V     7'b1010111  // vsetvli/vsetivli/vsetvl (this phase) +
+                                   // the real vector arithmetic/load/store
+                                   // opcode space (future phases) -- genuinely
+                                   // free before this phase, confirmed by
+                                   // direct grep of every existing OPCODE_*
+                                   // define above.
+`define F3_VOPCFG    3'b111      // OP-V funct3=0x7 selects the vsetvli/
+                                   // vsetivli/vsetvl config family; every
+                                   // other funct3 value (future phases) is
+                                   // real vector arithmetic (OPIVV/OPIVX/
+                                   // OPIVI/OPMVV/OPMVX/OPFVV/OPFVF).
+
+// vsetvli/vsetivli's shared 8-bit vtype-immediate field layout -- both
+// forms place {vma,vta,vsew[2:0],vlmul[2:0]} at the identical instruction
+// bit positions (hand-derived: vsetvli's zimm11=inst[30:20] so
+// zimm11[7:0]=inst[27:20]; vsetivli's zimm10=inst[29:20] so
+// zimm10[7:0]=inst[27:20] too -- the same absolute instruction bits
+// either way).
+`define VTYPE_VMA_BIT   27
+`define VTYPE_VTA_BIT   26
+`define VTYPE_VSEW_HI   25
+`define VTYPE_VSEW_LO   23
+`define VTYPE_VLMUL_HI  22
+`define VTYPE_VLMUL_LO  20
+
+// vsew field values
+`define VSEW_8  3'b000
+`define VSEW_16 3'b001
+`define VSEW_32 3'b010
+`define VSEW_64 3'b011
+
+// vlmul field values -- real spec two's-complement log2(LMUL) encoding;
+// $signed(vlmul) in Verilog directly gives the exponent.
+`define VLMUL_1  3'b000
+`define VLMUL_2  3'b001
+`define VLMUL_4  3'b010
+`define VLMUL_8  3'b011
+`define VLMUL_F2 3'b111  // 1/2
+`define VLMUL_F4 3'b110  // 1/4
+`define VLMUL_F8 3'b101  // 1/8
+// 3'b100 is reserved -- never a legal vlmul value.
+
+// New CSR addresses (standard RISC-V unprivileged assignments, same
+// "already-assigned spec numbering" precedent every other CSR_ADDR_*
+// group in this file already follows).
+`define CSR_ADDR_VSTART 12'h008
+`define CSR_ADDR_VXSAT  12'h009  // fixed-point saturate flag -- storage
+                                    // only this phase, no real consumer
+                                    // yet (no fixed-point ops implemented)
+`define CSR_ADDR_VXRM   12'h00A  // fixed-point rounding mode -- same
+`define CSR_ADDR_VCSR   12'h00F  // {vxrm[2:1],vxsat[0]} combined view,
+                                    // same "one more view onto the same
+                                    // bits" relationship fcsr already has
+                                    // onto {frm,fflags}
+`define CSR_ADDR_VL     12'hC20  // read-only via ordinary csrrX -- only
+                                    // vsetvli/vsetivli/vsetvl (via this
+                                    // phase's own dedicated side channel)
+                                    // ever change it
+`define CSR_ADDR_VTYPE  12'hC21  // read-only, same reasoning
+`define CSR_ADDR_VLENB  12'hC22  // read-only constant, VLEN/8
+
 `endif
