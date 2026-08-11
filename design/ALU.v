@@ -50,6 +50,20 @@ reg signed [2*XLEN-1:0] mul_ss;  // signed x signed  (mul, mulh)
 reg signed [2*XLEN-1:0] mul_su;  // signed x unsigned (mulhsu)
 reg        [2*XLEN-1:0] mul_uu;  // unsigned x unsigned (mulhu)
 
+// Pillar K (Gen7-K3) Zbkc/Zbkb scratch
+reg [XLEN-1:0] pack_lo, pack_hi;
+reg [15:0] packw_lo, packw_hi;
+reg [31:0] packw_res;
+// Pillar K (Gen7-K4) SHA scratch
+reg [31:0] sha32;
+reg [63:0] sha64;
+// Pillar K (Gen7-K5) xperm scratch
+reg [3:0] xperm_idx4;
+reg [7:0] xperm_idx8;
+// Pillar K (Gen7-K6) AES scratch
+reg [31:0] aes_tmp1, aes_tmp2, aes_tmp3, aes_rc, aes_w0, aes_w1;
+reg [63:0] aes_sr, aes_sb;
+
 always@(*)
 begin
     ALUOut = 0;
@@ -307,6 +321,47 @@ case(ALUCtl)
         begin
             mul_uu = {{XLEN{1'b0}}, A} * {{XLEN{1'b0}}, B};
             ALUOut = mul_uu[2*XLEN-1:XLEN];
+        end
+
+    // ---- Zbkc (docs/adr/0059 Pillar K) ----
+    // Carry-less multiply: XOR-accumulate shifted copies of A selected by
+    // B's set bits. Each term is truncated to XLEN bits by Verilog's own
+    // shift-into-a-fixed-width-reg semantics before the XOR, which is
+    // bit-exact with "compute the full untruncated product, then take the
+    // low/high XLEN bits" since XOR is bitwise and truncation only drops
+    // bits >= XLEN.
+    `ALUCTL_CLMUL:
+        begin
+            ALUOut = 0;
+            for (i = 0; i < XLEN; i = i + 1)
+                if (B[i]) ALUOut = ALUOut ^ (A << i);
+        end
+    `ALUCTL_CLMULH:
+        begin
+            ALUOut = 0;
+            for (i = 1; i < XLEN; i = i + 1)
+                if (B[i]) ALUOut = ALUOut ^ (A >> (XLEN - i));
+        end
+
+    // ---- Zbkb (docs/adr/0059 Pillar K) ----
+    `ALUCTL_PACK:
+        if (wordOp) begin  // packw: low 16 bits of each register -> 32-bit result, sign-extended
+            packw_lo = A[15:0];
+            packw_hi = B[15:0];
+            packw_res = {packw_hi, packw_lo};
+            ALUOut = {{(XLEN-32){packw_res[31]}}, packw_res};
+        end else begin      // pack: low XLEN/2 bits of each register -> XLEN-bit result, zero-extended
+            pack_lo = {{(XLEN/2){1'b0}}, A[XLEN/2-1:0]};
+            pack_hi = {{(XLEN/2){1'b0}}, B[XLEN/2-1:0]};
+            ALUOut = (pack_hi << (XLEN/2)) | pack_lo;
+        end
+    `ALUCTL_PACKH:
+        ALUOut = {{(XLEN-16){1'b0}}, B[7:0], A[7:0]};
+    `ALUCTL_BREV8:
+        begin
+            for (i = 0; i < XLEN/8; i = i + 1)
+                ALUOut[i*8 +: 8] = {A[i*8+0], A[i*8+1], A[i*8+2], A[i*8+3],
+                                     A[i*8+4], A[i*8+5], A[i*8+6], A[i*8+7]};
         end
 
 endcase

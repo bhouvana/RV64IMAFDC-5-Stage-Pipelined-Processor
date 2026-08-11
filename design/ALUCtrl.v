@@ -89,6 +89,22 @@ else if(ALUOp == `ALUOP_RTYPE)
         // ALUCtl code) supplies the zero-extend-A behavior, mirroring how
         // addw already reuses ALUCTL_ADD via wordOp.
         {`FUNCT7_ZBA_ADD_UW, 3'b000}: ALUCtl = `ALUCTL_ADD_UW;
+
+        // Pillar K (docs/adr/0059 Gen7-K3/K5). Zbkc clmul/clmulh share
+        // FUNCT7_ZBB_MINMAX's own still-free funct3 000/001/010/011 slots
+        // (min/minu/max/maxu already use 100/101/110/111).
+        {`FUNCT7_ZBB_MINMAX, 3'b001}: ALUCtl = `ALUCTL_CLMUL;
+        {`FUNCT7_ZBB_MINMAX, 3'b011}: ALUCtl = `ALUCTL_CLMULH;
+        // Zbkb pack/packh (packw shares ALUCTL_PACK via wordOp, decoded
+        // identically here since ALUCtrl has no opcode visibility -- same
+        // precedent as sh1add.uw sharing ALUCTL_SH1ADD above).
+        {`FUNCT7_ZBKB_PACK, 3'b100}: ALUCtl = `ALUCTL_PACK;
+        {`FUNCT7_ZBKB_PACK, 3'b111}: ALUCtl = `ALUCTL_PACKH;
+        // Zbkx xperm4/xperm8 -- share FUNCT7_ZBS_BSET's own bit pattern with
+        // a different, currently-unused funct3 (BSET itself is funct3=001).
+        {`FUNCT7_ZBKX_XPERM, 3'b010}: ALUCtl = `ALUCTL_XPERM4;
+        {`FUNCT7_ZBKX_XPERM, 3'b100}: ALUCtl = `ALUCTL_XPERM8;
+
         default:
         ALUCtl = `ALUCTL_ILLEGAL;  // unrecognized funct7/funct3 combination for this ALUOp
     endcase
@@ -180,6 +196,10 @@ else if(ALUOp == `ALUOP_ITYPE)
                 ALUCtl = `ALUCTL_ORCB;
             else if (funct6 == `FUNCT6_ZBB_REV8 && rs2_c == 5'b11000)
                 ALUCtl = `ALUCTL_REV8;  // rev8's rs2-field(0x18) is fixed by spec regardless of XLEN; only ALU.v's own byte-count differs
+            else if (funct6 == `FUNCT6_ZBB_REV8 && rs2_c == `RS2_BREV8)
+                // brev8 shares REV8's own funct6(0x1A), rs2_c=0x07 disambiguates
+                // (Pillar K, docs/adr/0059 Gen7-K3).
+                ALUCtl = `ALUCTL_BREV8;
             else
                 ALUCtl = `ALUCTL_SRL;
         end
