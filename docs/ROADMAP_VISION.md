@@ -648,7 +648,12 @@ Five pillars, each a real ISA extension integrated with the Generation 6 OoO cor
 through the existing reservation stations, and retired through the existing ROB — not five standalone
 processors:
 
-### 1. V — Vector Processing
+### 1. V — Vector Processing — **Phase 1 done**, `docs/adr/0061`
+
+Real `vsetvli`/`vsetivli` (vl=min(AVL,VLMAX), full LMUL-aware VLMAX math, VLEN=512) reusing the
+existing `RS_ALU` path, plus a new vector register-file triad (`FreeList_Vec`/`RAT_Vec`/`PRF_Vec`,
+mirrors Gen6-H's own float triad). Vector arithmetic/masking (Phase 2) and `vle`/`vse` load/store
+(Phase 3) remain open — see `docs/adr/0061`'s own Future improvements.
 
 - Vector register file.
 - Vector configuration/state (`vtype`, `vl`).
