@@ -376,7 +376,7 @@ item above is done as of Phase G (`docs/adr/0046`).
 
 ---
 
-## Generation 6 — Out-of-Order Core (v6.0)
+## Generation 6 — Out-of-Order Core (v6.0) — ✅ CLOSED as of 2026-08-11
 
 *(source material: "Phase J — Next-Generation Core". Explicitly called out
 in the source material as **a new core, not a modification of the existing
@@ -619,6 +619,21 @@ all three fixes. 135/135 directed suite, zero-warning compile.
 
 This closes the six-phase backlog (`docs/adr/0052`-`0057`) the user
 chose to finish before Gen6's own real closure.
+
+**Generation 6 (Out-of-Order RV64 Processor v6.0) is now CLOSED**
+(`docs/adr/0058-generation-6-closure.md`). Every scope item this
+section's own listing named — register renaming, physical register
+file, reservation stations, reorder buffer, load/store queue, Tomasulo
+scheduling, speculative execution, dual-issue — is done and verified,
+plus Sv39 MMU, real interrupts, general AMO-RMW+SC, `fdiv.s`/`fsqrt.s`,
+BTB-predicted jalr, and a real heterogeneous dual-core SoC none of the
+original listing named. Real, honest remaining backlog, not silently
+dropped: the rest of the F-extension (FMADD/FLW/FSW/FCVT/FCMP), AMO
+fuzzer coverage (blocked on `sim/tools/iss.py` having zero AMO support),
+`jalr` fuzzing, real deep speculation, S-mode interrupt delegation — see
+`docs/adr/0058`'s own full list.
+
+**Release:** Out-of-Order RV64 Processor v6.0.
 
 ---
 
