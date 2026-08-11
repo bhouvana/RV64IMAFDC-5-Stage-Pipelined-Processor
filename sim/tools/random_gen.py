@@ -121,6 +121,15 @@ FLOAT_SEED_BITS = [
 R_TYPE_W = ["addw", "subw", "sllw", "srlw", "sraw", "mulw", "divw", "divuw", "remw", "remuw"]
 I_TYPE_W = ["addiw", "slliw", "srliw", "sraiw"]
 
+# B extension: Zba+Zbb+Zbs (docs/adr/0060).
+B_R_TYPE = ["andn", "orn", "xnor", "min", "minu", "max", "maxu", "rol", "ror",
+            "sh1add", "sh2add", "sh3add", "bclr", "bext", "binv", "bset"]
+B_SHAMT = ["bclri", "bexti", "binvi", "bseti", "rori"]  # shamt operand, same shape as SHIFT_I
+B_FIXED = ["clz", "ctz", "cpop", "sext.b", "sext.h", "orc.b", "rev8"]  # rd,rs1 only, no immediate
+B_R_TYPE_W = ["rolw", "rorw", "add.uw", "sh1add.uw", "sh2add.uw", "sh3add.uw"]  # RV64-only
+B_FIXED_W = ["clzw", "ctzw", "cpopw"]  # RV64-only, rd,rs1 only
+B_SHAMT_W = ["roriw", "slli.uw"]  # RV64-only, shamt operand
+
 
 def const64_to_reg_instrs(rd, rd_scratch, bits64, no_lui=False):
     """Generation 2 (Phase M15, docs/adr/0028-rv64-migration-phase-m.md).
@@ -510,19 +519,22 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
         # xlen (DIVW/REMW routing through OOOCore.v's is_div_op was never
         # confirmed).
         kind_names = ["r", "i", "shift", "load", "store", "branch", "jal", "csr",
-                      "fp_arith", "fp_sqrt", "fp_sgnj", "fp_minmax"]
+                      "fp_arith", "fp_sqrt", "fp_sgnj", "fp_minmax", "b_ext"]
         kind_weights = [24, 16, 8, 10, 10, 8, 5, csr_weight,
-                         10, 4, 4, 4]
+                         10, 4, 4, 4, 16]
+        if xlen >= 64:
+            kind_names = kind_names + ["b_ext_w"]
+            kind_weights = kind_weights + [8]
     else:
         kind_names = ["r", "i", "shift", "load", "store", "branch", "jal", "csr",
                       "fp_arith", "fp_sqrt", "fp_sgnj", "fp_minmax", "fp_cmp",
-                      "fp_cvt_to_int", "fp_cvt_from_int", "fp_madd", "fload", "fstore", "fcsr"]
+                      "fp_cvt_to_int", "fp_cvt_from_int", "fp_madd", "fload", "fstore", "fcsr", "b_ext"]
         kind_weights = [24, 16, 8, 10, 10, 8, 5, csr_weight,
                          10, 4, 4, 4, 4,
-                         4, 4, 6, 6, 6, 4]
+                         4, 4, 6, 6, 6, 4, 16]
         if xlen >= 64:
-            kind_names = kind_names + ["rw", "iw"]
-            kind_weights = kind_weights + [12, 8]
+            kind_names = kind_names + ["rw", "iw", "b_ext_w"]
+            kind_weights = kind_weights + [12, 8, 8]
     load_mnemonics = ["lb", "lh", "lw", "lbu", "lhu"] + (["ld", "lwu"] if xlen >= 64 else [])
     store_mnemonics = ["sb", "sh", "sw"] + (["sd"] if xlen >= 64 else [])
     load_widths = {"lb": 1, "lbu": 1, "lh": 2, "lhu": 2, "lw": 4, "lwu": 4, "ld": 8}
@@ -560,6 +572,34 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
             # design/ALUCtrl.v's own widened split), 5-bit at 32 (bit-exact).
             shamt = rnd.randint(0, 63) if xlen >= 64 else rnd.randint(0, 31)
             instrs.append(f"{mn} x{rd}, x{rs1}, {shamt}")
+        elif kind == "b_ext":  # B extension: Zba+Zbb+Zbs (docs/adr/0060)
+            sub = rnd.choice(["r", "shamt", "fixed"])
+            rd, rs1 = rnd.choice(GP_REGS), rnd.choice(GP_REGS)
+            if sub == "r":
+                mn = rnd.choice(B_R_TYPE)
+                rs2 = rnd.choice(GP_REGS)
+                instrs.append(f"{mn} x{rd}, x{rs1}, x{rs2}")
+            elif sub == "shamt":
+                mn = rnd.choice(B_SHAMT)
+                shamt = rnd.randint(0, 63) if xlen >= 64 else rnd.randint(0, 31)
+                instrs.append(f"{mn} x{rd}, x{rs1}, {shamt}")
+            else:
+                mn = rnd.choice(B_FIXED)
+                instrs.append(f"{mn} x{rd}, x{rs1}")
+        elif kind == "b_ext_w":  # B extension, RV64-only word variants (docs/adr/0060)
+            sub = rnd.choice(["r", "shamt", "fixed"])
+            rd, rs1 = rnd.choice(GP_REGS), rnd.choice(GP_REGS)
+            if sub == "r":
+                mn = rnd.choice(B_R_TYPE_W)
+                rs2 = rnd.choice(GP_REGS)
+                instrs.append(f"{mn} x{rd}, x{rs1}, x{rs2}")
+            elif sub == "shamt":
+                mn = rnd.choice(B_SHAMT_W)
+                shamt = rnd.randint(0, 31) if mn == "roriw" else rnd.randint(0, 63)  # roriw: 5-bit; slli.uw: 6-bit
+                instrs.append(f"{mn} x{rd}, x{rs1}, {shamt}")
+            else:
+                mn = rnd.choice(B_FIXED_W)
+                instrs.append(f"{mn} x{rd}, x{rs1}")
         elif kind == "load":
             mn = rnd.choice(load_mnemonics)
             rd = rnd.choice(GP_REGS)
