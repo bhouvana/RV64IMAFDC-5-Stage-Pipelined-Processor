@@ -515,16 +515,21 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
         # jal/csr/fp_sqrt rejoined the pool now that OOOCore.v actually
         # executes them correctly (docs/adr/0051, 0055); fp_cmp/fp_cvt*/
         # fp_madd/fload/fstore/fcsr stay excluded (still real, confirmed
-        # gaps). The "w"-suffixed family stays excluded regardless of
-        # xlen (DIVW/REMW routing through OOOCore.v's is_div_op was never
-        # confirmed).
+        # gaps). The "w"-suffixed family (rw/iw AND docs/adr/0060's own
+        # b_ext_w) stays excluded regardless of xlen: OOOCore.v's single ALU
+        # instantiation hardcodes `.wordOp(1'b0)` (design/OOOCore.v's own
+        # m_ALU instance) -- word-truncated ops were never actually wired
+        # live in the OoO core at all (DIVW/REMW routing through
+        # OOOCore.v's is_div_op was never confirmed either, same root
+        # cause). Found by this phase's own random sweep (53/60 at --ooo
+        # --xlen 64 before excluding b_ext_w) -- a real, pre-existing
+        # OOOCore.v gap this phase's B-extension work exposed but does NOT
+        # fix (out of scope; the plain, non-"w" b_ext kind below is
+        # unaffected, since wordOp=0 is exactly correct for those).
         kind_names = ["r", "i", "shift", "load", "store", "branch", "jal", "csr",
                       "fp_arith", "fp_sqrt", "fp_sgnj", "fp_minmax", "b_ext"]
         kind_weights = [24, 16, 8, 10, 10, 8, 5, csr_weight,
                          10, 4, 4, 4, 16]
-        if xlen >= 64:
-            kind_names = kind_names + ["b_ext_w"]
-            kind_weights = kind_weights + [8]
     else:
         kind_names = ["r", "i", "shift", "load", "store", "branch", "jal", "csr",
                       "fp_arith", "fp_sqrt", "fp_sgnj", "fp_minmax", "fp_cmp",
