@@ -61,6 +61,13 @@ module Control #(
     // instead of the ordinary single-phase load/store path. regWrite is
     // still asserted normally here (every lr/sc/amo* writes rd).
     output reg isAmo,
+    // Gen7 Pillar V Phase 1 (docs/adr/0061). vsetvli/vsetivli only --
+    // vsetvl (register-sourced vtype, funt7==7'b1000000) is real spec but
+    // explicitly deferred this phase (needs a second PRF register read for
+    // rs2's own vtype value, not an immediate-decode path); recognized-but-
+    // deferred, so it traps illegal rather than silently misdecoding as a
+    // vsetvli.
+    output reg isVecCfg,
     output reg illegalOpcode, // opcode itself unrecognized -- see riscvpipeline.v for the
                                // other exception source (ALUCtl==ILLEGAL, a recognized
                                // opcode with an unrecognized funct7/funct3)
@@ -95,6 +102,7 @@ always@(*)begin
     isSfenceVma = 0;
     isFence   = 0;
     isAmo     = 0;
+    isVecCfg  = 0;
     illegalOpcode = 0;
     fRegWrite = 0;
 
@@ -301,6 +309,28 @@ case(opcode)
             isFence = 1;
         else
             illegalOpcode = 1;
+    end
+
+    // Gen7 Pillar V Phase 1 (docs/adr/0061). vsetvli/vsetivli: rd = min(AVL,
+    // VLMAX), computed by OOOCore.v's own dispatch-time logic and issued
+    // through the ordinary RS_ALU path (ALUOp/ALUSrc here just route
+    // operand A from rs1's PRF read and operand B from the payload's imm
+    // slot -- the real result overrides ALU.v's own output at issue time,
+    // see OOOCore.v). funt7==7'b1000000 is the real vsetvl (register-
+    // sourced vtype) pattern -- genuinely disjoint from every legal
+    // vsetvli (inst[31]=0) or vsetivli (inst[31:30]=2'b11) encoding, so
+    // checking it alone correctly excludes only vsetvl, not any real
+    // vsetvli/vsetivli.
+    `OPCODE_V:
+    begin
+        if (funt3 == `F3_VOPCFG && funt7 != 7'b1000000) begin
+            regWrite = 1;
+            ALUOp    = `ALUOP_ITYPE;
+            ALUSrc   = 1;
+            isVecCfg = 1;
+        end
+        else
+            illegalOpcode = 1;   // vsetvl (deferred) or a reserved OP-V funct3
     end
 
     default:

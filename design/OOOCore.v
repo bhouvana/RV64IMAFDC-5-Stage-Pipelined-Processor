@@ -71,8 +71,13 @@ module OOOCore #(
 
     parameter NUM_VREGS       = 32,   // Gen7 Pillar V Phase 1 (docs/adr/0061) -- v0-v31
     parameter NUM_VPREGS      = 64,   // vector physical register count
-    parameter VLEN            = 512,  // bits per vector register (user-confirmed
-                                        // most-ambitious VLEN option via AskUserQuestion)
+    parameter VLEN            = 64'd512,  // bits per vector register (user-confirmed
+                                        // most-ambitious VLEN option via AskUserQuestion).
+                                        // Explicitly 64-bit-sized -- an unsized literal
+                                        // self-determines 32-bit width regardless of XLEN
+                                        // (the same SP_INIT-class Icarus quirk fixed above),
+                                        // which would corrupt VLEN[XLEN-1:0]'s own bit-select
+                                        // in vec_cfg_vlmax below at XLEN=64.
 
     parameter AREG_BITS  = $clog2(NUM_AREGS),
     parameter PREG_BITS  = $clog2(NUM_PREGS),
@@ -96,7 +101,12 @@ module OOOCore #(
     // captured once at DISPATCH time (when the real value -- 0, this
     // instruction's own PC, or the CSR's own current value -- is known)
     // and carried through RS_ALU exactly like ALUSrc/imm already are.
-    parameter PAYLOAD_BITS = 1 + 1 + XLEN + 1 + 6 + XLEN
+    // Gen7 Pillar V Phase 1 (docs/adr/0061): +1 leading bit for
+    // is_vsetvl, selecting a min(a,b) override of alu_out at issue time
+    // (vsetvli/vsetivli's own vl=min(AVL,VLMAX) computation) instead of
+    // ALU.v's own result -- reuses this exact escape-hatch mechanism,
+    // same reasoning as lui/auipc/jal/jalr/csrrX above.
+    parameter PAYLOAD_BITS = 1 + 1 + 1 + XLEN + 1 + 6 + XLEN
 )(
     input wire clk,
     input wire rst,   // active-low, same convention as every other
@@ -179,6 +189,7 @@ wire [1:0] ALUOp_c;
 wire [2:0] funct3_c;
 wire [6:0] funct7_c;
 wire jump_c, jalr_c, lui_c, auipc_c, isCsr_c, isEcall_c, isEbreak_c, isMret_c, isSret_c, isSfenceVma_c, isFence_c, isAmo_c, illegalOpcode_c, fRegWrite_c;
+wire isVecCfg_c;   // Gen7 Pillar V Phase 1 (docs/adr/0061)
 
 Control #(.XLEN(XLEN)) m_Control(
     .opcode(inst_word[6:0]),
@@ -191,6 +202,7 @@ Control #(.XLEN(XLEN)) m_Control(
     .jump(jump_c), .jalr(jalr_c), .lui(lui_c), .auipc(auipc_c),
     .isCsr(isCsr_c), .isEcall(isEcall_c), .isEbreak(isEbreak_c), .isMret(isMret_c),
     .isSret(isSret_c), .isSfenceVma(isSfenceVma_c), .isFence(isFence_c), .isAmo(isAmo_c),
+    .isVecCfg(isVecCfg_c),
     .illegalOpcode(illegalOpcode_c), .fRegWrite(fRegWrite_c)
 );
 
@@ -321,6 +333,36 @@ wire is_csr   = isCsr_c;
 // class of instructions real code uses far less densely than plain ALU
 // ops, for no proven benefit yet.
 wire is_lui_auipc_jal_jalr_csr = is_lui || is_auipc || is_jal || is_jalr || is_csr;
+
+// ==========================================================================
+// Gen7 Pillar V Phase 1 (docs/adr/0061). vsetvli/vsetivli decode --
+// isVecCfg_c is Control.v's own new output. vtype fields are re-extracted
+// directly from inst_word (same "cheap, direct field extraction, don't
+// route everything through Control.v" idiom rs1_areg/rs2_areg/rd_areg
+// already use) rather than adding an ImmGen.v output -- both vsetvli and
+// vsetivli place {vma,vta,vsew,vlmul} at the identical bit positions
+// (riscv_defs.vh's own VTYPE_* constants, hand-derived and documented
+// there).
+// ==========================================================================
+wire is_vec_cfg = isVecCfg_c;
+wire [2:0] vec_cfg_vsew_dec  = inst_word[`VTYPE_VSEW_HI:`VTYPE_VSEW_LO];
+wire [2:0] vec_cfg_vlmul_dec = inst_word[`VTYPE_VLMUL_HI:`VTYPE_VLMUL_LO];
+wire       vec_cfg_vma_dec   = inst_word[`VTYPE_VMA_BIT];
+wire       vec_cfg_vta_dec   = inst_word[`VTYPE_VTA_BIT];
+
+// Reserved-vtype check (real spec: an out-of-range SEW or LMUL sets
+// vill=1, vl=0, vtype=all-1s-with-vill-set, discarding the rest of the
+// requested fields entirely -- not a trap, a defined "illegal vtype"
+// state).
+wire vec_cfg_reserved = (vec_cfg_vsew_dec > `VSEW_64) || (vec_cfg_vlmul_dec == 3'b100);
+
+// VLMAX = VLEN >> ((3+vsew) - $signed(vlmul)) -- hand-derived and
+// verified against 5 worked examples in the plan
+// (C:\Users\poorn\.claude\plans\gen7-v-vector-phase1.md) before trusting
+// it here; shift is always 0..9 at VLEN=512 for every legal (non-
+// reserved) input, confirmed by checking both extremes there.
+wire signed [4:0] vec_cfg_shift = ($signed({2'b00, vec_cfg_vsew_dec}) + 4'sd3) - $signed(vec_cfg_vlmul_dec);
+wire [XLEN-1:0] vec_cfg_vlmax = vec_cfg_reserved ? {XLEN{1'b0}} : (VLEN[XLEN-1:0] >> vec_cfg_shift);
 
 // ==========================================================================
 // Gen6-H: F-extension, scoped to a real, tested, but deliberately narrow
@@ -570,6 +612,7 @@ wire [1:0] ALUOp_c_1;
 wire [2:0] funct3_c_1;
 wire [6:0] funct7_c_1;
 wire jump_c_1, jalr_c_1, lui_c_1, auipc_c_1, isCsr_c_1, isEcall_c_1, isEbreak_c_1, isMret_c_1, isSret_c_1, isSfenceVma_c_1, isFence_c_1, isAmo_c_1, illegalOpcode_c_1, fRegWrite_c_1;
+wire isVecCfg_c_1;   // Gen7 Pillar V Phase 1 (docs/adr/0061)
 
 Control #(.XLEN(XLEN)) m_Control_1(
     .opcode(inst_word1[6:0]),
@@ -582,6 +625,7 @@ Control #(.XLEN(XLEN)) m_Control_1(
     .jump(jump_c_1), .jalr(jalr_c_1), .lui(lui_c_1), .auipc(auipc_c_1),
     .isCsr(isCsr_c_1), .isEcall(isEcall_c_1), .isEbreak(isEbreak_c_1), .isMret(isMret_c_1),
     .isSret(isSret_c_1), .isSfenceVma(isSfenceVma_c_1), .isFence(isFence_c_1), .isAmo(isAmo_c_1),
+    .isVecCfg(isVecCfg_c_1),
     .illegalOpcode(illegalOpcode_c_1), .fRegWrite(fRegWrite_c_1)
 );
 
@@ -628,13 +672,13 @@ wire is_fp_op_1 = fRegWrite_c_1 && (
 
 // Both slots must be plain ALU (regWrite integer OP/OP-IMM, no other
 // side effects) for dual-issue to even be considered this cycle.
-wire slot0_is_plain_alu = !is_mem_op && !is_div_op && !is_fp_op && !is_branch && !is_trap_related && !is_lui_auipc_jal_jalr_csr;
+wire slot0_is_plain_alu = !is_mem_op && !is_div_op && !is_fp_op && !is_branch && !is_trap_related && !is_lui_auipc_jal_jalr_csr && !is_vec_cfg;   // Gen7-V: vsetvli/vsetivli use the same forced-a-value machinery as lui/auipc/jal/jalr/csrrX, same single-issue-only exclusion
 // Gen6-O: slot1's own equivalent exclusion -- lui_c_1/auipc_c_1/jump_c_1/
 // jalr_c_1/isCsr_c_1 are slot1's own decode outputs (Gen6-K's own second
 // Control.v instance), already computed, never consumed until now for
 // the identical reason slot0's own versions weren't before this phase.
 wire is_lui_auipc_jal_jalr_csr_1 = lui_c_1 || auipc_c_1 || jump_c_1 || jalr_c_1 || isCsr_c_1;
-wire slot1_is_plain_alu = !is_mem_op_1 && !is_div_op_1 && !is_fp_op_1 && !is_branch_1 && !is_trap_related_1 && !is_lui_auipc_jal_jalr_csr_1;
+wire slot1_is_plain_alu = !is_mem_op_1 && !is_div_op_1 && !is_fp_op_1 && !is_branch_1 && !is_trap_related_1 && !is_lui_auipc_jal_jalr_csr_1 && !isVecCfg_c_1;   // Gen7-V: a vsetvli/vsetivli in the pc+4 slot must never be silently swept into slot1's own vsetvli-unaware payload pack (rs_disp_payload1 has no is_vec_cfg override at all) -- same exclusion reasoning as is_lui_auipc_jal_jalr_csr_1
 // Gen6-P2 (docs/adr/0053): real, deliberate scope cut, same category as
 // every other Gen6-K exclusion above -- dual-issue and live Sv39
 // translation don't coexist this phase. m_IMem1's own speculative fetch
@@ -834,7 +878,7 @@ wire dispatch_stall = rob_full
                                                   // resume prematurely,
                                                   // BEFORE the trap has
                                                   // actually redirected.
-                      || interrupt_pending;      // Gen6-P3 (docs/adr/0054):
+                      || interrupt_pending       // Gen6-P3 (docs/adr/0054):
                                                   // stop admitting anything
                                                   // NEW the moment an
                                                   // enabled interrupt is
@@ -846,6 +890,15 @@ wire dispatch_stall = rob_full
                                                   // waits for, is what
                                                   // actually fires the
                                                   // redirect).
+                      || vec_cfg_inflight_valid_r;   // Gen7-V Phase 1
+                                                  // (docs/adr/0061): same
+                                                  // single-outstanding
+                                                  // shape as every source
+                                                  // above -- vtype/vl can
+                                                  // never change mid-flight
+                                                  // under a future vector
+                                                  // instruction's own
+                                                  // dispatch-time decode.
 wire do_dispatch     = !dispatch_stall;
 
 // Gen6-K: room for a SECOND dispatch this cycle, checked independently
@@ -1303,7 +1356,11 @@ CSR #(.XLEN(XLEN)) m_CSR(
     .stall_cycle_pulse(1'b0), .interrupt_pulse(1'b0), .exception_pulse(1'b0),
     .stall_hazard_pulse(1'b0), .stall_div_pulse(1'b0), .stall_mem_pulse(1'b0), .stall_fp_pulse(1'b0),
     .stall_float_lu_pulse(1'b0), .stall_itlb_pulse(1'b0), .stall_dtlb_pulse(1'b0),
-    .stall_icache_pulse(1'b0), .stall_imem_wait_pulse(1'b0)
+    .stall_icache_pulse(1'b0), .stall_imem_wait_pulse(1'b0),
+    // Gen7 Pillar V Phase 1 (docs/adr/0061).
+    .vl_o(vl_o), .vsew_o(), .vlmul_o(), .vill_o(),
+    .vec_cfg_write_en(vec_cfg_write_en_w), .vec_cfg_new_vtype(vec_cfg_new_vtype_w),
+    .vec_cfg_new_vill(vec_cfg_new_vill_w), .vec_cfg_new_vl(vec_cfg_new_vl_w)
 );
 
 // ==========================================================================
@@ -1558,17 +1615,39 @@ assign ptw_m_ack = ptw_m_ack_r;
 // prf_rdata2 (rs1's raw, untouched-by-this-override PRF read) further
 // down (see jr_inflight_* below).
 wire [XLEN-1:0] csr_old_value_captured;   // wired in the CSR section below (Gen6-O5)
-wire use_forced_a0 = is_lui || is_auipc || is_jal || is_jalr || is_csr;
+wire [XLEN-1:0] vl_o;   // Gen7-V: wired in the CSR section below -- forward-declared
+                          // here the same way csr_old_value_captured is.
+// Gen7-V: fed to m_CSR's own new Task-2 side-channel input ports below --
+// forward-declared here (same "declare early, drive later once its own
+// dependencies are naturally available" pattern lsq_complete_valid etc.
+// already established throughout this file), driven by real assigns in
+// the vec_cfg_inflight tracker block near the execute section further
+// down.
+wire                 vec_cfg_write_en_w;
+wire [7:0]           vec_cfg_new_vtype_w;
+wire                 vec_cfg_new_vill_w;
+wire [XLEN-1:0]      vec_cfg_new_vl_w;
+// Gen7 Pillar V Phase 1 (docs/adr/0061): vsetvli's rs1==x0 special cases
+// (real spec: rs1==x0,rd!=x0 -> AVL=VLMAX; rs1==x0,rd==x0 -> AVL=current
+// vl) reuse this SAME forced-a-value mechanism -- rs1's PRF read is
+// skipped entirely and operand A is forced directly, exactly like lui's
+// own "0" or auipc/jal/jalr-link's own "pc_r".
+wire use_forced_a0 = is_lui || is_auipc || is_jal || is_jalr || is_csr || (is_vec_cfg && rs1_areg == 5'd0);
 wire use_link_b0   = is_jal || is_jalr;
 wire [XLEN-1:0] forced_a_value0 =
     is_lui   ? {XLEN{1'b0}} :
     is_csr   ? csr_old_value_captured :
+    (is_vec_cfg && rs1_areg == 5'd0) ? (rd_areg == 5'd0 ? vl_o : vec_cfg_vlmax) :
                pc_r;   // auipc/jal/jalr-link all want THIS instruction's own PC
 
 // Dispatch-time readiness query -- rs1/rs2's CURRENT physical tags
 // (rat_rpreg0/1, from the SAME-cycle RAT read above, still the
 // pre-rename mapping) queried against PRF's own rvalid.
-wire [PAYLOAD_BITS-1:0] rs_disp_payload0 = {use_forced_a0, use_link_b0, forced_a_value0, ALUSrc_c, ALUCtl_d, imm_d};
+// Gen7-V: is_vec_cfg is the new leading payload bit; the imm slot is
+// overridden with VLMAX (computed combinationally from this
+// instruction's own bits, see vec_cfg_vlmax above) instead of ImmGen.v's
+// own imm_d -- vsetvli/vsetivli need no ImmGen.v change at all.
+wire [PAYLOAD_BITS-1:0] rs_disp_payload0 = {is_vec_cfg, use_forced_a0, use_link_b0, forced_a_value0, ALUSrc_c, ALUCtl_d, is_vec_cfg ? vec_cfg_vlmax : imm_d};
 
 wire [PREG_BITS-1:0] issue_src1_preg, issue_src2_preg;
 wire [PAYLOAD_BITS-1:0] issue_payload;
@@ -1590,7 +1669,7 @@ wire                 rs_alu_disp1_src2_ready = slot1_src2_from_slot0 ? 1'b0 : pr
 // Gen6-O: slot1 is never lui/auipc/jal/jalr/csrrX (slot1_is_plain_alu's
 // own exclusion, see is_lui_auipc_jal_jalr_csr_1 above) -- these three
 // fields are always irrelevant for slot1's own payload, tied off.
-wire [PAYLOAD_BITS-1:0] rs_disp_payload1 = {1'b0, 1'b0, {XLEN{1'b0}}, ALUSrc_c_1, ALUCtl_d_1, imm_d_1};
+wire [PAYLOAD_BITS-1:0] rs_disp_payload1 = {1'b0, 1'b0, 1'b0, {XLEN{1'b0}}, ALUSrc_c_1, ALUCtl_d_1, imm_d_1};   // Gen7-V: slot1 is never vsetvli (slot0_is_plain_alu's own exclusion), leading bit tied 0
 
 ReservationStation #(.RS_ENTRIES(RS_ALU_ENTRIES), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(PAYLOAD_BITS)) m_RS_ALU(
     .clk(clk), .rst(rst),
@@ -1773,22 +1852,83 @@ DataMemoryBRAM #(.SIZE_BYTES(DMEM_SIZE_BYTES), .XLEN(XLEN)) m_DMem(
 // positions unchanged, [XLEN+6:0] -- widened from [XLEN+5:0] when ALUCtl
 // grew 5->6 bits, docs/adr/0060) -- see this module's own
 // PAYLOAD_BITS comment for the exact layout.
-wire issue_use_forced_a    = issue_payload[PAYLOAD_BITS-1];
-wire issue_use_link_b      = issue_payload[PAYLOAD_BITS-2];
-wire [XLEN-1:0] issue_forced_a_value = issue_payload[PAYLOAD_BITS-3 -: XLEN];
-wire issue_alusrc         = issue_payload[XLEN+6];  // shifted up by 1 vs. before -- ALUCtl widened 5->6 bits (docs/adr/0060)
+// Gen7-V Phase 1: is_vsetvl sits ABOVE use_forced_a/use_link_b/
+// forced_a_value (a new top bit -- every extraction below shifted down
+// by 1 vs. before this phase); the {ALUSrc,ALUCtl,imm} sub-layout keeps
+// its own fixed low bit positions, untouched.
+wire issue_is_vsetvl       = issue_payload[PAYLOAD_BITS-1];
+wire issue_use_forced_a    = issue_payload[PAYLOAD_BITS-2];
+wire issue_use_link_b      = issue_payload[PAYLOAD_BITS-3];
+wire [XLEN-1:0] issue_forced_a_value = issue_payload[PAYLOAD_BITS-4 -: XLEN];
+wire issue_alusrc         = issue_payload[XLEN+6];  // unchanged -- fixed low-position sub-layout
 wire [5:0] issue_aluctl    = issue_payload[XLEN+5 -: 6];
 wire [XLEN-1:0] issue_imm  = issue_payload[XLEN-1:0];
 
 wire [XLEN-1:0] alu_a = issue_use_forced_a ? issue_forced_a_value : prf_rdata2;
 wire [XLEN-1:0] alu_b = issue_use_link_b ? {{(XLEN-3){1'b0}}, 3'd4} : (issue_alusrc ? issue_imm : prf_rdata3);
-wire [XLEN-1:0] alu_out;
+wire [XLEN-1:0] alu_out_raw;
 wire alu_zero, alu_branch_zero;
 
 ALU #(.XLEN(XLEN)) m_ALU(
     .ALUCtl(issue_aluctl), .A(alu_a), .B(alu_b), .wordOp(1'b0),
-    .ALUOut(alu_out), .zero(alu_zero), .branch_zero(alu_branch_zero)
+    .ALUOut(alu_out_raw), .zero(alu_zero), .branch_zero(alu_branch_zero)
 );
+
+// Gen7 Pillar V Phase 1 (docs/adr/0061): vsetvli/vsetivli's real result
+// (vl = min(AVL, VLMAX), unsigned -- both alu_a/alu_b are plain unsigned
+// wires here regardless of which override produced them) overrides
+// ALU.v's own (harmless, discarded) computation -- ALUCtl for this op is
+// whatever ALUCtrl.v happens to resolve funct3=F3_VOPCFG/ALUOp=ITYPE to
+// (real encoding collision with andi's own ITYPE funct3=111, intentional
+// and harmless per docs/adr/0061's own Task 4 design note -- the real
+// ALU result is never used for this op).
+wire [XLEN-1:0] vsetvl_min_result = (alu_a < alu_b) ? alu_a : alu_b;
+wire [XLEN-1:0] alu_out = issue_is_vsetvl ? vsetvl_min_result : alu_out_raw;
+
+// ==========================================================================
+// Gen7 Pillar V Phase 1 (docs/adr/0061). Single-outstanding, same shape
+// as csr_inflight_valid_r above -- dispatch of EVERYTHING stalls once a
+// vsetvli/vsetivli is in flight, until it resolves, so vtype/vl can never
+// change mid-flight under any other vector instruction's own decode (a
+// real correctness requirement once a future phase adds vector arithmetic
+// ops that read vtype/vl at dispatch time). The CSR write fires at ISSUE
+// (not retire) -- mirrors csr_write_fire's own exact timing: nothing else
+// can dispatch until this entry retires regardless (dispatch_stall's own
+// new vec_cfg_inflight_valid_r term below), so firing the moment the real
+// result (vsetvl_min_result) is known, rather than waiting an extra
+// retire-latency, changes nothing observable and needs no extra latch for
+// the vl VALUE itself (only the vtype-field bits, known at dispatch, need
+// their own small capture below).
+// ==========================================================================
+reg                  vec_cfg_inflight_valid_r;
+reg [ROB_IDX_BITS-1:0] vec_cfg_inflight_rob_tag_r;
+reg [7:0]            vec_cfg_inflight_vtype_r;
+reg                  vec_cfg_inflight_vill_r;
+
+wire vec_cfg_write_fire = issue_valid && issue_is_vsetvl && vec_cfg_inflight_valid_r
+                           && (issue_rob_tag == vec_cfg_inflight_rob_tag_r);
+
+always @(posedge clk) begin
+    if (~rst) begin
+        vec_cfg_inflight_valid_r <= 1'b0;
+    end
+    else begin
+        if (do_dispatch && is_vec_cfg) begin
+            vec_cfg_inflight_valid_r   <= 1'b1;
+            vec_cfg_inflight_rob_tag_r <= rob_alloc_tag0;
+            vec_cfg_inflight_vtype_r   <= {vec_cfg_vma_dec, vec_cfg_vta_dec, vec_cfg_vsew_dec, vec_cfg_vlmul_dec};
+            vec_cfg_inflight_vill_r    <= vec_cfg_reserved;
+        end
+        else if (vec_cfg_write_fire) begin
+            vec_cfg_inflight_valid_r <= 1'b0;
+        end
+    end
+end
+
+assign vec_cfg_write_en_w  = vec_cfg_write_fire;
+assign vec_cfg_new_vtype_w = vec_cfg_inflight_vill_r ? 8'd0 : vec_cfg_inflight_vtype_r;
+assign vec_cfg_new_vill_w  = vec_cfg_inflight_vill_r;
+assign vec_cfg_new_vl_w    = vec_cfg_inflight_vill_r ? {XLEN{1'b0}} : vsetvl_min_result;
 
 // ==========================================================================
 // Gen6-F: MUL/DIV. MUL/MULH/MULHSU/MULHU need nothing new -- ALU.v (above)
