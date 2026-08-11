@@ -606,6 +606,14 @@ def assemble(lines, xlen=32):
             rd, rs1, rs2, rs3 = freg(args[0]), freg(args[1]), freg(args[2]), freg(args[3])
             rm = parse_rm(args, 4)
             words.append(fp_r4_type(MADD_OPCODES[mn], rd, rs1, rs2, rs3, rm))
+        elif mn == ".word":
+            # Raw 32-bit instruction word, bypassing mnemonic parsing entirely --
+            # Pillar K's own OoO integration test (Gen7-K7) uses this for K-extension
+            # mnemonics asm.py doesn't parse yet, same "encode by hand, verified
+            # against riscv-opcodes" discipline this project already applies before
+            # writing RTL decode logic. Generic, reusable for any future raw-encoding
+            # need (ponytail: one small directive beats a duplicated mnemonic table).
+            words.append(int(args[0], 0) & 0xFFFFFFFF)
 
         else:
             raise ValueError(f"unknown mnemonic {mn!r} in line: {line!r}")

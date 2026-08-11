@@ -741,6 +741,14 @@
 `define FUNCT6_ZKNE_AES64 6'b001100  // aes64ks1i (rs2_c[4]=1, rs2_c[3:0]=rnum) /
                                        // aes64im (rs2_c==0), funct3=001 both.
 
+// funct7 groups for the R-type AES ops (OP opcode, funct3=000 all -- distinguished
+// purely by funct7). Verified against rv64_zkne/rv64_zknd.
+`define FUNCT7_ZKNE_AES64ESM 7'b0011011
+`define FUNCT7_ZKNE_AES64ES  7'b0011001
+`define FUNCT7_ZKND_AES64DSM 7'b0011111
+`define FUNCT7_ZKND_AES64DS  7'b0011101
+`define FUNCT7_ZKN_AES64KS2  7'b0111111
+
 // rs2-field (inst[24:20]) sub-selectors within FUNCT6_ZKNH_SHA/f3=001
 `define RS2_SHA256SUM0 5'b00000
 `define RS2_SHA256SUM1 5'b00001

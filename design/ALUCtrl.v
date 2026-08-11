@@ -104,6 +104,13 @@ else if(ALUOp == `ALUOP_RTYPE)
         // a different, currently-unused funct3 (BSET itself is funct3=001).
         {`FUNCT7_ZBKX_XPERM, 3'b010}: ALUCtl = `ALUCTL_XPERM4;
         {`FUNCT7_ZBKX_XPERM, 3'b100}: ALUCtl = `ALUCTL_XPERM8;
+        // Zkne+Zknd AES round/key-schedule ops (docs/adr/0059 Gen7-K6) -- all
+        // funct3=000, distinguished purely by funct7.
+        {`FUNCT7_ZKNE_AES64ESM, 3'b000}: ALUCtl = `ALUCTL_AES64ESM;
+        {`FUNCT7_ZKNE_AES64ES,  3'b000}: ALUCtl = `ALUCTL_AES64ES;
+        {`FUNCT7_ZKND_AES64DSM, 3'b000}: ALUCtl = `ALUCTL_AES64DSM;
+        {`FUNCT7_ZKND_AES64DS,  3'b000}: ALUCtl = `ALUCTL_AES64DS;
+        {`FUNCT7_ZKN_AES64KS2,  3'b000}: ALUCtl = `ALUCTL_AES64KS2;
 
         default:
         ALUCtl = `ALUCTL_ILLEGAL;  // unrecognized funct7/funct3 combination for this ALUOp
