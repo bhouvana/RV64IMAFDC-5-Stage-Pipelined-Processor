@@ -31,7 +31,6 @@ generations of work.
 ## Contents
 
 - [What this is](#what-this-is)
-- [Generations](#generations)
 - [The Linux boot attempt](#the-linux-boot-attempt)
 - [Architecture — the in-order pipeline](#architecture--the-in-order-pipeline)
 - [The out-of-order core (Generation 6)](#the-out-of-order-core-generation-6)
