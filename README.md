@@ -73,21 +73,6 @@ Shared foundations across both cores:
 - **FPGA-ready scaffolding**: parameterized memory sizes, a vendor-neutral top level, a debug
   observability port. Not yet validated on real hardware.
 
-## Generations
-
-This project tracks its own long-term roadmap as a sequence of "generations" (`docs/ROADMAP_VISION.md`):
-
-| Generation | Scope | Status |
-|---|---|---|
-| **Gen 1** — RV32IMAF Research Processor | Base pipeline, M-extension, F-extension, Sv32 MMU, caches, branch prediction, formal verification | ✅ **CLOSED** |
-| **Gen 2** — RV64 Processor | Full XLEN=64 migration, RV64-only instruction family | ✅ **CLOSED** |
-| **Gen 3** — Linux-capable RV64 Processor | Privilege/MMU (Sv39), UART/CLINT Linux-compat, SBI firmware, RVC, A-extension, real Linux boot attempt | ✅ **CLOSED**, boot progress ongoing — see below |
-| Gen 4 — Advanced Memory System | Multi-level cache hierarchy, prefetching, coherence | Not started |
-| Gen 5 — Multicore SoC | Explicitly skipped, straight to Gen 6 per project decision (`docs/adr/0050` revives it asymmetrically as `HeteroSoC.v`) | Skipped |
-| **Gen 6** — Out-of-Order Core | Register renaming, PRF, reservation stations, ROB, LSQ, Tomasulo scheduling, speculative execution, dual-issue | ✅ **CLOSED** (`docs/adr/0058`) |
-| **Gen 7** — Advanced ISA Extensions | Five pillars on top of the Gen 6 OoO core: Bit-Manipulation, Vector, Cryptography, Hypervisor, Packed-SIMD | 🚧 **In progress** — B/V/K **CLOSED**, H/P not started — see below |
-| Gen 8-10 | Security/reliability, FPGA SoC, configurable research platform | Not started — full plan in `docs/ROADMAP_VISION.md` |
-
 ## The Linux boot attempt
 
 Generation 3 (`docs/adr/0036`-`0039`) took a real, unmodified riscv64 Linux kernel `Image` (v5.5.0-rc7)
