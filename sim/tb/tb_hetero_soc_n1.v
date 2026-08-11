@@ -52,6 +52,7 @@
 `include "VictimCache.v"
 `include "MemoryLatencyModel.v"
 `include "OOOCore.v"
+`include "VALU.v"
 `include "RegisterAliasTable.v"
 `include "FreeList.v"
 `include "PhysicalRegisterFile.v"

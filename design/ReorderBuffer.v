@@ -46,6 +46,14 @@ module ReorderBuffer #(
     input  wire                  alloc_en0,
     input  wire                  alloc_has_dest0,
     input  wire                  alloc_is_fp_dest0,   // Gen6-H -- see below
+    // Gen7 Pillar V Phase 2a (docs/adr/0062): ADDITIVE, not a rename of
+    // alloc_is_fp_dest0 -- a vector-destination entry is never ALSO an
+    // fp-dest entry (enforced by the caller's own decode, not here), so
+    // a second independent bit is exactly as safe as a combined wider
+    // field while leaving every existing is_fp_dest-keyed retire wire
+    // untouched -- minimizes this phase's own regression surface to the
+    // already-shipped int/float retire paths.
+    input  wire                  alloc_is_vec_dest0,
     input  wire [AREG_BITS-1:0]  alloc_areg0,
     input  wire [PREG_BITS-1:0]  alloc_preg0,
     input  wire [PREG_BITS-1:0]  alloc_old_preg0,
@@ -54,6 +62,7 @@ module ReorderBuffer #(
     input  wire                  alloc_en1,
     input  wire                  alloc_has_dest1,
     input  wire                  alloc_is_fp_dest1,
+    input  wire                  alloc_is_vec_dest1,   // Gen7-V Phase 2a
     input  wire [AREG_BITS-1:0]  alloc_areg1,
     input  wire [PREG_BITS-1:0]  alloc_preg1,
     input  wire [PREG_BITS-1:0]  alloc_old_preg1,
@@ -96,6 +105,20 @@ module ReorderBuffer #(
                                                    // provably mutually
                                                    // exclusive)
     input  wire [IDX_BITS-1:0]   complete_tag4,
+    input  wire                  complete_en5,   // Gen7 Pillar V Phase 2a
+                                                   // (docs/adr/0062):
+                                                   // VALU.v's own multi-
+                                                   // cycle completion --
+                                                   // a genuinely
+                                                   // independent source,
+                                                   // same "own port, no
+                                                   // sharing" rule every
+                                                   // prior completion-
+                                                   // port addition here
+                                                   // already followed
+                                                   // (docs/adr/0055,
+                                                   // 0057).
+    input  wire [IDX_BITS-1:0]   complete_tag5,
 
     // Retire, up to 2/cycle, STRICTLY in program order from the head.
     // slot1 can only ALSO retire the same cycle slot0 does -- a
@@ -104,6 +127,7 @@ module ReorderBuffer #(
     output wire                  retire_valid0,
     output wire                  retire_has_dest0,
     output wire                  retire_is_fp_dest0,
+    output wire                  retire_is_vec_dest0,   // Gen7-V Phase 2a
     output wire [AREG_BITS-1:0]  retire_areg0,
     output wire [PREG_BITS-1:0]  retire_preg0,
     output wire [PREG_BITS-1:0]  retire_old_preg0,
@@ -121,6 +145,7 @@ module ReorderBuffer #(
     output wire                  retire_valid1,
     output wire                  retire_has_dest1,
     output wire                  retire_is_fp_dest1,
+    output wire                  retire_is_vec_dest1,   // Gen7-V Phase 2a
     output wire [AREG_BITS-1:0]  retire_areg1,
     output wire [PREG_BITS-1:0]  retire_preg1,
     output wire [PREG_BITS-1:0]  retire_old_preg1,
@@ -151,6 +176,7 @@ reg                 e_has_dest   [0:ROB_ENTRIES-1];
 // caller routes e_areg/e_preg/e_old_preg to at retire, reusing those
 // same fields rather than adding a second, mostly-redundant set.
 reg                 e_is_fp_dest [0:ROB_ENTRIES-1];
+reg                 e_is_vec_dest [0:ROB_ENTRIES-1];   // Gen7-V Phase 2a (docs/adr/0062) -- additive, see the alloc_is_vec_dest0 port comment above
 reg [AREG_BITS-1:0] e_areg       [0:ROB_ENTRIES-1];
 reg [PREG_BITS-1:0] e_preg       [0:ROB_ENTRIES-1];
 reg [PREG_BITS-1:0] e_old_preg   [0:ROB_ENTRIES-1];
@@ -191,6 +217,7 @@ wire slot1_can_retire = slot0_can_retire && (count_r >= 2'd2)
 assign retire_valid0      = slot0_can_retire;
 assign retire_has_dest0   = e_has_dest[head_r];
 assign retire_is_fp_dest0 = e_is_fp_dest[head_r];
+assign retire_is_vec_dest0 = e_is_vec_dest[head_r];   // Gen7-V Phase 2a
 assign retire_areg0       = e_areg[head_r];
 assign retire_preg0       = e_preg[head_r];
 assign retire_old_preg0   = e_old_preg[head_r];
@@ -199,6 +226,7 @@ assign retire_tag0        = head_r;
 assign retire_valid1      = slot1_can_retire;
 assign retire_has_dest1   = e_has_dest[head1_idx];
 assign retire_is_fp_dest1 = e_is_fp_dest[head1_idx];
+assign retire_is_vec_dest1 = e_is_vec_dest[head1_idx];   // Gen7-V Phase 2a
 assign retire_areg1       = e_areg[head1_idx];
 assign retire_preg1       = e_preg[head1_idx];
 assign retire_old_preg1   = e_old_preg[head1_idx];
@@ -228,6 +256,7 @@ always @(posedge clk) begin
             e_done[tail_r]       <= 1'b0;
             e_has_dest[tail_r]   <= alloc_has_dest0;
             e_is_fp_dest[tail_r] <= alloc_is_fp_dest0;
+            e_is_vec_dest[tail_r] <= alloc_is_vec_dest0;   // Gen7-V Phase 2a
             e_areg[tail_r]       <= alloc_areg0;
             e_preg[tail_r]       <= alloc_preg0;
             e_old_preg[tail_r]   <= alloc_old_preg0;
@@ -237,6 +266,7 @@ always @(posedge clk) begin
             e_done[alloc_tag1]       <= 1'b0;
             e_has_dest[alloc_tag1]   <= alloc_has_dest1;
             e_is_fp_dest[alloc_tag1] <= alloc_is_fp_dest1;
+            e_is_vec_dest[alloc_tag1] <= alloc_is_vec_dest1;   // Gen7-V Phase 2a
             e_areg[alloc_tag1]       <= alloc_areg1;
             e_preg[alloc_tag1]       <= alloc_preg1;
             e_old_preg[alloc_tag1]   <= alloc_old_preg1;
@@ -261,6 +291,8 @@ always @(posedge clk) begin
             e_done[complete_tag3] <= 1'b1;
         if (complete_en4)
             e_done[complete_tag4] <= 1'b1;
+        if (complete_en5)
+            e_done[complete_tag5] <= 1'b1;
 
         // Retire: free the entries just vacated. A retiring entry's own
         // e_valid clear isn't strictly needed for correctness (head_r

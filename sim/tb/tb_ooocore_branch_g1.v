@@ -1,4 +1,5 @@
 `include "OOOCore.v"
+`include "VALU.v"
 `include "InstructionMemory.v"
 `include "Control.v"
 `include "ALUCtrl.v"

@@ -68,6 +68,14 @@ module Control #(
     // deferred, so it traps illegal rather than silently misdecoding as a
     // vsetvli.
     output reg isVecCfg,
+    // Gen7 Pillar V Phase 2a (docs/adr/0062). Real vector arithmetic
+    // (OPIVV/OPIVX/OPIVI) -- writes a VECTOR destination, not an integer
+    // one (regWrite/fRegWrite both stay 0, same "own dedicated dest-file
+    // flag" pattern fRegWrite already established for float). OOOCore.v
+    // does the real operand/dest-register routing directly off inst_word
+    // (mirrors is_vec_cfg's own precedent) -- this module only flags
+    // "this is a real, recognized vector arithmetic op."
+    output reg isVecArith,
     output reg illegalOpcode, // opcode itself unrecognized -- see riscvpipeline.v for the
                                // other exception source (ALUCtl==ILLEGAL, a recognized
                                // opcode with an unrecognized funct7/funct3)
@@ -103,6 +111,7 @@ always@(*)begin
     isFence   = 0;
     isAmo     = 0;
     isVecCfg  = 0;
+    isVecArith = 0;
     illegalOpcode = 0;
     fRegWrite = 0;
 
@@ -329,8 +338,15 @@ case(opcode)
             ALUSrc   = 1;
             isVecCfg = 1;
         end
+        // Gen7 Pillar V Phase 2a (docs/adr/0062). Real vector arithmetic --
+        // funct6 legality (is this a real, non-reserved op) is checked in
+        // OOOCore.v (this module has no funct6 input port at all; funt7[6:1]
+        // IS funct6, already directly readable off inst_word the same way
+        // rs2_areg/rd_areg already are there).
+        else if (funt3 == `F3_OPIVV || funt3 == `F3_OPIVX || funt3 == `F3_OPIVI)
+            isVecArith = 1;
         else
-            illegalOpcode = 1;   // vsetvl (deferred) or a reserved OP-V funct3
+            illegalOpcode = 1;   // vsetvl (deferred), a reserved OP-V funct3, or a reserved funct6 (OOOCore.v's own dynamic check)
     end
 
     default:
