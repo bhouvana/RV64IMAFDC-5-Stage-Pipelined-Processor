@@ -668,4 +668,17 @@
 `define VFUNCT6_OR   6'h0a
 `define VFUNCT6_XOR  6'h0b
 
+// Generation 7, Pillar V backlog closure (docs/adr/0066). Mask-writing
+// compares -- verified against riscv/riscv-opcodes extensions/rv_v.
+// vmsltu/vmslt have NO .vi form (real spec); vmsgtu/vmsgt have NO .vv
+// form (real spec, covered by vmslt(u) with swapped operands instead).
+`define VFUNCT6_MSEQ  6'h18   // .vv/.vx/.vi
+`define VFUNCT6_MSNE  6'h19   // .vv/.vx/.vi
+`define VFUNCT6_MSLTU 6'h1a   // .vv/.vx only
+`define VFUNCT6_MSLT  6'h1b   // .vv/.vx only
+`define VFUNCT6_MSLEU 6'h1c   // .vv/.vx/.vi
+`define VFUNCT6_MSLE  6'h1d   // .vv/.vx/.vi
+`define VFUNCT6_MSGTU 6'h1e   // .vx/.vi only
+`define VFUNCT6_MSGT  6'h1f   // .vx/.vi only
+
 `endif

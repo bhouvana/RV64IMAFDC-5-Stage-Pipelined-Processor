@@ -116,8 +116,35 @@ always @(*) begin
     endcase
 end
 
-wire [VLEN-1:0] write_mask = ({{(VLEN-64){1'b0}}, elem_mask64} << shift_r);
-wire [VLEN-1:0] write_data = (elem_active ? ({{(VLEN-64){1'b0}}, alu_r} << shift_r) : {VLEN{1'b0}});
+// Generation 7, Pillar V backlog closure (docs/adr/0066). Mask-writing
+// compares -- a genuinely different completion shape from every op
+// above: the result is ONE BIT per element (not a SEW-wide value), and
+// that bit lands at bit position elem_r of the destination (a raw
+// bit-indexed mask, same v0-read convention already used above), not at
+// shift_r (which tracks SEW-wide byte offsets). funct6 0x18-0x1f (top 3
+// bits 011) are exactly the compare family -- verified against
+// riscv/riscv-opcodes.
+wire is_cmp_r = (funct6_r[5:3] == 3'b011);
+reg  cmp_bit;
+always @(*) begin
+    case (funct6_r)
+        `VFUNCT6_MSEQ:  cmp_bit = (a_slice == b_slice);
+        `VFUNCT6_MSNE:  cmp_bit = (a_slice != b_slice);
+        `VFUNCT6_MSLTU: cmp_bit = (a_slice < b_slice);
+        `VFUNCT6_MSLT:  cmp_bit = ($signed(sext_elem(a_slice, elem_width)) < $signed(sext_elem(b_slice, elem_width)));
+        `VFUNCT6_MSLEU: cmp_bit = (a_slice <= b_slice);
+        `VFUNCT6_MSLE:  cmp_bit = ($signed(sext_elem(a_slice, elem_width)) <= $signed(sext_elem(b_slice, elem_width)));
+        `VFUNCT6_MSGTU: cmp_bit = (a_slice > b_slice);
+        `VFUNCT6_MSGT:  cmp_bit = ($signed(sext_elem(a_slice, elem_width)) > $signed(sext_elem(b_slice, elem_width)));
+        default:        cmp_bit = 1'b0;
+    endcase
+end
+
+wire [VLEN-1:0] cmp_bitpos = ({{(VLEN-1){1'b0}}, 1'b1} << elem_r);
+wire [VLEN-1:0] write_mask = is_cmp_r ? cmp_bitpos : ({{(VLEN-64){1'b0}}, elem_mask64} << shift_r);
+wire [VLEN-1:0] write_data = is_cmp_r
+    ? ((elem_active && cmp_bit) ? cmp_bitpos : {VLEN{1'b0}})
+    : (elem_active ? ({{(VLEN-64){1'b0}}, alu_r} << shift_r) : {VLEN{1'b0}});
 
 always @(posedge clk) begin
     if (~rst) begin

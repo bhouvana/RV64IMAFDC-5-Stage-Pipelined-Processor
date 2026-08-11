@@ -480,13 +480,37 @@ wire [63:0] vec_arith_imm_sext = {{59{inst_word[19]}}, inst_word[19:15]};
 // any other reserved encoding, not silently misexecuted as something else.
 wire vec_arith_sub_vi_illegal = vec_arith_is_vi && (vec_arith_funct6 == `VFUNCT6_SUB);
 wire vec_arith_rsub_vv_illegal = !vec_arith_use_scalar && (vec_arith_funct6 == `VFUNCT6_RSUB);   // vrsub has no .vv form either
+
+// Generation 7, Pillar V backlog closure (docs/adr/0066). Mask-writing
+// compares (vmseq/vmsne/vmslt(u)/vmsle(u)/vmsgt(u)) -- funct6[5:3]==011
+// is exactly the compare family (0x18-0x1f), verified against
+// riscv/riscv-opcodes. vmsltu/vmslt have no .vi form; vmsgtu/vmsgt have
+// no .vv form (both real spec, not this project's own restriction).
+// LMUL>1 is deliberately NOT supported here: a compare's destination is
+// always ONE mask register regardless of source LMUL (real spec), which
+// would need every crack-op of a group to read-modify-write the SAME
+// physical destination register instead of each crack-op getting its
+// own fresh one (every other cracked class's own behavior) -- a
+// genuinely different register-allocation shape, real future work, not
+// silently dropped (see docs/adr/0066's own backlog note). Restricting
+// to LMUL<=1 here means the crack sequencer never engages for compares
+// (vec_group_count_fresh==1), so vd needs no special-case offsetting.
+wire is_vec_cmp = is_vec_arith && (vec_arith_funct6[5:3] == 3'b011);
+wire vec_cmp_no_vi_illegal = is_vec_cmp && vec_arith_is_vi &&
+    ((vec_arith_funct6 == `VFUNCT6_MSLTU) || (vec_arith_funct6 == `VFUNCT6_MSLT));
+wire vec_cmp_no_vv_illegal = is_vec_cmp && !vec_arith_use_scalar &&
+    ((vec_arith_funct6 == `VFUNCT6_MSGTU) || (vec_arith_funct6 == `VFUNCT6_MSGT));
+wire vec_cmp_lmul_illegal = is_vec_cmp && (vec_group_count_fresh > 4'd1);
+wire vec_cmp_legal = is_vec_cmp && !vec_cmp_no_vi_illegal && !vec_cmp_no_vv_illegal && !vec_cmp_lmul_illegal;
+
 wire vec_arith_funct6_legal =
     (vec_arith_funct6 == `VFUNCT6_ADD) ||
     (vec_arith_funct6 == `VFUNCT6_SUB && !vec_arith_sub_vi_illegal) ||
     (vec_arith_funct6 == `VFUNCT6_RSUB && !vec_arith_rsub_vv_illegal) ||
     (vec_arith_funct6 == `VFUNCT6_MINU) || (vec_arith_funct6 == `VFUNCT6_MIN) ||
     (vec_arith_funct6 == `VFUNCT6_MAXU) || (vec_arith_funct6 == `VFUNCT6_MAX) ||
-    (vec_arith_funct6 == `VFUNCT6_AND) || (vec_arith_funct6 == `VFUNCT6_OR) || (vec_arith_funct6 == `VFUNCT6_XOR);
+    (vec_arith_funct6 == `VFUNCT6_AND) || (vec_arith_funct6 == `VFUNCT6_OR) || (vec_arith_funct6 == `VFUNCT6_XOR) ||
+    vec_cmp_legal;
 wire vec_arith_illegal = is_vec_arith && !vec_arith_funct6_legal;
 
 // ==========================================================================
