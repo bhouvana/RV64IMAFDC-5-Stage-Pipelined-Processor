@@ -168,6 +168,45 @@ else if(ALUOp == `ALUOP_ITYPE)
                 // it just needed decoding at all instead of falling to plain
                 // SLL below.
                 ALUCtl = `ALUCTL_SLLI_UW;
+            else if (funct6 == `FUNCT6_ZKNE_AES64)
+            begin
+                // Pillar K (docs/adr/0059 Gen7-K6). aes64im's rs2_c is fixed
+                // all-zero by spec; aes64ks1i's rs2_c[4] is always 1 (the
+                // real encoding's fixed bit24=1) for every legal rnum 0-10.
+                // KNOWN NARROW GAP (documented in docs/adr/0067, not fixed
+                // here): these encodings are RV64-only by spec but share
+                // OPCODE_I with RV32-valid ops -- unlike OPCODE_OP_32's own
+                // clean Control.v XLEN gate, there is no funct6-level XLEN
+                // trap here, so an XLEN=32 build would decode+execute these
+                // (with truncated/meaningless results) instead of trapping
+                // illegal. This project's actual Pillar K target is XLEN=64
+                // throughout (matches Pillar V's own RV64 focus); random_gen.py
+                // only emits these mnemonics on the --xlen 64 axis (Task 8).
+                if (rs2_c == 5'b00000)
+                    ALUCtl = `ALUCTL_AES64IM;
+                else
+                    ALUCtl = `ALUCTL_AES64KS1I;
+            end
+            else if (funct6 == `FUNCT6_ZKNH_SHA)
+            begin
+                // Pillar K (docs/adr/0059 Gen7-K4). All 8 sha256/512
+                // sig0/1,sum0/1 share this one funct6 group, discriminated
+                // entirely by rs2_c. sha256* (rs2_c 0-3) are real spec-valid
+                // at XLEN=32 too; sha512* (rs2_c 4-7) are RV64-only -- same
+                // known narrow gap as aes64ks1i/aes64im above (no XLEN trap
+                // here), documented in docs/adr/0067.
+                case (rs2_c)
+                    `RS2_SHA256SUM0: ALUCtl = `ALUCTL_SHA256SUM0;
+                    `RS2_SHA256SUM1: ALUCtl = `ALUCTL_SHA256SUM1;
+                    `RS2_SHA256SIG0: ALUCtl = `ALUCTL_SHA256SIG0;
+                    `RS2_SHA256SIG1: ALUCtl = `ALUCTL_SHA256SIG1;
+                    `RS2_SHA512SUM0: ALUCtl = `ALUCTL_SHA512SUM0;
+                    `RS2_SHA512SUM1: ALUCtl = `ALUCTL_SHA512SUM1;
+                    `RS2_SHA512SIG0: ALUCtl = `ALUCTL_SHA512SIG0;
+                    `RS2_SHA512SIG1: ALUCtl = `ALUCTL_SHA512SIG1;
+                    default:         ALUCtl = `ALUCTL_ILLEGAL;
+                endcase
+            end
             else
                 ALUCtl = `ALUCTL_SLL;  // ordinary slli, funct6==0
         end

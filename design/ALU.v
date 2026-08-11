@@ -364,6 +364,57 @@ case(ALUCtl)
                                      A[i*8+4], A[i*8+5], A[i*8+6], A[i*8+7]};
         end
 
+    // ---- Zknh (docs/adr/0059 Pillar K) ---- fixed-rotate XOR functions,
+    // A only (B unused, same unary shape as CLZ). SHA-256 forms operate on
+    // A[31:0] and sign-extend the 32-bit result to XLEN; SHA-512 forms
+    // operate on the full 64-bit A directly. `{x[n-1:0],x[31:n]}` is this
+    // file's existing ror32-by-n idiom (see ALUCTL_ROR), spelled as a
+    // rotate-concatenation since n is a compile-time constant here.
+    `ALUCTL_SHA256SUM0:
+        begin
+            sha32 = A[31:0];
+            sha32 = {sha32[1:0],sha32[31:2]} ^ {sha32[12:0],sha32[31:13]} ^ {sha32[21:0],sha32[31:22]};
+            ALUOut = {{(XLEN-32){sha32[31]}}, sha32};
+        end
+    `ALUCTL_SHA256SUM1:
+        begin
+            sha32 = A[31:0];
+            sha32 = {sha32[5:0],sha32[31:6]} ^ {sha32[10:0],sha32[31:11]} ^ {sha32[24:0],sha32[31:25]};
+            ALUOut = {{(XLEN-32){sha32[31]}}, sha32};
+        end
+    `ALUCTL_SHA256SIG0:
+        begin
+            sha32 = A[31:0];
+            sha32 = {sha32[6:0],sha32[31:7]} ^ {sha32[17:0],sha32[31:18]} ^ (sha32 >> 3);
+            ALUOut = {{(XLEN-32){sha32[31]}}, sha32};
+        end
+    `ALUCTL_SHA256SIG1:
+        begin
+            sha32 = A[31:0];
+            sha32 = {sha32[16:0],sha32[31:17]} ^ {sha32[18:0],sha32[31:19]} ^ (sha32 >> 10);
+            ALUOut = {{(XLEN-32){sha32[31]}}, sha32};
+        end
+    `ALUCTL_SHA512SUM0:
+        begin
+            sha64 = A;
+            ALUOut = {sha64[27:0],sha64[63:28]} ^ {sha64[33:0],sha64[63:34]} ^ {sha64[38:0],sha64[63:39]};
+        end
+    `ALUCTL_SHA512SUM1:
+        begin
+            sha64 = A;
+            ALUOut = {sha64[13:0],sha64[63:14]} ^ {sha64[17:0],sha64[63:18]} ^ {sha64[40:0],sha64[63:41]};
+        end
+    `ALUCTL_SHA512SIG0:
+        begin
+            sha64 = A;
+            ALUOut = {sha64[0:0],sha64[63:1]} ^ {sha64[7:0],sha64[63:8]} ^ (sha64 >> 7);
+        end
+    `ALUCTL_SHA512SIG1:
+        begin
+            sha64 = A;
+            ALUOut = {sha64[18:0],sha64[63:19]} ^ {sha64[60:0],sha64[63:61]} ^ (sha64 >> 6);
+        end
+
 endcase
             zero = branch_zero;
 end
