@@ -34,7 +34,7 @@
 // already stale for an unrelated reason. Fixed to the real, spec-reserved
 // custom-0 opcode (7'b0001011, RISC-V ISA manual's own opcode map), which
 // has bits[1:0]=11 like every other real 32-bit opcode in this file.
-`define OPCODE_CUSTOM 7'b0001011  // ctz (see design/ALUCtrl.v ALUCtl=10101)
+`define OPCODE_CUSTOM 7'b0001011  // reserved (real RISC-V custom-0 space) -- unused since docs/adr/0060 moved ctz to its real Zbb encoding
 `define OPCODE_SYSTEM 7'b1110011  // CSR instructions, ecall, ebreak, mret (docs/adr/0011-csr-and-exceptions.md)
 `define OPCODE_MISC_MEM 7'b0001111  // fence (docs/adr/0023-caches.md, Phase G) -- funct3=000 only;
                                       // other MISC-MEM encodings (fence.i/Zifencei) unimplemented, illegal
@@ -82,36 +82,93 @@
 `define ALUOP_ITYPE      2'b11
 
 // ---- ALUCtl (ALUCtrl.v output -> ALU.v input) ----
-`define ALUCTL_ADD  5'b00000
-`define ALUCTL_SUB  5'b00001
-`define ALUCTL_SLL  5'b00010
-`define ALUCTL_SLT  5'b00011
-`define ALUCTL_SLTU 5'b00100
-`define ALUCTL_XOR  5'b00101
-`define ALUCTL_SRL  5'b00110
-`define ALUCTL_SRA  5'b00111
-`define ALUCTL_OR   5'b01000
-`define ALUCTL_AND  5'b01001
-`define ALUCTL_BEQ  5'b01010
-`define ALUCTL_BNE  5'b01011
-`define ALUCTL_BLT  5'b01100
-`define ALUCTL_BGE  5'b01101
-`define ALUCTL_BLE  5'b01110  // custom (see docs/ARCHITECTURE.md sec 5: not standard RV32I)
-`define ALUCTL_BGT  5'b10000  // custom
-`define ALUCTL_BLTU 5'b10001
-`define ALUCTL_BGEU 5'b10010
-`define ALUCTL_CTZ  5'b10101  // custom
-`define ALUCTL_ILLEGAL 5'b11111
+// Widened 5->6 bits for the B extension (docs/adr/0060) -- only 4 free
+// 5-bit codes existed (15,28,29,30), ~26 new B-ext ops needed 6.
+`define ALUCTL_ADD  6'b000000
+`define ALUCTL_SUB  6'b000001
+`define ALUCTL_SLL  6'b000010
+`define ALUCTL_SLT  6'b000011
+`define ALUCTL_SLTU 6'b000100
+`define ALUCTL_XOR  6'b000101
+`define ALUCTL_SRL  6'b000110
+`define ALUCTL_SRA  6'b000111
+`define ALUCTL_OR   6'b001000
+`define ALUCTL_AND  6'b001001
+`define ALUCTL_BEQ  6'b001010
+`define ALUCTL_BNE  6'b001011
+`define ALUCTL_BLT  6'b001100
+`define ALUCTL_BGE  6'b001101
+`define ALUCTL_BLE  6'b001110  // custom (see docs/ARCHITECTURE.md sec 5: not standard RV32I)
+`define ALUCTL_BGT  6'b010000  // custom
+`define ALUCTL_BLTU 6'b010001
+`define ALUCTL_BGEU 6'b010010
+`define ALUCTL_CTZ  6'b010101  // now reached via ctz's REAL Zbb encoding, not the retired custom opcode -- see docs/adr/0060
+`define ALUCTL_ILLEGAL 6'b111111
 
 // ---- RV32M (docs/adr/0006-rv32m.md) ----
-`define ALUCTL_MUL    5'b10011
-`define ALUCTL_MULH   5'b10100
-`define ALUCTL_MULHSU 5'b10110
-`define ALUCTL_MULHU  5'b10111
-`define ALUCTL_DIV    5'b11000
-`define ALUCTL_DIVU   5'b11001
-`define ALUCTL_REM    5'b11010
-`define ALUCTL_REMU   5'b11011
+`define ALUCTL_MUL    6'b010011
+`define ALUCTL_MULH   6'b010100
+`define ALUCTL_MULHSU 6'b010110
+`define ALUCTL_MULHU  6'b010111
+`define ALUCTL_DIV    6'b011000
+`define ALUCTL_DIVU   6'b011001
+`define ALUCTL_REM    6'b011010
+`define ALUCTL_REMU   6'b011011
+
+// ---- B extension: Zba+Zbb+Zbs (docs/adr/0060) ----
+`define ALUCTL_ANDN     6'b100000
+`define ALUCTL_ORN      6'b100001
+`define ALUCTL_XNOR     6'b100010
+`define ALUCTL_MIN      6'b100011
+`define ALUCTL_MINU     6'b100100
+`define ALUCTL_MAX      6'b100101
+`define ALUCTL_MAXU     6'b100110
+`define ALUCTL_ROL      6'b100111
+`define ALUCTL_ROR      6'b101000
+`define ALUCTL_CLZ      6'b101001
+`define ALUCTL_CPOP     6'b101010
+`define ALUCTL_SEXTB    6'b101011
+`define ALUCTL_SEXTH    6'b101100
+`define ALUCTL_ORCB     6'b101101
+`define ALUCTL_REV8     6'b101110
+`define ALUCTL_BCLR     6'b101111
+`define ALUCTL_BEXT     6'b110000
+`define ALUCTL_BINV     6'b110001
+`define ALUCTL_BSET     6'b110010
+`define ALUCTL_SH1ADD   6'b110011
+`define ALUCTL_SH2ADD   6'b110100
+`define ALUCTL_SH3ADD   6'b110101
+`define ALUCTL_ADD_UW     6'b110110  // zero-extends A[31:0] before adding -- NOT the same as wordOp (which truncates/sign-extends the RESULT)
+`define ALUCTL_SH1ADD_UW  6'b110111
+`define ALUCTL_SH2ADD_UW  6'b111000
+`define ALUCTL_SH3ADD_UW  6'b111001
+`define ALUCTL_SLLI_UW    6'b111010  // shift left then zero-extend the low-32-bit result to XLEN
+
+// funct7 for the B-ext R-type groups (funct3 alone distinguishes within each)
+`define FUNCT7_ZBB_MINMAX 7'b0000101
+`define FUNCT7_ZBB_ROTATE 7'b0110000
+`define FUNCT7_ZBA_SHADD  7'b0010000
+`define FUNCT7_ZBS_BCLR_BEXT 7'b0100100  // bclr(f3=001) / bext(f3=101)
+`define FUNCT7_ZBS_BINV      7'b0110100
+`define FUNCT7_ZBS_BSET      7'b0010100
+`define FUNCT7_ZBA_ADD_UW    7'b0000100
+
+// funct6 (funct7[6:1]) for the B-ext I-type groups -- same "top shamt bit
+// folds into shift width at XLEN=64" idiom as the existing FUNCT6_ALT.
+`define FUNCT6_ZBB_RORI_CLZFAM 6'b011000  // rori(f3=101) / clz,ctz,cpop,sext.b,sext.h(f3=001, rs2-field selects)
+`define FUNCT6_ZBS_BCLRI_BEXTI 6'b010010  // bclri(f3=001) / bexti(f3=101)
+`define FUNCT6_ZBS_BINVI       6'b011010
+`define FUNCT6_ZBS_BSETI       6'b001010
+`define FUNCT6_ZBB_ORCB        6'b001010  // same bit pattern as BSETI's funct6, disambiguated by funct3 (101 vs 001)
+`define FUNCT6_ZBB_REV8        6'b011010  // same bit pattern as BINVI's funct6, disambiguated by funct3 (101 vs 001)
+`define FUNCT6_ZBA_SLLIUW      6'b000010
+
+// rs2-field (inst[24:20]) values that select within FUNCT6_ZBB_RORI_CLZFAM/f3=001
+`define RS2_CLZ     5'b00000
+`define RS2_CTZ     5'b00001
+`define RS2_CPOP    5'b00010
+`define RS2_SEXTB   5'b00100
+`define RS2_SEXTH   5'b00101
 
 // funct7 values used to distinguish R-type sub-ops now that ALUCtrl sees the
 // full 7-bit field (previously only inst[30] was threaded through, enough
