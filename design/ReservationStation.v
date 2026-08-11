@@ -81,6 +81,18 @@ module ReservationStation #(
     input  wire [PREG_BITS-1:0]     cdb_preg1,
     input  wire                     cdb_valid2,
     input  wire [PREG_BITS-1:0]     cdb_preg2,
+    // Gen6-P6 (docs/adr/0057): a 4th, genuinely new CDB source -- found
+    // necessary by running, not anticipated: RS_FALU's own 3 existing
+    // ports (self/ALU/DIV) had no room left to also cover
+    // fdiv_complete_valid (RS_FDIV's own multi-cycle completion,
+    // docs/adr/0055) without displacing one of the other three, each of
+    // which serves a real, still-needed purpose (FMV.W.X's own integer
+    // source can be a still-in-flight ALU OR DIV/REM result). Tied 0 by
+    // every RS instance that doesn't need it (RS_ALU/RS_DIV/RS_FDIV --
+    // none of their own operands can ever originate from RS_FALU/RS_FDIV's
+    // own completion path) -- purely additive, bit-exact for them.
+    input  wire                     cdb_valid3,
+    input  wire [PREG_BITS-1:0]     cdb_preg3,
 
     // Issue (select), one entry/cycle.
     output wire                     issue_valid,
@@ -159,10 +171,10 @@ wire disp1_ok = disp_en1 && alloc1_found;
 // PhysicalRegisterFile.v's own write-first bypass reasoning: a producer
 // broadcasting the exact cycle a dependent instruction dispatches must
 // be visible immediately, not one cycle late.
-wire disp0_s1_ready = disp_src1_ready0 || (cdb_valid0 && cdb_preg0 == disp_src1_preg0) || (cdb_valid1 && cdb_preg1 == disp_src1_preg0) || (cdb_valid2 && cdb_preg2 == disp_src1_preg0);
-wire disp0_s2_ready = disp_src2_ready0 || (cdb_valid0 && cdb_preg0 == disp_src2_preg0) || (cdb_valid1 && cdb_preg1 == disp_src2_preg0) || (cdb_valid2 && cdb_preg2 == disp_src2_preg0);
-wire disp1_s1_ready = disp_src1_ready1 || (cdb_valid0 && cdb_preg0 == disp_src1_preg1) || (cdb_valid1 && cdb_preg1 == disp_src1_preg1) || (cdb_valid2 && cdb_preg2 == disp_src1_preg1);
-wire disp1_s2_ready = disp_src2_ready1 || (cdb_valid0 && cdb_preg0 == disp_src2_preg1) || (cdb_valid1 && cdb_preg1 == disp_src2_preg1) || (cdb_valid2 && cdb_preg2 == disp_src2_preg1);
+wire disp0_s1_ready = disp_src1_ready0 || (cdb_valid0 && cdb_preg0 == disp_src1_preg0) || (cdb_valid1 && cdb_preg1 == disp_src1_preg0) || (cdb_valid2 && cdb_preg2 == disp_src1_preg0) || (cdb_valid3 && cdb_preg3 == disp_src1_preg0);
+wire disp0_s2_ready = disp_src2_ready0 || (cdb_valid0 && cdb_preg0 == disp_src2_preg0) || (cdb_valid1 && cdb_preg1 == disp_src2_preg0) || (cdb_valid2 && cdb_preg2 == disp_src2_preg0) || (cdb_valid3 && cdb_preg3 == disp_src2_preg0);
+wire disp1_s1_ready = disp_src1_ready1 || (cdb_valid0 && cdb_preg0 == disp_src1_preg1) || (cdb_valid1 && cdb_preg1 == disp_src1_preg1) || (cdb_valid2 && cdb_preg2 == disp_src1_preg1) || (cdb_valid3 && cdb_preg3 == disp_src1_preg1);
+wire disp1_s2_ready = disp_src2_ready1 || (cdb_valid0 && cdb_preg0 == disp_src2_preg1) || (cdb_valid1 && cdb_preg1 == disp_src2_preg1) || (cdb_valid2 && cdb_preg2 == disp_src2_preg1) || (cdb_valid3 && cdb_preg3 == disp_src2_preg1);
 
 // -- Issue (select): lowest-index entry with both operands ready --
 // same accumulator-chain style as the alloc scan above.
@@ -215,10 +227,10 @@ always @(posedge clk) begin
         // a live CDB broadcast becomes ready next cycle.
         for (reset_i = 0; reset_i < RS_ENTRIES; reset_i = reset_i + 1) begin
             if (valid[reset_i] && !src1_ready[reset_i]
-                && ((cdb_valid0 && cdb_preg0 == src1_preg[reset_i]) || (cdb_valid1 && cdb_preg1 == src1_preg[reset_i]) || (cdb_valid2 && cdb_preg2 == src1_preg[reset_i])))
+                && ((cdb_valid0 && cdb_preg0 == src1_preg[reset_i]) || (cdb_valid1 && cdb_preg1 == src1_preg[reset_i]) || (cdb_valid2 && cdb_preg2 == src1_preg[reset_i]) || (cdb_valid3 && cdb_preg3 == src1_preg[reset_i])))
                 src1_ready[reset_i] <= 1'b1;
             if (valid[reset_i] && !src2_ready[reset_i]
-                && ((cdb_valid0 && cdb_preg0 == src2_preg[reset_i]) || (cdb_valid1 && cdb_preg1 == src2_preg[reset_i]) || (cdb_valid2 && cdb_preg2 == src2_preg[reset_i])))
+                && ((cdb_valid0 && cdb_preg0 == src2_preg[reset_i]) || (cdb_valid1 && cdb_preg1 == src2_preg[reset_i]) || (cdb_valid2 && cdb_preg2 == src2_preg[reset_i]) || (cdb_valid3 && cdb_preg3 == src2_preg[reset_i])))
                 src2_ready[reset_i] <= 1'b1;
         end
 

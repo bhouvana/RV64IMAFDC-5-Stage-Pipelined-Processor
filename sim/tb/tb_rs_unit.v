@@ -76,6 +76,7 @@ module tb_rs_unit;
         .cdb_valid0(cdb_valid0), .cdb_preg0(cdb_preg0),
         .cdb_valid1(cdb_valid1), .cdb_preg1(cdb_preg1),
         .cdb_valid2(cdb_valid2), .cdb_preg2(cdb_preg2),
+        .cdb_valid3(1'b0), .cdb_preg3(6'd0),   // Gen6-P6 (docs/adr/0057): new 4th port, untested here -- not this unit test's own scope
         .issue_valid(issue_valid),
         .issue_src1_preg(issue_src1_preg), .issue_src2_preg(issue_src2_preg), .issue_dest_preg(issue_dest_preg),
         .issue_rob_tag(issue_rob_tag), .issue_payload(issue_payload),

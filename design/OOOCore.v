@@ -597,9 +597,25 @@ wire is_branch_1   = branch_c_1;
 wire has_exception_1 = illegalOpcode_c_1 || isEcall_c_1;
 wire is_trap_related_1 = has_exception_1 || isMret_c_1;
 wire [4:0] fp_funct5_1 = funct7_c_1[6:2];
+// Gen6-P4/P6 (docs/adr/0055, 0057): FUNCT5_FDIV/FUNCT5_FSQRT widened in --
+// a REAL bug found by running (the ooo fuzzer's own widened pool, Gen6-P6,
+// is what first exercised an fdiv.s/fsqrt.s landing in slot1): without
+// these, is_fp_op_1 wrongly reports FALSE for an actual fdiv.s/fsqrt.s in
+// slot1, so slot1_is_plain_alu's own exclusion list (below) never catches
+// it either -- the SAME "plain ALU" bucket every other unclassified
+// instruction silently falls into, exactly the bug class docs/adr/0051/
+// 0052 already found and fixed for csrrX/AMO in this exact spot. A
+// dual-issued fdiv.s/fsqrt.s in slot1 would dispatch through RS_ALU
+// instead of RS_FDIV, never computing its real result -- the destination
+// register silently keeps whatever it held before, observed directly as
+// f5 reading back a stale seeded value instead of its own fsqrt.s result
+// (root-caused via cycle-by-cycle dispatch tracing: PC visibly skipped
+// straight from one instruction's own address to the one two slots later,
+// the unmistakable signature of an unwanted dual-issue).
 wire is_fp_op_1 = fRegWrite_c_1 && (
     fp_funct5_1 == `FUNCT5_FADD || fp_funct5_1 == `FUNCT5_FSUB || fp_funct5_1 == `FUNCT5_FMUL ||
-    fp_funct5_1 == `FUNCT5_FSGNJ || fp_funct5_1 == `FUNCT5_FMINMAX || fp_funct5_1 == `FUNCT5_FMV_W_X
+    fp_funct5_1 == `FUNCT5_FSGNJ || fp_funct5_1 == `FUNCT5_FMINMAX || fp_funct5_1 == `FUNCT5_FMV_W_X ||
+    fp_funct5_1 == `FUNCT5_FDIV || fp_funct5_1 == `FUNCT5_FSQRT
 );
 
 // Both slots must be plain ALU (regWrite integer OP/OP-IMM, no other
@@ -1517,6 +1533,9 @@ ReservationStation #(.RS_ENTRIES(RS_ALU_ENTRIES), .PREG_BITS(PREG_BITS), .ROB_ID
     .cdb_valid0(issue_valid), .cdb_preg0(issue_dest_preg),
     .cdb_valid1(lsq_complete_valid && lsq_complete_is_load), .cdb_preg1(lsq_complete_dest_preg),
     .cdb_valid2(div_complete_valid), .cdb_preg2(div_complete_dest_preg),
+    // Gen6-P6: RS_ALU's own operands are always integer pregs -- none of
+    // RS_FALU's own float-space completions can ever matter here.
+    .cdb_valid3(1'b0), .cdb_preg3({PREG_BITS{1'b0}}),
     .issue_valid(issue_valid),
     .issue_src1_preg(issue_src1_preg), .issue_src2_preg(issue_src2_preg), .issue_dest_preg(issue_dest_preg),
     .issue_rob_tag(issue_rob_tag), .issue_payload(issue_payload),
@@ -1739,6 +1758,9 @@ ReservationStation #(.RS_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_ID
     .cdb_valid0(issue_valid), .cdb_preg0(issue_dest_preg),
     .cdb_valid1(lsq_complete_valid && lsq_complete_is_load), .cdb_preg1(lsq_complete_dest_preg),
     .cdb_valid2(div_complete_valid), .cdb_preg2(div_complete_dest_preg),
+    // Gen6-P6: RS_DIV's own operands are always integer pregs -- same
+    // reasoning as RS_ALU's own tie-off just above.
+    .cdb_valid3(1'b0), .cdb_preg3({PREG_BITS{1'b0}}),
     .issue_valid(issue_valid_div),
     .issue_src1_preg(issue_src1_preg_div), .issue_src2_preg(issue_src2_preg_div), .issue_dest_preg(issue_dest_preg_div),
     .issue_rob_tag(issue_rob_tag_div), .issue_payload(issue_payload_div),
@@ -1869,6 +1891,10 @@ ReservationStation #(.RS_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_ID
     .cdb_valid0(issue_valid), .cdb_preg0(issue_dest_preg),
     .cdb_valid1(falu_complete_valid), .cdb_preg1({{(PREG_BITS-FPREG_BITS){1'b0}}, falu_complete_dest_preg}),
     .cdb_valid2(fdiv_complete_valid), .cdb_preg2({{(PREG_BITS-FPREG_BITS){1'b0}}, fdiv_complete_dest_preg}),
+    // Gen6-P6: already covers self (port2) and RS_FALU (port1, the P4 fix
+    // just above) -- nothing else can produce a float-space value RS_FDIV's
+    // own operands could depend on.
+    .cdb_valid3(1'b0), .cdb_preg3({PREG_BITS{1'b0}}),
     .issue_valid(issue_valid_fdiv),
     .issue_src1_preg(issue_src1_preg_fdiv), .issue_src2_preg(issue_src2_preg_fdiv), .issue_dest_preg(issue_dest_preg_fdiv_wide),
     .issue_rob_tag(issue_rob_tag_fdiv), .issue_payload(issue_payload_fdiv),
@@ -1987,6 +2013,19 @@ ReservationStation #(.RS_ENTRIES(RS_FALU_ENTRIES), .PREG_BITS(PREG_BITS), .ROB_I
     .cdb_valid0(falu_complete_valid), .cdb_preg0({{(PREG_BITS-FPREG_BITS){1'b0}}, falu_complete_dest_preg}),
     .cdb_valid1(issue_valid), .cdb_preg1(issue_dest_preg),
     .cdb_valid2(div_complete_valid), .cdb_preg2(div_complete_dest_preg),
+    // Gen6-P6 (docs/adr/0057): the real fix -- a genuine hang found by
+    // running the widened ooo fuzzer (docs/adr/0057's own second real
+    // finding), root-caused by direct dispatch/retire tracing: an
+    // ordinary FALU op (e.g. fmin.s) depending on a still-in-flight
+    // FDIV/FSQRT result had no CDB port here that would EVER wake it,
+    // permanently stuck (RS_FALU's other 3 ports were all already
+    // spoken for by real, still-needed coverage -- self, ALU-for-FMV.W.X,
+    // DIV-for-FMV.W.X -- see ReservationStation.v's own new cdb_valid3
+    // header for why this needed a genuine 4th port rather than
+    // displacing one of the existing three). Exactly the reverse-
+    // direction gap docs/adr/0055's own Future improvements section
+    // already flagged as "the eventual, correct fix" -- now real.
+    .cdb_valid3(fdiv_complete_valid), .cdb_preg3({{(PREG_BITS-FPREG_BITS){1'b0}}, fdiv_complete_dest_preg}),
     .issue_valid(issue_valid_falu),
     .issue_src1_preg(issue_src1_preg_falu), .issue_src2_preg(issue_src2_preg_falu),
     .issue_dest_preg(issue_dest_preg_falu_wide), .issue_rob_tag(issue_rob_tag_falu), .issue_payload(issue_payload_falu),

@@ -18,6 +18,8 @@
 `include "Bht.v"
 `include "Btb.v"
 `include "CSR.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // Generation 6, Gen6-L4. bench_runner.py's own --compare-ooo path.
 // Same retirement-counting termination as sim/tb/dump_regs_ooocore_

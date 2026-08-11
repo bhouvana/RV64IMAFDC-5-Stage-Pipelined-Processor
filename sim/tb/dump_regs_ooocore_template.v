@@ -18,6 +18,8 @@
 `include "Bht.v"
 `include "Btb.v"
 `include "CSR.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // Generation 6, Gen6-L. Template for sim/tools/random_gen.py's --ooo mode,
 // driven by sim/tools/run_random_tests.py's own --ooo cross-check path.

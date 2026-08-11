@@ -592,6 +592,34 @@ directly via a live per-cycle monitor on `jr_mispredict`, not inferred.
 6/6 first run, zero new bugs found. 135/135 directed suite,
 zero-warning compile.
 
+**Gen6-P6 (`docs/adr/0057`): widen the `--ooo` fuzzer.** Sixth and
+last backlog sub-phase. `jal`/`csrrX` (mscratch-only)/`fdiv.s`/`fsqrt.s`
+rejoined `random_gen.py`'s own `ooo=True` instruction pool now that
+Gen6-O/P1/P4/P5 made them real; AMO stays excluded (`sim/tools/iss.py`,
+the reference model, has zero AMO opcode support at all -- confirmed by
+reading, not assumed, real separate future work). Found and fixed
+three genuinely pre-existing bugs, all newly exposed by this widening,
+none by design review: (1) the OOO harness's own 32-nop trailer assumed
+a bounded dispatch-to-retire gap that `fdiv.s`/`fsqrt.s`'s own real
+multi-cycle latency can exceed -- fetch ran off the padding into the
+zero-filled tail, illegal-trapped, and silently restarted the whole
+program mid-comparison; fixed at the root with a genuine `jal x0,self`
+halt loop (unreachable at Gen6-L time, real since Gen6-O3) instead of a
+margin that could always eventually be beaten again; (2) `OOOCore.v`'s
+own slot1 dual-issue classification (`is_fp_op_1`) was never widened
+when Gen6-P4 added `fdiv.s`/`fsqrt.s` -- one landing in slot1 silently
+fell into the "plain ALU" bucket, the same bug class already found
+twice before (csrrX, AMO) for the identical reason; (3) a genuine hang,
+closing the exact gap `docs/adr/0055` already flagged as "the eventual,
+correct fix" -- RS_FALU had no CDB port free to wake an op depending on
+a still-in-flight FDIV/FSQRT result, fixed with a real 4th port on
+`ReservationStation.v` itself (mirrors `ReorderBuffer.v`'s own P4
+widening to a 5th completion port). `--ooo --count 100`: 100/100 after
+all three fixes. 135/135 directed suite, zero-warning compile.
+
+This closes the six-phase backlog (`docs/adr/0052`-`0057`) the user
+chose to finish before Gen6's own real closure.
+
 ---
 
 ## Generation 7 — Vector Processing (v7.0)

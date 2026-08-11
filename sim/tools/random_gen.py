@@ -78,12 +78,35 @@ FCSR_ADDR = {"fflags": "0x1", "frm": "0x2", "fcsr": "0x3"}
 # is only 128 bytes (32 instructions) end to end, shared with the leading
 # base-pointer setup, the trailing halt loop, and n_instrs of actual random
 # instructions -- see gen_program's own budget comment.
-# Gen6-L: nop-padding trailer length for ooo mode -- see gen_program's own
-# trailer comment for why, and run_random_tests.py's own --ooo path (which
-# imports this to compute the real-instruction-count target for
-# sim/tb/dump_regs_ooocore_template.v's retirement-counting termination,
-# excluding this padding).
-OOO_TRAILER_NOP_COUNT = 32
+# Gen6-L, replaced Gen6-P6 (docs/adr/0057): was 32 nops of flat padding
+# (jal wasn't real in OOOCore.v yet at Gen6-L time, so a genuine self-loop
+# halt -- non-ooo mode's own `jal x0,__halt` -- wasn't reachable; see this
+# file's own git history for the original nop-count reasoning, since
+# superseded). A REAL bug found by running, root-caused by direct cycle
+# tracing (not guessed): fdiv.s/fsqrt.s's own genuine multi-cycle latency
+# (FDivider.v/FSqrt.v, tens of cycles each, and BACK-TO-BACK ones on the
+# same shared unit serialize) can easily exceed flat padding's own
+# "2x ROB_ENTRIES" sizing assumption -- fetch is NOT gated by a slow
+# instruction's own retirement (OOOCore.v's frontend dispatches ahead
+# freely), so a long enough in-flight fdiv/fsqrt chain lets fetch run
+# clean off the end of the nop padding into the zero-filled tail BEFORE
+# the real program's own last instruction retires -- illegal-opcode traps,
+# mtvec's own reset default of 0 redirects, and the ENTIRE program
+# silently restarts from scratch mid-comparison, corrupting whatever
+# hadn't retired yet with a LATER pass's own value (observed directly: a
+# generated program's own fsqrt.s destination read back as a stale value
+# from an earlier restart, not garbage -- root-caused by tracing
+# fdiv_complete_valid/rob_retire_* across multiple ~640-time-unit-apart
+# repeats of the identical PC, the unmistakable signature of this exact
+# restart loop). Gen6-O3 made jal real in OOOCore.v since Gen6-L's own
+# original design -- a genuine self-loop (`jal x0,__halt`, this generator's
+# own non-ooo mode already uses it) is reachable now, and ELIMINATES the
+# race entirely rather than just widening the margin: once reached, PC can
+# never advance past the halt loop again, regardless of how slow anything
+# upstream is. Exactly 1 real instruction (the jal itself; the label costs
+# nothing) is all the trailer needs now -- name kept (many call sites
+# import it) despite no longer being a nop count.
+OOO_TRAILER_NOP_COUNT = 1
 
 FLOAT_SEED_BITS = [
     0x00000000,  # +0.0
@@ -218,23 +241,35 @@ for _v in (0, 0xFFFFFFFF, 0x80000000, 0x7FFFFFFF, 0x12345678, 0xDEADBEEF, 1, 0x8
 
 
 def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, mmu=False, xlen=32, ooo=False):
-    """ooo (Generation 6, Gen6-L): restricts the generated instruction mix
-    to OOOCore.v's own actually-implemented subset, confirmed by direct
-    code read (not assumed) before this phase touched anything: jump_c/
-    jalr_c/lui_c/auipc_c/isCsr_c are decoded (design/Control.v) but never
-    consumed anywhere in design/OOOCore.v -- jal/jalr/lui/auipc/csrrX all
-    silently fall into the "plain ALU" dispatch bucket instead of either
-    executing correctly or cleanly trapping. Similarly fcvt.w.s/fcvt.wu.s/
-    feq.s/flt.s/fle.s (regWrite=1 path) read garbage from the INTEGER RAT
-    instead of the float one, fsw reads garbage integer "store data"
-    instead of the intended float register (both genuinely wrong, not
-    just unsupported), and fdiv.s/fsqrt.s/fcvt.s.w*/the fmadd family/flw
-    all quietly become no-dest no-ops (is_fp_op's own whitelist in
-    OOOCore.v only covers FADD/FSUB/FMUL/FSGNJ*/FMIN/FMAX/FMV.W.X). None
-    of that is safe to cross-check. ooo=True instead generates only: r/i/
-    shift/load/store/branch (conditional only, no jal), and a float pool
-    restricted to fadd.s/fsub.s/fmul.s (FP_ARITH minus fdiv.s), fsgnj*,
-    fmin.s/fmax.s -- every one of these OOOCore.v actually executes
+    """ooo (Generation 6, Gen6-L; widened Gen6-P6, docs/adr/0057):
+    restricts the generated instruction mix to OOOCore.v's own actually-
+    implemented subset, confirmed by direct code read (not assumed)
+    before each phase touched anything. Gen6-O/P1/P4/P5 (docs/adr/0051,
+    0052, 0055, 0056) closed real gaps this docstring used to list as
+    unsafe: jal, csrrX (mscratch only, mirroring interrupt mode's own
+    established restriction below), and fdiv.s/fsqrt.s are ALL now real,
+    correctly-executing OOOCore.v instructions and have been moved back
+    into the ooo=True pool. Still excluded, real gaps confirmed still
+    open by direct code read: jalr (excluded from EVERY mode this
+    generator has ever had, not ooo-specific -- a random register-
+    dependent target isn't safe to generate for ANY core, nothing to do
+    with OOOCore.v's own support); fcvt.w.s/fcvt.wu.s/feq.s/flt.s/fle.s
+    (regWrite=1 path reads garbage from the INTEGER RAT instead of the
+    float one); fsw (reads garbage integer "store data" instead of the
+    intended float register); fcvt.s.w*/the fmadd family/flw (still
+    quietly no-dest no-ops, docs/adr/0055's own explicitly-deferred
+    scope); LR/SC/AMO-RMW (docs/adr/0052 made these real in OOOCore.v,
+    but sim/tools/iss.py -- the reference model THIS generator's own
+    RTL-vs-ISS cross-check depends on -- has ZERO AMO opcode support at
+    all, confirmed by direct code read, not assumed; widening this
+    generator without first teaching iss.py the A-extension would just
+    produce spurious cross-check failures unrelated to real RTL bugs --
+    real future work, a separate, substantial ISS change, not attempted
+    here). ooo=True generates: r/i/shift/load/store/branch (conditional
+    only), jal, csr (mscratch only), and a float pool now including
+    fdiv.s (via fp_arith, no longer truncated to FP_ARITH[:3]) and
+    fsqrt.s (fp_sqrt), plus fsgnj*/fmin.s/fmax.s -- every one of these
+    OOOCore.v actually executes
     correctly end-to-end (Gen6-D/E/G/H). No CSR (csr_weight forced 0, same
     "exclude what can't be made safe to compare" precedent mmu mode
     already established below), no "w"-suffixed family even at xlen=64
@@ -245,7 +280,10 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
     tb_ooocore_trap_i1.v; duplicating fault-injection here is disproportionate,
     same reasoning this docstring's own interrupt/mmu-mode CSR restrictions
     already use), no interrupt/mmu (mutually exclusive with those modes
-    below, and OOOCore.v implements neither yet).
+    below -- OOOCore.v implements both for real now, docs/adr/0053/0054,
+    but combining either with the ooo-mode instruction pool is real,
+    separate future work, a genuinely new integration this generator
+    doesn't attempt yet, not a limitation of OOOCore.v itself).
 
     xlen (Generation 2, docs/adr/0028-rv64-migration-phase-m.md): 32
     (default, every existing call site's exact behavior, unaffected) or 64
@@ -370,7 +408,7 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
     # reg_instrs's own "washes out" argument for why the exact per-half
     # construction never affects final correctness).
     xlen64_seed_cost = (20 if ooo else 8) if xlen >= 64 else 0  # const64_to_reg_instrs's own upper bound, see above
-    trailer_cost = OOO_TRAILER_NOP_COUNT if ooo else 1  # Gen6-L: nops instead of fence+jal, see the trailer's own comment below
+    trailer_cost = OOO_TRAILER_NOP_COUNT if ooo else 1  # ooo mode's own trailer is a bare `jal x0,self` (no fence -- OOOCore.v has no cache), see the trailer's own emission comment below
     budget = (1 + (6 if ooo else 2) * len(FLOAT_SEED_BITS) + xlen64_seed_cost + n_instrs + trailer_cost
               + interrupt_prefix_cost + mmu_prefix_cost)
     if budget > mem_size // 4:
@@ -424,7 +462,15 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
     # this generator already applies to ecall/ebreak/mret/illegal
     # instructions (see the module docstring), just for CSR *reads*/*writes*
     # instead of control flow.
-    csr_names_pool = CSR_NAMES if interrupt is None else [
+    # Gen6-P6 (docs/adr/0057): ooo mode's own csrrX pool (newly enabled --
+    # see gen_program's own docstring) gets the SAME mscratch-only
+    # restriction as interrupt mode, defensively -- ooo mode never sets a
+    # real mtvec, so a random csrrX writing mstatus/mepc/mcause/mtvec
+    # followed by ANY later redirect (even an unintended one) risks the
+    # exact "RTL and ISS land at two different addresses" divergence this
+    # comment's own interrupt-mode reasoning already describes. mscratch
+    # alone (genuinely inert, no control-flow role) stays safe.
+    csr_names_pool = CSR_NAMES if (interrupt is None and not ooo) else [
         n for n in CSR_NAMES if n not in ("mstatus", "mepc", "mcause", "mtvec")]
 
     # docs/adr/00NN-mmu-sv32.md (Phase F7). A real bug found by running: all
@@ -439,10 +485,14 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
     # own raw bit pattern, not a real instruction), corrupting everything
     # downstream. Same "exclude what can't be made safe to compare"
     # principle this generator already applies to interrupt mode's own
-    # restricted CSR pool -- here the whole `csr` instruction kind is
-    # excluded outright (fflags/frm/fcsr, the separate `fcsr` kind below,
-    # stay included: their addresses are U-mode accessible, genuinely safe).
-    csr_weight = 0 if (mmu or ooo) else 6
+    # restricted CSR pool. Gen6-P6: ooo mode no longer excludes `csr`
+    # outright -- csrrX is real in OOOCore.v now (docs/adr/0051) -- but
+    # still forces the same mscratch-only pool interrupt mode uses
+    # (csr_names_pool above), for the same reason. mmu mode's own
+    # exclusion is unrelated and unchanged (fflags/frm/fcsr, the separate
+    # `fcsr` kind below, stay included there: their addresses are U-mode
+    # accessible, genuinely safe).
+    csr_weight = 0 if mmu else 6
 
     # Build a flat instruction list first (as dicts), then assign forward-only
     # branch/jump targets once every instruction's final index is known.
@@ -451,16 +501,18 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
     # xlen>=64 -- at xlen=32 the exact same list/weights as every prior
     # phase, so existing seeds reproduce bit-exact programs.
     if ooo:
-        # Gen6-L: see gen_program's own docstring for exactly which kinds
-        # this excludes and why (jal/csr/fp_sqrt/fp_cmp/fp_cvt*/fp_madd/
-        # fload/fstore/fcsr all either silently mis-execute or quietly
-        # no-op in OOOCore.v today -- none are safe to cross-check). The
-        # "w"-suffixed family is excluded regardless of xlen (DIVW/REMW
-        # routing through OOOCore.v's is_div_op was never confirmed).
-        kind_names = ["r", "i", "shift", "load", "store", "branch",
-                      "fp_arith", "fp_sgnj", "fp_minmax"]
-        kind_weights = [24, 16, 8, 10, 10, 8,
-                         10, 4, 4]
+        # Gen6-L, widened Gen6-P6 (docs/adr/0057): see gen_program's own
+        # docstring for exactly which kinds this still excludes and why.
+        # jal/csr/fp_sqrt rejoined the pool now that OOOCore.v actually
+        # executes them correctly (docs/adr/0051, 0055); fp_cmp/fp_cvt*/
+        # fp_madd/fload/fstore/fcsr stay excluded (still real, confirmed
+        # gaps). The "w"-suffixed family stays excluded regardless of
+        # xlen (DIVW/REMW routing through OOOCore.v's is_div_op was never
+        # confirmed).
+        kind_names = ["r", "i", "shift", "load", "store", "branch", "jal", "csr",
+                      "fp_arith", "fp_sqrt", "fp_sgnj", "fp_minmax"]
+        kind_weights = [24, 16, 8, 10, 10, 8, 5, csr_weight,
+                         10, 4, 4, 4]
     else:
         kind_names = ["r", "i", "shift", "load", "store", "branch", "jal", "csr",
                       "fp_arith", "fp_sqrt", "fp_sgnj", "fp_minmax", "fp_cmp",
@@ -541,10 +593,10 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
             rd = rnd.choice(GP_REGS)
             instrs.append(("jal", rd))
         elif kind == "fp_arith":
-            # Gen6-L: fdiv.s excluded under ooo -- not in OOOCore.v's own
-            # is_fp_op whitelist (no iterative FP divider built), see
-            # gen_program's own docstring.
-            mn = rnd.choice(FP_ARITH[:3] if ooo else FP_ARITH)
+            # Gen6-P6 (docs/adr/0057): fdiv.s no longer excluded under ooo
+            # -- RS_FDIV/FDivider.v are real now (docs/adr/0055). Full
+            # FP_ARITH pool for both modes.
+            mn = rnd.choice(FP_ARITH)
             rd, rs1, rs2 = rnd.choice(FREGS), rnd.choice(FREGS), rnd.choice(FREGS)
             rm = rnd.choice(RM_NAMES)
             instrs.append(f"{mn} f{rd}, f{rs1}, f{rs2}, {rm}")
@@ -631,27 +683,16 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
     if len(instrs) in labels_at:
         out.append(labels_at[len(instrs)] + ":")
     if ooo:
-        # Gen6-L: the ordinary fence+jal-self-loop halt below relies on jal
-        # actually redirecting the PC -- it doesn't in OOOCore.v (see
-        # gen_program's own docstring). A real self-loop isn't reachable
-        # without implementing jal there (out of this phase's own scope,
-        # verification tooling, not new RTL), so this pads with plain nops
-        # instead: OOOCore.v's frontend fetches/dispatches well ahead of
-        # retirement (bounded by ROB_ENTRIES=16 in sim/tb/dump_regs_ooocore_
-        # template.v's own fixed instantiation), so 32 nops (2x that bound,
-        # generous margin) guarantees fetch is still safely inside this
-        # harmless padding -- never at the real out-of-bounds/illegal-
-        # opcode tail -- for the entire window run_random_tests.py's own
-        # --ooo path needs (from the last real instruction's retirement
-        # back to when it was first dispatched). A genuine bug, found by
-        # running: without this, OOOCore.v's fetch had *already*
-        # spéculatively run off the end and taken the illegal-opcode trap
-        # (PC redirects to mtvec's own reset default of 0, since csrrw is
-        # never dispatched in OOOCore.v either -- restarting the entire
-        # program) before the real random body's own LAST instructions had
-        # even retired, corrupting the exact comparison this mode exists
-        # to make.
-        out.extend(["addi x0, x0, 0"] * OOO_TRAILER_NOP_COUNT)
+        # Gen6-P6 (docs/adr/0057): a REAL self-loop now -- jal is real in
+        # OOOCore.v (Gen6-O3), unlike at Gen6-L time when this used flat
+        # nop padding instead (see OOO_TRAILER_NOP_COUNT's own header for
+        # the full real-restart-loop bug that padding approach eventually
+        # hit, once fdiv.s/fsqrt.s's own genuine multi-cycle latency grew
+        # large enough to outrun a FIXED instruction-count margin). Once
+        # PC reaches this jal, it can never advance past it again --
+        # eliminates the race outright rather than widening the margin.
+        out.append("__ooo_halt:")
+        out.append("jal x0, __ooo_halt")
     else:
         # docs/adr/0023-caches.md (Phase G7). fence immediately before the
         # halt spin -- under CACHE_MODE=1 (write-back D$), a store's dirty
