@@ -307,6 +307,24 @@ endfunction
 reg [31:0] aes_tmp1, aes_tmp2, aes_tmp3, aes_rc, aes_w0, aes_w1;
 reg [63:0] aes_sr, aes_sb;
 
+// ADR 0068: AES64* (Zkne/Zknd, Pillar K) is RV64-only by ISA definition
+// (the "64" in every mnemonic) and reads A/B's upper 32 bits directly
+// (A[63:32] etc). At XLEN=32 (PIPELINED), A/B are only 32 bits wide, and a
+// literal `A[63:32]` is a static out-of-range part-select -- Vivado
+// rejects it unconditionally (part-select bounds are checked against the
+// signal's declared width at elaboration, independent of any surrounding
+// `if`; a plain `if (XLEN==64)` guard around the case arms below does NOT
+// avoid this, confirmed by trying it first). A64/B64 are always exactly
+// 64 bits regardless of XLEN -- zero-extended (replication count is 0,
+// i.e. a no-op, when XLEN==64 already, same tolerated idiom as this
+// file's own other zero-replication-count constructs) -- so every AES64*
+// arm below can index them unconditionally. Bit-for-bit identical to the
+// original A[63:32]/B[63:32] etc. when XLEN==64; the XLEN==32 values are
+// architecturally unreachable regardless (PIPELINED's own Control.v never
+// decodes Zkne/Zknd), so what they compute there is a don't-care.
+wire [63:0] A64 = {{(64-XLEN){1'b0}}, A};
+wire [63:0] B64 = {{(64-XLEN){1'b0}}, B};
+
 always@(*)
 begin
     ALUOut = 0;
@@ -698,7 +716,7 @@ case(ALUCtl)
     // direct code read; no ImmGen.v change was needed).
     `ALUCTL_AES64KS1I:
         begin
-            aes_tmp1 = A[63:32];
+            aes_tmp1 = A64[63:32];
             aes_rc   = aes_decode_rcon(B[3:0]);
             aes_tmp2 = (B[3:0] == 4'hA) ? aes_tmp1 : {aes_tmp1[7:0], aes_tmp1[31:8]};  // ror32(tmp1,8)
             aes_tmp3 = aes_subword_fwd(aes_tmp2);
@@ -706,8 +724,8 @@ case(ALUCtl)
         end
     `ALUCTL_AES64KS2:
         begin
-            aes_w0 = A[63:32] ^ B[31:0];
-            aes_w1 = A[63:32] ^ B[31:0] ^ B[63:32];
+            aes_w0 = A64[63:32] ^ B[31:0];
+            aes_w1 = A64[63:32] ^ B[31:0] ^ B64[63:32];
             ALUOut = {aes_w1, aes_w0};
         end
     `ALUCTL_AES64ESM:
@@ -733,7 +751,7 @@ case(ALUCtl)
             ALUOut = aes_apply_inv_sbox_to_each_byte(aes_sr);
         end
     `ALUCTL_AES64IM:
-        ALUOut = {aes_mixcolumn_inv(A[63:32]), aes_mixcolumn_inv(A[31:0])};
+        ALUOut = {aes_mixcolumn_inv(A64[63:32]), aes_mixcolumn_inv(A[31:0])};
 
 endcase
             zero = branch_zero;

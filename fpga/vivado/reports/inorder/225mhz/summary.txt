@@ -1,0 +1,5 @@
+config=inorder
+label=225mhz
+wns_ns=0.518957
+tns_ns=0.000000
+whs_ns=0.087798

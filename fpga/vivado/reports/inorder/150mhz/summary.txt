@@ -1,0 +1,5 @@
+config=inorder
+label=150mhz
+wns_ns=1.428120
+tns_ns=0.000000
+whs_ns=0.091865

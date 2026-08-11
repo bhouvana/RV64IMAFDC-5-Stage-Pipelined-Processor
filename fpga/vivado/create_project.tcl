@@ -41,5 +41,18 @@ set_property top $top_of($config) [current_fileset]
 set_property target_language Verilog [current_project]
 update_compile_order -fileset sources_1
 
+# Boardless study (Phase 2/3 -- no physical I/O exists to place these
+# top-level ports against). A normal (non-OOC) synth_design run tries to
+# place a real I/O buffer + package pin for every top-level port, including
+# the clock -- which failed here on the first real attempt with "IO Clock
+# Placer failed" (Place 30-99), since none of PIPELINED/OOOCore/HeteroSoC's
+# many debug_*/mailbox_*/uart_* ports have a PACKAGE_PIN and there is no
+# board to give them one. `-mode out_of_context` (Vivado's standard flow for
+# implementing a design fragment without top-level physical I/O -- UG901)
+# skips I/O buffer insertion entirely, which is exactly right for this
+# study's own stated objective: analyze the internal processor fabric, not
+# a bitstream-ready top-level chip design.
+set_property -name {STEPS.SYNTH_DESIGN.ARGS.MORE OPTIONS} -value {-mode out_of_context} -objects [get_runs synth_1]
+
 puts "PROJECT_CREATED build_dir=$build_dir top=$top_of($config) part=$part_name"
 close_project

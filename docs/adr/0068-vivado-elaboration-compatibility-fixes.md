@@ -94,6 +94,55 @@ and log here directly, without a fresh approval round each time. Anything
 that changes behavior, is ambiguous, or produces a regression diff still
 stops and asks.
 
+## Third, more substantial issue: AES64* part-selects only valid at XLEN=64 (`ALU.v`)
+
+Fixing the genvar issue unblocked `DCache.v`, exposing a third, structurally
+different failure back in `ALU.v`, this time specific to the `inorder`
+(`PIPELINED`, XLEN=32) config only:
+
+```
+ERROR: [Synth 8-524] part-select [63:32] out of range of prefix 'A' [design/ALU.v:701]
+```
+
+`design/ALU.v` is shared between `PIPELINED` (XLEN=32) and `OOOCore`
+(XLEN=64). The Zkne/Zknd AES64* case arms (Pillar K -- "64" is in every
+mnemonic, they're RV64-only by ISA definition) read `A[63:32]`/`B[63:32]`
+directly. At XLEN=32, `A`/`B` are only 32 bits wide, so `A[63:32]` is a
+*static* out-of-range part-select -- illegal regardless of whether that
+`case` arm is ever reached at runtime (`PIPELINED`'s own `Control.v` never
+decodes Zkne/Zknd; the branch is architecturally dead at XLEN=32, but
+Vivado elaborates every `case` arm structurally regardless of reachability).
+
+Unlike the first two fixes, this is a real architectural-scope finding (the
+K pillar's AES logic was never validated at XLEN=32), not a pure syntax
+nit -- flagged to the user separately, outside the pre-authorized class.
+User's chosen fix: guard the AES64 arms so they elaborate cleanly at
+XLEN=32 too. A plain `if (XLEN==64)` around the arms does **not** work --
+tried first and confirmed insufficient: Verilog part-select bounds are
+checked against a signal's *declared* width at elaboration, unconditionally,
+independent of any enclosing runtime `if` (only a `generate if` skips
+elaborating the untaken branch, and these arms are procedural code inside
+an `always` block, not a `generate` region). The actual fix: two new
+always-64-bit shadow wires,
+
+```verilog
+wire [63:0] A64 = {{(64-XLEN){1'b0}}, A};
+wire [63:0] B64 = {{(64-XLEN){1'b0}}, B};
+```
+
+(zero-extended -- the replication count is a no-op when `XLEN==64` already,
+same tolerated idiom `ALU.v` already uses elsewhere), then every `A[63:32]`/
+`B[63:32]` inside the 7 AES64* arms reads `A64[63:32]`/`B64[63:32]` instead.
+Bit-for-bit identical to the original at XLEN==64 (`OOOCore`, the only
+config where these ops are ever actually reachable); at XLEN==32 the
+computed value is a don't-care, since `PIPELINED` never dispatches these
+ops regardless. `A[31:0]`/`B[31:0]`/`B[3:0]` and bare `A`/`B` passed to the
+`aes_rv64_shiftrows_*` functions were left untouched -- those are already
+valid at any XLEN (a 32-bit actual argument implicitly zero-extends against
+a 64-bit formal function parameter, which is legal Verilog, not the
+violation here). `sim/run_tests.sh`: 152/152, identical output, before and
+after.
+
 ## Alternatives considered
 
 - **Don't fix it; report the Vivado phase as blocked.** Would have been the
