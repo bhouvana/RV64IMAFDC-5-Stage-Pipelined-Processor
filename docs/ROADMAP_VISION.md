@@ -694,17 +694,24 @@ decode gaps (`add.uw`, `sh*add.uw`, `slli.uw`, `ctzw`) found only by `--xlen 64`
 directed tests; `OOOCore.v`'s hardcoded `wordOp=1'b0` is a real, pre-existing gap this phase exposed but
 did not fix (see the ADR's Future improvements).
 
-### 3. K — Cryptography (RISC-V K)
+### 3. K — Cryptography (RISC-V K) — **CLOSED**, `docs/adr/0067`
 
-- AES-related instructions.
-- SHA-related instructions.
-- Carry-less/cryptographic multiplication where applicable.
-- Instruction decoding, OoO scheduling/integration.
-- Verification against known cryptographic test vectors.
-- Benchmarks: hardware-assisted vs. software implementation.
-
-Document precisely which K subextensions/instructions are actually implemented — never claim full K
-support for a partial subset.
+Full ratified Zkn (`Zbkb+Zbkc+Zbkx+Zkne+Zknd+Zknh`, 22 mnemonics: AES encrypt/decrypt/key-schedule,
+SHA-256/512 sigma/sum, carry-less multiply, pack/brev8, nibble/byte crossbar), decoded through the same
+shared `Control.v`/`ALUCtrl.v`/`ALU.v` path Pillar B already established — zero new reservation station,
+zero new ROB/CDB port, AES S-box a single-cycle combinational 256-entry ROM per the user's own explicit
+choice. Real ratified-spec encodings (`riscv-opcodes`) and real reference-model semantics (the ratified
+spec's own pinned Sail source, `riscv/sail-riscv` @ `4feadb75cff594db27ba94c586e0ad6895f9fa50`) — the
+exact AES register-half convention was determined empirically (brute-forced against the real FIPS-197
+AES-128 KAT, which now runs end-to-end through both `design/ALU.v` and an independent `sim/tools/iss.py`
+transcription and matches). 152/152 directed suite (up from 146), 25/25 constrained-random on all 3 axes
+any K mnemonic reaches. Real findings: a missing `ALUCtrl.v` decode arm for the 5 AES R-type ops (Pillar
+K's own gap, found by its OoO integration test) and two real, independent, pre-existing Pillar B bugs in
+`slli.uw` (`ALU.v`'s own 32-bit-truncated shift, `ImmGen.v`'s own 5-bit-instead-of-6-bit shamt slice) —
+both found by this pillar's own constrained-random cross-check, neither a Pillar K issue, both fixed.
+Real, honest remaining backlog (`Zksed`/`Zksh` SM4/SM3, `Zkr` entropy source, `Zkt` timing-independence
+review, an XLEN=32 decode-trap gap for the RV64-only-by-spec sub-encodings, a full AES-128 scalar-vs-
+hardware benchmark) documented in `docs/adr/0067`'s own closure notes, not silently dropped.
 
 ### 4. H — Hypervisor (RISC-V H)
 
