@@ -648,18 +648,22 @@ Five pillars, each a real ISA extension integrated with the Generation 6 OoO cor
 through the existing reservation stations, and retired through the existing ROB — not five standalone
 processors:
 
-### 1. V — Vector Processing — **CLOSED**, `docs/adr/0061` through `0065`
+### 1. V — Vector Processing — **CLOSED**, `docs/adr/0061` through `0066`
 
 Real `vsetvli`/`vsetivli`, real integer vector arithmetic (`vadd`/`vsub`/`vrsub`/`vand`/`vor`/`vxor`/
 `vmin`/`vmax`/`vminu`/`vmaxu`, `.vv`/`.vx`/`.vi`), real full LMUL grouping via a crack-into-microops
-dispatch sequencer, real `vle8/16/32/64.v`/`vse8/16/32/64.v` unit-stride load/store, and real `v0.t`
-masking all execute end-to-end on `design/OOOCore.v` (VLEN=512) — no second processor, the existing OoO
-scheduler/ROB/RS infrastructure throughout, per this pillar's own architectural mandate. New
-`design/VALU.v` (iterative per-element engine) and `design/VLSU.v` (a 3rd requester on the shared memory
-port, 3-way arbitration), both reusing the existing `ReservationStation.v` unmodified. Real, honest
-backlog (mask-writing compares, indexed/strided/segment load-store, the scalar-vs-hardware benchmark
-comparison, vector floating-point) documented in `docs/adr/0065`'s own closure notes, not silently
-dropped. 144/144 directed suite, 10 real bugs found and fixed across the whole arc.
+dispatch sequencer, real `vle8/16/32/64.v`/`vse8/16/32/64.v` unit-stride load/store, real `v0.t`
+masking, real mask-writing compares (`vmseq`/`vmsne`/`vmslt(u)`/`vmsle(u)`/`vmsgt(u)`, LMUL<=1), and a
+real scalar-vs-hardware-vector benchmark comparison (`bench_runner.py --compare-vector`) all execute/
+run end-to-end on `design/OOOCore.v` (VLEN=512) — no second processor, the existing OoO scheduler/ROB/RS
+infrastructure throughout, per this pillar's own architectural mandate. New `design/VALU.v` (iterative
+per-element engine) and `design/VLSU.v` (a 3rd requester on the shared memory port, 3-way arbitration),
+both reusing the existing `ReservationStation.v`. `docs/adr/0066`'s own new benchmark found 2 further
+real bugs (a cross-namespace CDB tag collision, a wrong PRF dispatch-readiness port) neither of Pillar
+V's own earlier isolated tests had ever triggered — fixed via an additive, default-preserving RS port
+mask. Real, honest remaining backlog (indexed/strided/segment load-store, EMUL reshaping, full-LMUL
+compares, vector floating-point) documented in `docs/adr/0066`'s own closure notes, not silently
+dropped. 146/146 directed suite, 12 real bugs found and fixed across the whole arc.
 
 - Vector register file.
 - Vector configuration/state (`vtype`, `vl`).
