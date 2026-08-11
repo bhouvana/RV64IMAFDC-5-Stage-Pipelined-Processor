@@ -100,14 +100,6 @@ always@(*)begin
 
 
 case(opcode)
-    `OPCODE_CUSTOM:
-    begin// custom R-type opcode (currently just ctz, see ALUCtrl.v's FUNCT7_ALT/111 arm)
-
-        ALUOp =`ALUOP_RTYPE;
-        regWrite =1;
-
-    end
-
     `OPCODE_LOAD:
     begin//load inst
 
