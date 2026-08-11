@@ -637,17 +637,107 @@ fuzzer coverage (blocked on `sim/tools/iss.py` having zero AMO support),
 
 ---
 
-## Generation 7 — Vector Processing (v7.0)
+## Generation 7 — Advanced ISA Extensions (v7.0)
 
-*(source material: "Phase K — Vector Processing")*
+*(source material: "Phase K — Vector Processing", expanded per `docs/adr/0059` — not a rename, a real
+scope widening. Generation 6 already closed as the out-of-order generation
+(`docs/adr/0058`); Generation 7 does not add a second OoO effort, it builds ISA-level capability on top
+of the existing `design/OOOCore.v` microarchitecture.)*
+
+Five pillars, each a real ISA extension integrated with the Generation 6 OoO core — decoded, scheduled
+through the existing reservation stations, and retired through the existing ROB — not five standalone
+processors:
+
+### 1. V — Vector Processing
 
 - Vector register file.
-- Vector ALU.
+- Vector configuration/state (`vtype`, `vl`).
+- Vector ALU / execution unit(s).
+- Vector integer arithmetic.
+- Vector logical operations.
+- Vector comparisons.
 - Vector load/store.
-- Mask operations.
-- Vector benchmarks.
+- Vector mask operations.
+- Instruction decoding.
+- Dependency tracking through the OoO scheduler (reservation stations).
+- Execution/retirement through the existing ROB.
+- Vector benchmarks, verified against expected architectural results.
 
-**Release:** RV64 Vector Processor v7.0.
+Must land as a real architectural extension wired into the OoO scheduler, not a bundle of custom
+instructions bolted on the side.
+
+### 2. B — Bit-Manipulation (RISC-V B) — **CLOSED**, `docs/adr/0060`
+
+Full ratified B (Zba+Zbb+Zbs, ~39 mnemonics incl. RV64-only word variants), decoded through the existing
+shared `Control.v`/`ALUCtrl.v`/`ALU.v` path — zero new reservation station, zero new ROB port, zero new
+CDB port, both `riscvpipeline.v` and `OOOCore.v` gained it from the same shared-file edit. `zext.h`
+explicitly out of scope (needs Zbkb, not Zba/Zbb/Zbs — deferred to a future K/crypto-adjacent pillar).
+137/137 directed suite, zero-warning compile, constrained-random clean across every axis (scalar/`--ooo`
+× XLEN 32/64 × Sv32-MMU/Sv39-MMU). Real findings: the project's old custom `ctz` opcode collided with
+real Zbb `andn` and was retired in favor of `ctz`'s real spec encoding; several RV64-only word-variant
+decode gaps (`add.uw`, `sh*add.uw`, `slli.uw`, `ctzw`) found only by `--xlen 64` constrained-random, not
+directed tests; `OOOCore.v`'s hardcoded `wordOp=1'b0` is a real, pre-existing gap this phase exposed but
+did not fix (see the ADR's Future improvements).
+
+### 3. K — Cryptography (RISC-V K)
+
+- AES-related instructions.
+- SHA-related instructions.
+- Carry-less/cryptographic multiplication where applicable.
+- Instruction decoding, OoO scheduling/integration.
+- Verification against known cryptographic test vectors.
+- Benchmarks: hardware-assisted vs. software implementation.
+
+Document precisely which K subextensions/instructions are actually implemented — never claim full K
+support for a partial subset.
+
+### 4. H — Hypervisor (RISC-V H)
+
+- Hypervisor privilege mechanisms.
+- Hypervisor CSRs.
+- Virtualization-related state.
+- Guest execution support, VS-mode support where required.
+- Trap/exception handling, guest/host transitions.
+- Virtualized memory/translation where required by the implemented scope.
+- Instruction decoding, OoO interaction with privileged/virtualization instructions.
+- Verification of hypervisor state transitions and traps.
+
+Clearly distinguish implemented functionality from deferred virtualization work.
+
+### 5. P — Packed-SIMD / DSP (draft/provisional)
+
+The RISC-V P extension is a **draft, not a ratified standard** — never described as ratified, never
+claimed as complete official compliance unless the implementation genuinely satisfies the targeted spec
+version.
+
+- Packed arithmetic operations (add/subtract).
+- Packed logical operations.
+- Packed comparisons.
+- Packed multiply/accumulate where applicable.
+- Packed data manipulation.
+- Packed-SIMD execution unit.
+- Instruction decoding, OoO scheduling/integration.
+- Verification.
+- DSP/SIMD-oriented benchmarks.
+
+### Architectural integration
+
+Target architecture: `RV64IMAFDC + Generation 6 OoO microarchitecture + B + V + K + H + P` — **one core**,
+not one processor per extension. Reuse Generation 6's own machinery wherever architecturally appropriate:
+register renaming, physical register file, reservation stations, Tomasulo/dynamic scheduling, reorder
+buffer, load/store queue, speculative execution, branch prediction, existing execution/retirement
+infrastructure. Where a pillar needs specialized execution resources (vector unit, crypto unit,
+packed-SIMD unit), add them integrated with the existing OoO scheduler and retirement model, not as
+side-channel logic.
+
+### Verification bar
+
+Not done merely because instructions decode. Per extension: directed instruction tests, corner-case
+tests, architectural state tests, OoO integration tests, benchmarks with expected-result comparisons,
+and tracked coverage/known limitations. V, K, and P additionally need scalar-vs-hardware performance
+comparisons. H additionally needs privilege/trap/guest-state validation.
+
+**Release:** RV64 Advanced ISA Processor v7.0.
 
 ---
 
@@ -713,7 +803,7 @@ Gen 3  Linux-capable RV64 Processor
 Gen 4  Advanced Memory Architecture
 Gen 5  Multicore SoC
 Gen 6  Out-of-Order Processor
-Gen 7  Vector Processor
+Gen 7  Advanced ISA Extensions (V + B + K + H + P, on the Gen 6 OoO core)
 Gen 8  Secure & Reliable Processor
 Gen 9  Complete FPGA SoC
 Gen 10 CPU Architecture Laboratory

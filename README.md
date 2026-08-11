@@ -87,7 +87,7 @@ This project tracks its own long-term roadmap as a sequence of "generations" (`d
 | **Gen 1** — RV32IMAF Research Processor | Base pipeline, M-extension, F-extension, Sv32 MMU, caches, branch prediction, formal verification | ✅ **CLOSED** |
 | **Gen 2** — RV64 Processor | Full XLEN=64 migration, RV64-only instruction family | ✅ **CLOSED** |
 | **Gen 3** — Linux-capable RV64 Processor | Privilege/MMU (Sv39), UART/CLINT Linux-compat, SBI firmware, RVC, A-extension, real Linux boot attempt | ✅ **CLOSED**, boot progress ongoing — see below |
-| Gen 4-10 | Advanced memory, multicore, out-of-order, vector, security, FPGA SoC, configurable research platform | Not started — full plan in `docs/ROADMAP_VISION.md` |
+| Gen 4-10 | Advanced memory, multicore, out-of-order, advanced ISA extensions (vector/bit-manipulation/crypto/hypervisor/packed-SIMD), security, FPGA SoC, configurable research platform | Not started — full plan in `docs/ROADMAP_VISION.md` |
 
 Generation 3 closed with a real, substantial result; the boot attempt itself is still an active,
 honestly-tracked effort — see the next section for where it stands now.
@@ -232,7 +232,7 @@ Linux-compat redesign), and `0035` (supervisor-interrupt path) for the full desi
 | Compiled-C toolchain (real GCC → this core) | ✅ Infrastructure verified end-to-end |
 | FPGA real-hardware validation | 🚧 Scaffolding hardened, not yet run against a real toolchain or board |
 | Signal-naming/port-ordering consistency pass | 🚧 Deliberately deferred |
-| Multicore, out-of-order, vector, dual-issue | ⏳ Not started (Generations 4+) |
+| Multicore, out-of-order, advanced ISA extensions (vector/B/K/H/P), dual-issue | ⏳ Not started (Generations 4+) |
 
 ## Verification
 
