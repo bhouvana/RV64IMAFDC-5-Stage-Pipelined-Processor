@@ -75,7 +75,8 @@ module OOOCore #(
     parameter FPREG_BITS = $clog2(NUM_FPREGS),
     parameter ROB_IDX_BITS = $clog2(ROB_ENTRIES),
     // Reservation-station payload: {use_forced_a, use_link_b,
-    // forced_a_value[XLEN-1:0], ALUSrc, ALUCtl[4:0], imm[XLEN-1:0]}.
+    // forced_a_value[XLEN-1:0], ALUSrc, ALUCtl[5:0], imm[XLEN-1:0]}.
+    // ALUCtl widened 5->6 bits for the B extension (docs/adr/0060).
     // ALUSrc tells the execute step whether operand B is the decoded
     // immediate (I-type) or PhysicalRegisterFile's own src2 read
     // (R-type) -- see the execute section below. Gen6-O (docs/adr/0051):
@@ -88,7 +89,7 @@ module OOOCore #(
     // captured once at DISPATCH time (when the real value -- 0, this
     // instruction's own PC, or the CSR's own current value -- is known)
     // and carried through RS_ALU exactly like ALUSrc/imm already are.
-    parameter PAYLOAD_BITS = 1 + 1 + XLEN + 1 + 5 + XLEN
+    parameter PAYLOAD_BITS = 1 + 1 + XLEN + 1 + 6 + XLEN
 )(
     input wire clk,
     input wire rst,   // active-low, same convention as every other
@@ -186,8 +187,8 @@ Control #(.XLEN(XLEN)) m_Control(
     .illegalOpcode(illegalOpcode_c), .fRegWrite(fRegWrite_c)
 );
 
-wire [4:0] ALUCtl_d;
-ALUCtrl m_ALUCtrl(.ALUOp(ALUOp_c), .funct7_c(funct7_c), .funct3_c(funct3_c), .ALUCtl(ALUCtl_d));
+wire [5:0] ALUCtl_d;
+ALUCtrl m_ALUCtrl(.ALUOp(ALUOp_c), .funct7_c(funct7_c), .funct3_c(funct3_c), .rs2_c(rs2_areg), .ALUCtl(ALUCtl_d));
 
 wire [XLEN-1:0] imm_d;
 ImmGen #(.Width(XLEN)) m_ImmGen(.inst(inst_full), .imm(imm_d));
@@ -577,8 +578,8 @@ Control #(.XLEN(XLEN)) m_Control_1(
     .illegalOpcode(illegalOpcode_c_1), .fRegWrite(fRegWrite_c_1)
 );
 
-wire [4:0] ALUCtl_d_1;
-ALUCtrl m_ALUCtrl_1(.ALUOp(ALUOp_c_1), .funct7_c(funct7_c_1), .funct3_c(funct3_c_1), .ALUCtl(ALUCtl_d_1));
+wire [5:0] ALUCtl_d_1;
+ALUCtrl m_ALUCtrl_1(.ALUOp(ALUOp_c_1), .funct7_c(funct7_c_1), .funct3_c(funct3_c_1), .rs2_c(rs2_areg_1), .ALUCtl(ALUCtl_d_1));
 
 wire [XLEN-1:0] imm_d_1;
 ImmGen #(.Width(XLEN)) m_ImmGen_1(.inst(inst_full1), .imm(imm_d_1));
@@ -1691,13 +1692,14 @@ DataMemoryBRAM #(.SIZE_BYTES(DMEM_SIZE_BYTES), .XLEN(XLEN)) m_DMem(
 // ==========================================================================
 // Gen6-O: use_forced_a/use_link_b/forced_a_value sit ABOVE the original
 // {ALUSrc, ALUCtl, imm} sub-layout (which keeps its own original bit
-// positions unchanged, [XLEN+5:0]) -- see this module's own
+// positions unchanged, [XLEN+6:0] -- widened from [XLEN+5:0] when ALUCtl
+// grew 5->6 bits, docs/adr/0060) -- see this module's own
 // PAYLOAD_BITS comment for the exact layout.
 wire issue_use_forced_a    = issue_payload[PAYLOAD_BITS-1];
 wire issue_use_link_b      = issue_payload[PAYLOAD_BITS-2];
 wire [XLEN-1:0] issue_forced_a_value = issue_payload[PAYLOAD_BITS-3 -: XLEN];
-wire issue_alusrc         = issue_payload[XLEN+5];
-wire [4:0] issue_aluctl    = issue_payload[XLEN+4 -: 5];
+wire issue_alusrc         = issue_payload[XLEN+6];  // shifted up by 1 vs. before -- ALUCtl widened 5->6 bits (docs/adr/0060)
+wire [5:0] issue_aluctl    = issue_payload[XLEN+5 -: 6];
 wire [XLEN-1:0] issue_imm  = issue_payload[XLEN-1:0];
 
 wire [XLEN-1:0] alu_a = issue_use_forced_a ? issue_forced_a_value : prf_rdata2;

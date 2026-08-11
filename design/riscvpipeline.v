@@ -338,7 +338,7 @@ wire [XLEN-1:0] readData2;
 wire [XLEN-1:0] pc_final;
 wire [XLEN-1:0] imm_reg_val;
 wire zero;
-wire [4:0] ALUCtl;
+wire [5:0] ALUCtl;
 wire [XLEN-1:0] imm;
 wire [XLEN-1:0] ALUOut;
 wire [XLEN-1:0] imm_sum;
@@ -1410,6 +1410,7 @@ endgenerate
     //.functi(inst_regde)
     .funct7_c(funct7_regde),
     .funct3_c(funct3_regde),
+    .rs2_c(readReg2_regde),  // inst[24:20] -- B-extension clz/ctz/cpop/sext.b/sext.h selector (docs/adr/0060)
     .ALUCtl(ALUCtl)
     );
 //
@@ -2418,7 +2419,7 @@ endgenerate
     // across the whole suite by the Python driver. Zero synthesis/simulation
     // impact when the macro isn't defined.
     `ifdef COVERAGE
-    integer cov_alu_ctl [0:31];
+    integer cov_alu_ctl [0:63];  // widened 32->64 -- ALUCtl grew 5->6 bits (docs/adr/0060)
     integer cov_branch_taken [0:7];
     integer cov_branch_not_taken [0:7];
     integer cov_stall_cycles;
@@ -2428,7 +2429,7 @@ endgenerate
     integer cov_i;
     integer cov_fd;
     initial begin
-        for (cov_i = 0; cov_i < 32; cov_i = cov_i + 1) cov_alu_ctl[cov_i] = 0;
+        for (cov_i = 0; cov_i < 64; cov_i = cov_i + 1) cov_alu_ctl[cov_i] = 0;
         for (cov_i = 0; cov_i < 8; cov_i = cov_i + 1) begin
             cov_branch_taken[cov_i] = 0;
             cov_branch_not_taken[cov_i] = 0;
@@ -2459,7 +2460,7 @@ endgenerate
     task dump_coverage;
         begin
             cov_fd = $fopen("coverage.txt", "w");
-            for (cov_i = 0; cov_i < 32; cov_i = cov_i + 1)
+            for (cov_i = 0; cov_i < 64; cov_i = cov_i + 1)
                 $fdisplay(cov_fd, "alu_ctl %0d %0d", cov_i, cov_alu_ctl[cov_i]);
             for (cov_i = 0; cov_i < 8; cov_i = cov_i + 1) begin
                 $fdisplay(cov_fd, "branch_taken %0d %0d", cov_i, cov_branch_taken[cov_i]);
