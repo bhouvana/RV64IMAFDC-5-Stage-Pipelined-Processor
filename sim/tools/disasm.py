@@ -111,7 +111,14 @@ def disasm(word, xlen=32):
                       (0b0000101, 0b100): "min", (0b0000101, 0b101): "minu", (0b0000101, 0b110): "max", (0b0000101, 0b111): "maxu",
                       (0b0110000, 0b001): "rol", (0b0110000, 0b101): "ror",
                       (0b0010000, 0b010): "sh1add", (0b0010000, 0b100): "sh2add", (0b0010000, 0b110): "sh3add",
-                      (0b0100100, 0b001): "bclr", (0b0100100, 0b101): "bext", (0b0110100, 0b001): "binv", (0b0010100, 0b001): "bset"}
+                      (0b0100100, 0b001): "bclr", (0b0100100, 0b101): "bext", (0b0110100, 0b001): "binv", (0b0010100, 0b001): "bset",
+                      # Pillar K (docs/adr/0059 Gen7-K7)
+                      (0b0000101, 0b001): "clmul", (0b0000101, 0b011): "clmulh",
+                      (0b0000100, 0b100): "pack", (0b0000100, 0b111): "packh",
+                      (0b0010100, 0b010): "xperm4", (0b0010100, 0b100): "xperm8",
+                      (0b0011011, 0b000): "aes64esm", (0b0011001, 0b000): "aes64es",
+                      (0b0011111, 0b000): "aes64dsm", (0b0011101, 0b000): "aes64ds",
+                      (0b0111111, 0b000): "aes64ks2"}
         if (f7, f3) in bext_names:
             return f"{bext_names[(f7, f3)]} x{rd},x{rs1},x{rs2}"
         names = {(FUNCT7_BASE, 0): "add", (FUNCT7_ALT, 0): "sub", (FUNCT7_BASE, 1): "sll",
@@ -144,6 +151,18 @@ def disasm(word, xlen=32):
             return f"orc.b x{rd},x{rs1}"
         if f3 == 5 and imm12 in (0x698, 0x6B8):
             return f"rev8 x{rd},x{rs1}"
+        # Pillar K (docs/adr/0059 Gen7-K7)
+        if f3 == 5 and imm12 == 0x687:
+            return f"brev8 x{rd},x{rs1}"
+        if f3 == 1 and imm12 in (0x100, 0x101, 0x102, 0x103, 0x104, 0x105, 0x106, 0x107):
+            names_sha = {0x100: "sha256sum0", 0x101: "sha256sum1", 0x102: "sha256sig0", 0x103: "sha256sig1",
+                         0x104: "sha512sum0", 0x105: "sha512sum1", 0x106: "sha512sig0", 0x107: "sha512sig1"}
+            return f"{names_sha[imm12]} x{rd},x{rs1}"
+        if f3 == 1 and f6 == 0b001100:  # aes64im (rs2_c==0) / aes64ks1i (rs2_c[4]=1)
+            rs2_c = (word >> 20) & 0x1F
+            if rs2_c == 0:
+                return f"aes64im x{rd},x{rs1}"
+            return f"aes64ks1i x{rd},x{rs1},{rs2_c & 0xF}"
         if f3 in (1, 5):
             # Generation 2: 6-bit shamt (inst[25:20]) + 6-bit funct6
             # (inst[31:26]) at xlen>=64, matching design/ImmGen.v/
@@ -167,7 +186,8 @@ def disasm(word, xlen=32):
         # B extension, RV64-only word variants (docs/adr/0060).
         w_bext = {(0b0110000, 0b001): "rolw", (0b0110000, 0b101): "rorw",
                   (0b0000100, 0b000): "add.uw",
-                  (0b0010000, 0b010): "sh1add.uw", (0b0010000, 0b100): "sh2add.uw", (0b0010000, 0b110): "sh3add.uw"}
+                  (0b0010000, 0b010): "sh1add.uw", (0b0010000, 0b100): "sh2add.uw", (0b0010000, 0b110): "sh3add.uw",
+                  (0b0000100, 0b100): "packw"}  # Pillar K (docs/adr/0059 Gen7-K7)
         if (f7, f3) in w_bext:
             return f"{w_bext[(f7, f3)]} x{rd},x{rs1},x{rs2}"
         names = {(FUNCT7_BASE, 0): "addw", (FUNCT7_ALT, 0): "subw", (FUNCT7_BASE, 1): "sllw",

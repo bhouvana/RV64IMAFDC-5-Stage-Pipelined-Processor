@@ -529,10 +529,19 @@ case(ALUCtl)
     `ALUCTL_SH3ADD: ALUOut = wordOp ? (({{(XLEN-32){1'b0}}, A[31:0]} << 3) + B) : ((A << 3) + B);
     `ALUCTL_ADD_UW: ALUOut = {{(XLEN-32){1'b0}}, A[31:0]} + B;
     `ALUCTL_SLLI_UW:
-        begin
-            w32 = A[31:0] << B[4:0];
-            ALUOut = {{(XLEN-32){1'b0}}, w32};  // zero-extended, NOT sign-extended -- distinct from ordinary wordOp shifts
-        end
+        // Pillar K random-test finding (Gen7-K7): the old `w32 = A[31:0] <<
+        // B[4:0]` truncated the shift to 32 bits BEFORE zero-extending,
+        // silently discarding every bit shifted past bit31 -- real spec
+        // semantics zero-extend A[31:0] to XLEN FIRST, then shift left by
+        // the full 6-bit shamt (0-63) within that width. A real,
+        // pre-existing bug since docs/adr/0060 (Pillar B) added this op;
+        // never triggered by any prior random seed until Pillar K's own
+        // random_gen.py additions happened to produce shamt>=32 with a
+        // nonzero high bit in play. Also widened B's slice 4:0->
+        // SHAMT_WIDTH-1:0 (5->6 bits) to match slli.uw's real 6-bit shamt
+        // (riscv_defs.vh's own FUNCT6_ZBA_SLLIUW comment already documented
+        // the field is 6 bits; this ALU.v arm just never used the full width).
+        ALUOut = ({{(XLEN-32){1'b0}}, A[31:0]} << B[SHAMT_WIDTH-1:0]);
 
     // RV32M multiply -- single-cycle is a reasonable simplification for
     // multiply (real FPGA/ASIC flows commonly do support single- or

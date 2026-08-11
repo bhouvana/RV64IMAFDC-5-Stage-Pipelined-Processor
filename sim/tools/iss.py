@@ -563,6 +563,211 @@ def f_cvt_from_int(a_bits, rm, unsigned):
     return f32_round_from_fraction(sign, Fraction(magnitude), rm)
 
 
+# ---- Pillar K (docs/adr/0059 Gen7-K7) AES support functions ----
+# Same source as design/ALU.v's own AES ROMs/functions: the ratified
+# scalar-crypto spec's reference Sail model (riscv/sail-riscv,
+# model/riscv_types_kext.sail, at the exact commit riscv/riscv-crypto's own
+# .gitmodules pins -- 4feadb75cff594db27ba94c586e0ad6895f9fa50). Kept as an
+# independent transcription (not imported from the RTL) so this ISS is a
+# genuine cross-check, not a copy that would silently agree with an RTL bug.
+_AES_SBOX_FWD = [
+    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16,
+]
+_AES_SBOX_INV = [
+    0x52,0x09,0x6a,0xd5,0x30,0x36,0xa5,0x38,0xbf,0x40,0xa3,0x9e,0x81,0xf3,0xd7,0xfb,
+    0x7c,0xe3,0x39,0x82,0x9b,0x2f,0xff,0x87,0x34,0x8e,0x43,0x44,0xc4,0xde,0xe9,0xcb,
+    0x54,0x7b,0x94,0x32,0xa6,0xc2,0x23,0x3d,0xee,0x4c,0x95,0x0b,0x42,0xfa,0xc3,0x4e,
+    0x08,0x2e,0xa1,0x66,0x28,0xd9,0x24,0xb2,0x76,0x5b,0xa2,0x49,0x6d,0x8b,0xd1,0x25,
+    0x72,0xf8,0xf6,0x64,0x86,0x68,0x98,0x16,0xd4,0xa4,0x5c,0xcc,0x5d,0x65,0xb6,0x92,
+    0x6c,0x70,0x48,0x50,0xfd,0xed,0xb9,0xda,0x5e,0x15,0x46,0x57,0xa7,0x8d,0x9d,0x84,
+    0x90,0xd8,0xab,0x00,0x8c,0xbc,0xd3,0x0a,0xf7,0xe4,0x58,0x05,0xb8,0xb3,0x45,0x06,
+    0xd0,0x2c,0x1e,0x8f,0xca,0x3f,0x0f,0x02,0xc1,0xaf,0xbd,0x03,0x01,0x13,0x8a,0x6b,
+    0x3a,0x91,0x11,0x41,0x4f,0x67,0xdc,0xea,0x97,0xf2,0xcf,0xce,0xf0,0xb4,0xe6,0x73,
+    0x96,0xac,0x74,0x22,0xe7,0xad,0x35,0x85,0xe2,0xf9,0x37,0xe8,0x1c,0x75,0xdf,0x6e,
+    0x47,0xf1,0x1a,0x71,0x1d,0x29,0xc5,0x89,0x6f,0xb7,0x62,0x0e,0xaa,0x18,0xbe,0x1b,
+    0xfc,0x56,0x3e,0x4b,0xc6,0xd2,0x79,0x20,0x9a,0xdb,0xc0,0xfe,0x78,0xcd,0x5a,0xf4,
+    0x1f,0xdd,0xa8,0x33,0x88,0x07,0xc7,0x31,0xb1,0x12,0x10,0x59,0x27,0x80,0xec,0x5f,
+    0x60,0x51,0x7f,0xa9,0x19,0xb5,0x4a,0x0d,0x2d,0xe5,0x7a,0x9f,0x93,0xc9,0x9c,0xef,
+    0xa0,0xe0,0x3b,0x4d,0xae,0x2a,0xf5,0xb0,0xc8,0xeb,0xbb,0x3c,0x83,0x53,0x99,0x61,
+    0x17,0x2b,0x04,0x7e,0xba,0x77,0xd6,0x26,0xe1,0x69,0x14,0x63,0x55,0x21,0x0c,0x7d,
+]
+_AES_RCON = [1,2,4,8,0x10,0x20,0x40,0x80,0x1b,0x36] + [0]*6
+
+
+def _aes_xt2(x):
+    x <<= 1
+    if x & 0x100:
+        x ^= 0x11b
+    return x & 0xff
+
+
+def _aes_xt3(x):
+    return x ^ _aes_xt2(x)
+
+
+def _aes_mixcolumn_fwd(x):
+    s0, s1, s2, s3 = x & 0xff, (x >> 8) & 0xff, (x >> 16) & 0xff, (x >> 24) & 0xff
+    b0 = _aes_xt2(s0) ^ _aes_xt3(s1) ^ s2 ^ s3
+    b1 = s0 ^ _aes_xt2(s1) ^ _aes_xt3(s2) ^ s3
+    b2 = s0 ^ s1 ^ _aes_xt2(s2) ^ _aes_xt3(s3)
+    b3 = _aes_xt3(s0) ^ s1 ^ s2 ^ _aes_xt2(s3)
+    return (b3 << 24) | (b2 << 16) | (b1 << 8) | b0
+
+
+def _aes_gfmul(x, y):
+    r = 0
+    if y & 1: r ^= x
+    if y & 2: r ^= _aes_xt2(x)
+    if y & 4: r ^= _aes_xt2(_aes_xt2(x))
+    if y & 8: r ^= _aes_xt2(_aes_xt2(_aes_xt2(x)))
+    return r
+
+
+def _aes_mixcolumn_inv(x):
+    s0, s1, s2, s3 = x & 0xff, (x >> 8) & 0xff, (x >> 16) & 0xff, (x >> 24) & 0xff
+    b0 = _aes_gfmul(s0,0xE) ^ _aes_gfmul(s1,0xB) ^ _aes_gfmul(s2,0xD) ^ _aes_gfmul(s3,0x9)
+    b1 = _aes_gfmul(s0,0x9) ^ _aes_gfmul(s1,0xE) ^ _aes_gfmul(s2,0xB) ^ _aes_gfmul(s3,0xD)
+    b2 = _aes_gfmul(s0,0xD) ^ _aes_gfmul(s1,0x9) ^ _aes_gfmul(s2,0xE) ^ _aes_gfmul(s3,0xB)
+    b3 = _aes_gfmul(s0,0xB) ^ _aes_gfmul(s1,0xD) ^ _aes_gfmul(s2,0x9) ^ _aes_gfmul(s3,0xE)
+    return (b3 << 24) | (b2 << 16) | (b1 << 8) | b0
+
+
+def _aes_subword_fwd(x):
+    return ((_AES_SBOX_FWD[(x >> 24) & 0xff] << 24) | (_AES_SBOX_FWD[(x >> 16) & 0xff] << 16) |
+            (_AES_SBOX_FWD[(x >> 8) & 0xff] << 8) | _AES_SBOX_FWD[x & 0xff])
+
+
+def _aes_getbyte(x, i):
+    return (x >> (8 * i)) & 0xff
+
+
+def _aes_sbox_bytes64(x, inv=False):
+    tbl = _AES_SBOX_INV if inv else _AES_SBOX_FWD
+    r = 0
+    for i in range(8):
+        r |= tbl[_aes_getbyte(x, i)] << (8 * i)
+    return r
+
+
+def _aes_shiftrows_fwd(rs2, rs1):
+    g = _aes_getbyte
+    return ((g(rs1,3)<<56)|(g(rs2,6)<<48)|(g(rs2,1)<<40)|(g(rs1,4)<<32)|
+            (g(rs2,7)<<24)|(g(rs2,2)<<16)|(g(rs1,5)<<8)|g(rs1,0))
+
+
+def _aes_shiftrows_inv(rs2, rs1):
+    g = _aes_getbyte
+    return ((g(rs2,3)<<56)|(g(rs2,6)<<48)|(g(rs1,1)<<40)|(g(rs1,4)<<32)|
+            (g(rs1,7)<<24)|(g(rs2,2)<<16)|(g(rs2,5)<<8)|g(rs1,0))
+
+
+def aes64esm(rs1, rs2):
+    sr = _aes_shiftrows_fwd(rs2, rs1)
+    sb = _aes_sbox_bytes64(sr)
+    return (_aes_mixcolumn_fwd((sb >> 32) & 0xffffffff) << 32) | _aes_mixcolumn_fwd(sb & 0xffffffff)
+
+
+def aes64es(rs1, rs2):
+    return _aes_sbox_bytes64(_aes_shiftrows_fwd(rs2, rs1))
+
+
+def aes64dsm(rs1, rs2):
+    sr = _aes_shiftrows_inv(rs2, rs1)
+    sb = _aes_sbox_bytes64(sr, inv=True)
+    return (_aes_mixcolumn_inv((sb >> 32) & 0xffffffff) << 32) | _aes_mixcolumn_inv(sb & 0xffffffff)
+
+
+def aes64ds(rs1, rs2):
+    return _aes_sbox_bytes64(_aes_shiftrows_inv(rs2, rs1), inv=True)
+
+
+def aes64ks1i(rs1, rnum):
+    tmp1 = (rs1 >> 32) & 0xffffffff
+    rc = _AES_RCON[rnum]
+    tmp2 = tmp1 if rnum == 0xA else (((tmp1 >> 8) | (tmp1 << 24)) & 0xffffffff)
+    tmp3 = _aes_subword_fwd(tmp2)
+    v = (tmp3 ^ rc) & 0xffffffff
+    return (v << 32) | v
+
+
+def aes64ks2(rs1, rs2):
+    w0 = ((rs1 >> 32) ^ (rs2 & 0xffffffff)) & 0xffffffff
+    w1 = (w0 ^ (rs2 >> 32)) & 0xffffffff
+    return (w1 << 32) | w0
+
+
+def aes64im(rs1):
+    return (_aes_mixcolumn_inv((rs1 >> 32) & 0xffffffff) << 32) | _aes_mixcolumn_inv(rs1 & 0xffffffff)
+
+
+def _ror(x, n, bits):
+    return ((x >> n) | (x << (bits - n))) & ((1 << bits) - 1)
+
+
+def sha256sig0(x):
+    x &= 0xffffffff
+    return (_ror(x,7,32) ^ _ror(x,18,32) ^ (x >> 3)) & 0xffffffff
+
+
+def sha256sig1(x):
+    x &= 0xffffffff
+    return (_ror(x,17,32) ^ _ror(x,19,32) ^ (x >> 10)) & 0xffffffff
+
+
+def sha256sum0(x):
+    x &= 0xffffffff
+    return (_ror(x,2,32) ^ _ror(x,13,32) ^ _ror(x,22,32)) & 0xffffffff
+
+
+def sha256sum1(x):
+    x &= 0xffffffff
+    return (_ror(x,6,32) ^ _ror(x,11,32) ^ _ror(x,25,32)) & 0xffffffff
+
+
+def sha512sig0(x):
+    x &= 0xffffffffffffffff
+    return (_ror(x,1,64) ^ _ror(x,8,64) ^ (x >> 7)) & 0xffffffffffffffff
+
+
+def sha512sig1(x):
+    x &= 0xffffffffffffffff
+    return (_ror(x,19,64) ^ _ror(x,61,64) ^ (x >> 6)) & 0xffffffffffffffff
+
+
+def sha512sum0(x):
+    x &= 0xffffffffffffffff
+    return (_ror(x,28,64) ^ _ror(x,34,64) ^ _ror(x,39,64)) & 0xffffffffffffffff
+
+
+def sha512sum1(x):
+    x &= 0xffffffffffffffff
+    return (_ror(x,14,64) ^ _ror(x,18,64) ^ _ror(x,41,64)) & 0xffffffffffffffff
+
+
+def brev8(x, xl):
+    out = 0
+    for i in range(xl // 8):
+        byte = (x >> (i * 8)) & 0xFF
+        rev = int(f"{byte:08b}"[::-1], 2)
+        out |= rev << (i * 8)
+    return out
+
+
 class ISS:
     def __init__(self, mem_size=128, xlen=32):
         # Generation 2 (Phase M). Default 32 is bit-exact with every prior
@@ -1076,6 +1281,51 @@ class ISS:
                 self.wr(rd, A ^ (1 << (B & (xl - 1))))
             elif f7 == 0b0010100 and f3 == 0b001:  # bset
                 self.wr(rd, A | (1 << (B & (xl - 1))))
+            # Pillar K (docs/adr/0059 Gen7-K7). clmul/clmulh land in
+            # FUNCT7_ZBB_MINMAX's own free funct3 slots (see design/
+            # riscv_defs.vh); truncate-then-XOR is bit-exact with the real
+            # full-width carry-less product's low/high XLEN bits.
+            elif f7 == 0b0000101 and f3 == 0b001:  # clmul
+                res = 0
+                for i in range(xl):
+                    if (B >> i) & 1:
+                        res ^= (A << i)
+                self.wr(rd, self.uxlen(res))
+            elif f7 == 0b0000101 and f3 == 0b011:  # clmulh
+                res = 0
+                for i in range(1, xl):
+                    if (B >> i) & 1:
+                        res ^= (A >> (xl - i))
+                self.wr(rd, self.uxlen(res))
+            elif f7 == 0b0000100 and f3 == 0b100:  # pack
+                half = xl // 2
+                self.wr(rd, self.uxlen(((B & ((1 << half) - 1)) << half) | (A & ((1 << half) - 1))))
+            elif f7 == 0b0000100 and f3 == 0b111:  # packh
+                self.wr(rd, ((B & 0xFF) << 8) | (A & 0xFF))
+            elif f7 == 0b0010100 and f3 == 0b010:  # xperm4
+                res = 0
+                for i in range(xl // 4):
+                    idx = (B >> (4 * i)) & 0xF
+                    if idx < xl // 4:
+                        res |= ((A >> (4 * idx)) & 0xF) << (4 * i)
+                self.wr(rd, res)
+            elif f7 == 0b0010100 and f3 == 0b100:  # xperm8
+                res = 0
+                for i in range(xl // 8):
+                    idx = (B >> (8 * i)) & 0xFF
+                    if idx < xl // 8:
+                        res |= ((A >> (8 * idx)) & 0xFF) << (8 * i)
+                self.wr(rd, res)
+            elif f7 == 0b0011011 and f3 == 0b000:  # aes64esm
+                self.wr(rd, aes64esm(A, B))
+            elif f7 == 0b0011001 and f3 == 0b000:  # aes64es
+                self.wr(rd, aes64es(A, B))
+            elif f7 == 0b0011111 and f3 == 0b000:  # aes64dsm
+                self.wr(rd, aes64dsm(A, B))
+            elif f7 == 0b0011101 and f3 == 0b000:  # aes64ds
+                self.wr(rd, aes64ds(A, B))
+            elif f7 == 0b0111111 and f3 == 0b000:  # aes64ks2
+                self.wr(rd, aes64ks2(A, B))
             else:
                 if f3 == 0 and f7 == 0:
                     res = self.uxlen(A + B)
@@ -1175,6 +1425,12 @@ class ISS:
                     self.wr(rd, (u32(A) << 3) + B)
                     self.pc = next_pc
                     return
+                elif f7 == 0b0000100 and f3 == 0b100:  # packw (Pillar K, docs/adr/0059 Gen7-K7)
+                    lo = A & 0xFFFF
+                    hi = B & 0xFFFF
+                    self.wr(rd, sext((hi << 16) | lo, 32))
+                    self.pc = next_pc
+                    return
                 else:
                     raise ValueError(f"unknown OP-32 f3={f3} f7={f7}")
             self.wr(rd, s32(res32))
@@ -1256,6 +1512,29 @@ class ISS:
                 for i in range(nbytes):
                     out |= ((a >> (i * 8)) & 0xFF) << ((nbytes - 1 - i) * 8)
                 self.wr(rd, out)
+                self.pc = next_pc
+                return
+            elif f3 == 5 and imm12 == 0x687:  # brev8 (Pillar K, docs/adr/0059 Gen7-K7)
+                self.wr(rd, brev8(self.uxlen(A), xl))
+                self.pc = next_pc
+                return
+            elif f3 == 1 and f6 == 0b000100:  # sha256/512 sig0/1,sum0/1 -- rs2_c selects which
+                rs2_c = (word >> 20) & 0x1F
+                sha_fn = {0:sha256sum0, 1:sha256sum1, 2:sha256sig0, 3:sha256sig1,
+                          4:sha512sum0, 5:sha512sum1, 6:sha512sig0, 7:sha512sig1}.get(rs2_c)
+                if sha_fn is None:
+                    raise ValueError(f"unknown sha rs2_c={rs2_c}")
+                res = sha_fn(A)
+                # sha256* return a 32-bit result, sign-extended to XLEN; sha512* are already XLEN-wide.
+                self.wr(rd, sext(res, 32) if rs2_c < 4 else res)
+                self.pc = next_pc
+                return
+            elif f3 == 1 and f6 == 0b001100:  # aes64im (rs2_c==0) / aes64ks1i (rs2_c[4]=1)
+                rs2_c = (word >> 20) & 0x1F
+                if rs2_c == 0:
+                    self.wr(rd, aes64im(A))
+                else:
+                    self.wr(rd, aes64ks1i(A, rs2_c & 0xF))
                 self.pc = next_pc
                 return
             elif f3 in (1, 5):

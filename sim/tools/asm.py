@@ -112,6 +112,15 @@ R_TYPE = {  # mnemonic: (full funct7, funct3)
     "rol": (0b0110000, 0b001), "ror": (0b0110000, 0b101),
     "sh1add": (0b0010000, 0b010), "sh2add": (0b0010000, 0b100), "sh3add": (0b0010000, 0b110),
     "bclr": (0b0100100, 0b001), "bext": (0b0100100, 0b101), "binv": (0b0110100, 0b001), "bset": (0b0010100, 0b001),
+    # Pillar K (docs/adr/0059 Gen7-K7), full Zkn -- verified against
+    # riscv-opcodes rv_zbc/rv_zbkb/rv_zbkx/rv64_zkne/rv64_zknd, same
+    # sources design/riscv_defs.vh's own K-extension defines cite.
+    "clmul": (0b0000101, 0b001), "clmulh": (0b0000101, 0b011),
+    "pack": (0b0000100, 0b100), "packh": (0b0000100, 0b111),
+    "xperm4": (0b0010100, 0b010), "xperm8": (0b0010100, 0b100),
+    "aes64esm": (0b0011011, 0b000), "aes64es": (0b0011001, 0b000),
+    "aes64dsm": (0b0011111, 0b000), "aes64ds": (0b0011101, 0b000),
+    "aes64ks2": (0b0111111, 0b000),
 }
 I_TYPE = {  # mnemonic: funct3 (funct7[5] used only by srli/srai)
     "addi": 0b000, "slli": 0b001, "slti": 0b010, "sltiu": 0b011,
@@ -133,6 +142,18 @@ I_TYPE_BEXT_FIXED = {
     "sext.b": (0x604, 0b001), "sext.h": (0x605, 0b001), "orc.b": (0x287, 0b101),
     # rev8's own immediate is XLEN-dependent (0x698 at 32, 0x6b8 at 64) --
     # handled separately in assemble(), not via this fixed dict.
+    # Pillar K (docs/adr/0059 Gen7-K7) rs1-only, fixed-immediate ops -- same
+    # shape as clz/ctz/cpop above, imm12 values taken directly from the
+    # verified riscv-opcodes encodings (rv_zbkb's own literal 0x687 for
+    # brev8; the sha256/512 group's imm12 = funct7(0001000)<<5 | rs2-selector,
+    # matching design/riscv_defs.vh's FUNCT6_ZKNH_SHA/RS2_SHA* derivation;
+    # aes64im's imm12 = funct7(0011000)<<5 | rs2=00000).
+    "brev8": (0x687, 0b101),
+    "sha256sum0": (0x100, 0b001), "sha256sum1": (0x101, 0b001),
+    "sha256sig0": (0x102, 0b001), "sha256sig1": (0x103, 0b001),
+    "sha512sum0": (0x104, 0b001), "sha512sum1": (0x105, 0b001),
+    "sha512sig0": (0x106, 0b001), "sha512sig1": (0x107, 0b001),
+    "aes64im": (0x300, 0b001),
 }
 BRANCH = {  # mnemonic: funct3 -- beq/bne/blt/bge/ble/bgt/bltu/bgeu. blt/bge at real RISC-V
     # spec positions (100/101); ble/bgt are this core's own custom ops, at the reserved
@@ -157,6 +178,9 @@ R_TYPE_W = {
     "rolw": (0b0110000, 0b001), "rorw": (0b0110000, 0b101),
     "add.uw": (0b0000100, 0b000),
     "sh1add.uw": (0b0010000, 0b010), "sh2add.uw": (0b0010000, 0b100), "sh3add.uw": (0b0010000, 0b110),
+    # Pillar K (docs/adr/0059 Gen7-K7). packw shares ALUCTL_PACK with pack
+    # via wordOp, same OP_32-reuse shape as add.uw/rolw above.
+    "packw": (0b0000100, 0b100),
 }
 # addiw/slliw/srliw/sraiw -- shamt is always exactly 5 bits regardless of
 # XLEN (spec-mandated, unlike the plain slli/srli/srai below, which widen to
@@ -323,6 +347,16 @@ def i_type_bext_shamt(mn, rd, rs1, immv, xlen=32):
 def i_type_bext_fixed(mn, rd, rs1):
     imm12, f3 = I_TYPE_BEXT_FIXED[mn]
     return i_type_raw(imm12, f3, rd, rs1)
+
+
+def aes64ks1i(rd, rs1, rnum):
+    # Pillar K (docs/adr/0059 Gen7-K7). rnum (0-10, spec-legal range) is a
+    # real operand, not a fixed selector -- imm12 = funct7(0011000) ++
+    # rs2-field({1,rnum[3:0]}), verified against rv64_zknd's
+    # `aes64ks1i rd rs1 rnum 31..30=0 29..25=0b11000 24=1`.
+    r = imm(rnum, 4, signed=False)
+    imm12 = (0b0011000 << 5) | 0b10000 | r
+    return i_type_raw(imm12, 0b001, rd, rs1)
 
 
 def rev8(rd, rs1, xlen=32):
@@ -606,6 +640,9 @@ def assemble(lines, xlen=32):
             rd, rs1, rs2, rs3 = freg(args[0]), freg(args[1]), freg(args[2]), freg(args[3])
             rm = parse_rm(args, 4)
             words.append(fp_r4_type(MADD_OPCODES[mn], rd, rs1, rs2, rs3, rm))
+        elif mn == "aes64ks1i":  # Pillar K (docs/adr/0059 Gen7-K7) -- rnum is a plain immediate, not a register
+            rd, rs1 = reg(args[0]), reg(args[1])
+            words.append(aes64ks1i(rd, rs1, args[2]))
         elif mn == ".word":
             # Raw 32-bit instruction word, bypassing mnemonic parsing entirely --
             # Pillar K's own OoO integration test (Gen7-K7) uses this for K-extension

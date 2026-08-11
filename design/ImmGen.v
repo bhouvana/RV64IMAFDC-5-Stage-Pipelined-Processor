@@ -64,7 +64,23 @@ module ImmGen#(parameter Width = 32) (
                         //correctly regardless of whether the caller ends up using
                         //it" discipline as every other arm here.
             begin
-                if(inst[14:12] == 3'b101 || inst[14:12] == 3'b001)
+                // Pillar K random-test finding (Gen7-K7): slli.uw shares this
+                // SAME opcode+funct3(001) but genuinely needs a 6-bit shamt
+                // (inst[25:20], one bit wider than slliw's -- see riscv_defs.vh's
+                // FUNCT6_ZBA_SLLIUW comment, docs/adr/0060) -- a real,
+                // pre-existing gap since Pillar B added slli.uw: this arm never
+                // special-cased it, silently dropping inst[25] (the shamt's own
+                // top bit) for any slli.uw with shamt>=32. Never triggered by
+                // any prior random seed until Pillar K's own random_gen.py
+                // additions happened to produce shamt>=32 with a nonzero high
+                // bit in play. Distinguished from plain slliw by inst[31:26]
+                // (funct6) == FUNCT6_ZBA_SLLIUW(000010) -- slliw's own funct7
+                // is always 0000000, so bits[31:26]=000000 there.
+                if (inst[14:12] == 3'b001 && inst[31:26] == 6'b000010)
+                    begin
+                    imm = {{(Width-6){1'b0}}, inst[25:20]};
+                    end
+                else if(inst[14:12] == 3'b101 || inst[14:12] == 3'b001)
                     begin
                     imm = {{(Width-5){1'b0}}, inst[24:20]};
                     end

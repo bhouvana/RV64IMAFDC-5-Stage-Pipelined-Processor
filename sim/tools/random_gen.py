@@ -130,6 +130,20 @@ B_R_TYPE_W = ["rolw", "rorw", "add.uw", "sh1add.uw", "sh2add.uw", "sh3add.uw"]  
 B_FIXED_W = ["clzw", "ctzw", "cpopw"]  # RV64-only, rd,rs1 only
 B_SHAMT_W = ["roriw", "slli.uw"]  # RV64-only, shamt operand
 
+# Pillar K (docs/adr/0059 Gen7-K7), full Zkn -- RV64-only throughout (every
+# K instruction either only exists at RV64 in this project's own scope, or
+# -- for the sha256*/pack/brev8/xperm4/8/clmul/clmulh family, which the real
+# spec also defines at RV32 -- is simply never generated at xlen=32 here,
+# since this pillar's own verification target is XLEN=64 throughout,
+# matching Pillar V's own RV64 focus (see docs/adr/0067's own scope note).
+K_R_TYPE = ["clmul", "clmulh", "pack", "packh", "xperm4", "xperm8",
+            "aes64esm", "aes64es", "aes64dsm", "aes64ds", "aes64ks2"]
+K_FIXED = ["brev8", "sha256sum0", "sha256sum1", "sha256sig0", "sha256sig1",
+           "sha512sum0", "sha512sum1", "sha512sig0", "sha512sig1", "aes64im"]
+K_R_TYPE_W = ["packw"]  # RV64-only, wordOp-dependent -- excluded from --ooo, same
+                          # OOOCore.v single-ALU-hardcoded-wordOp=0 gap as b_ext_w
+                          # (docs/adr/0060 finding #6, still open)
+
 
 def const64_to_reg_instrs(rd, rd_scratch, bits64, no_lui=False):
     """Generation 2 (Phase M15, docs/adr/0028-rv64-migration-phase-m.md).
@@ -530,6 +544,11 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
                       "fp_arith", "fp_sqrt", "fp_sgnj", "fp_minmax", "b_ext"]
         kind_weights = [24, 16, 8, 10, 10, 8, 5, csr_weight,
                          10, 4, 4, 4, 16]
+        if xlen >= 64:
+            # k_ext_w (packw) stays excluded even at xlen=64 --ooo, same
+            # OOOCore.v hardcoded-wordOp=0 reason b_ext_w is excluded here.
+            kind_names = kind_names + ["k_ext"]
+            kind_weights = kind_weights + [16]
     else:
         kind_names = ["r", "i", "shift", "load", "store", "branch", "jal", "csr",
                       "fp_arith", "fp_sqrt", "fp_sgnj", "fp_minmax", "fp_cmp",
@@ -538,8 +557,8 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
                          10, 4, 4, 4, 4,
                          4, 4, 6, 6, 6, 4, 16]
         if xlen >= 64:
-            kind_names = kind_names + ["rw", "iw", "b_ext_w"]
-            kind_weights = kind_weights + [12, 8, 8]
+            kind_names = kind_names + ["rw", "iw", "b_ext_w", "k_ext", "k_ext_w"]
+            kind_weights = kind_weights + [12, 8, 8, 16, 4]
     load_mnemonics = ["lb", "lh", "lw", "lbu", "lhu"] + (["ld", "lwu"] if xlen >= 64 else [])
     store_mnemonics = ["sb", "sh", "sw"] + (["sd"] if xlen >= 64 else [])
     load_widths = {"lb": 1, "lbu": 1, "lh": 2, "lhu": 2, "lw": 4, "lwu": 4, "ld": 8}
@@ -605,6 +624,23 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
             else:
                 mn = rnd.choice(B_FIXED_W)
                 instrs.append(f"{mn} x{rd}, x{rs1}")
+        elif kind == "k_ext":  # Pillar K (docs/adr/0059 Gen7-K7), full Zkn, RV64-only
+            sub = rnd.choice(["r", "fixed", "ks1i"])
+            rd, rs1 = rnd.choice(GP_REGS), rnd.choice(GP_REGS)
+            if sub == "r":
+                mn = rnd.choice(K_R_TYPE)
+                rs2 = rnd.choice(GP_REGS)
+                instrs.append(f"{mn} x{rd}, x{rs1}, x{rs2}")
+            elif sub == "fixed":
+                mn = rnd.choice(K_FIXED)
+                instrs.append(f"{mn} x{rd}, x{rs1}")
+            else:  # aes64ks1i -- rnum must be 0-10 (spec-legal range, see design/ALU.v's aes_decode_rcon)
+                rnum = rnd.randint(0, 10)
+                instrs.append(f"aes64ks1i x{rd}, x{rs1}, {rnum}")
+        elif kind == "k_ext_w":  # Pillar K, RV64-only word variant (packw)
+            mn = rnd.choice(K_R_TYPE_W)
+            rd, rs1, rs2 = rnd.choice(GP_REGS), rnd.choice(GP_REGS), rnd.choice(GP_REGS)
+            instrs.append(f"{mn} x{rd}, x{rs1}, x{rs2}")
         elif kind == "load":
             mn = rnd.choice(load_mnemonics)
             rd = rnd.choice(GP_REGS)
