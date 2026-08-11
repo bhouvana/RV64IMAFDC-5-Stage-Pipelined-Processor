@@ -10,7 +10,7 @@
 module ALU #(
     parameter XLEN = 32   // docs/adr/0015-xlen-and-regcount-parameterization.md
 )(
-    input [4:0] ALUCtl,
+    input [5:0] ALUCtl,
     input [XLEN-1:0] A,B,
     input wordOp,  // Generation 2 (Phase M, docs/adr/0028-rv64-migration-
                     // phase-m.md): RV64I's "w"-suffixed family (addw/subw/
@@ -177,6 +177,82 @@ case(ALUCtl)
             end
             ALUOut = count;
 
+        end
+
+    // ---- B extension: Zba+Zbb+Zbs (docs/adr/0060) ----
+    `ALUCTL_ANDN: ALUOut = A & ~B;
+    `ALUCTL_ORN:  ALUOut = A | ~B;
+    `ALUCTL_XNOR: ALUOut = ~(A ^ B);
+    `ALUCTL_MIN:  ALUOut = ($signed(A) < $signed(B)) ? A : B;
+    `ALUCTL_MINU: ALUOut = ($unsigned(A) < $unsigned(B)) ? A : B;
+    `ALUCTL_MAX:  ALUOut = ($signed(A) > $signed(B)) ? A : B;
+    `ALUCTL_MAXU: ALUOut = ($unsigned(A) > $unsigned(B)) ? A : B;
+    `ALUCTL_ROL:
+    if (wordOp) begin
+        w32 = (B[4:0] == 0) ? A[31:0] : (A[31:0] << B[4:0]) | (A[31:0] >> (32 - B[4:0]));
+        ALUOut = {{(XLEN-32){w32[31]}}, w32};  // rolw -- shamt always 5 bits
+    end else
+        ALUOut = (B[SHAMT_WIDTH-1:0] == 0) ? A :
+                  (A << B[SHAMT_WIDTH-1:0]) | (A >> (XLEN - B[SHAMT_WIDTH-1:0]));
+    `ALUCTL_ROR:
+    if (wordOp) begin
+        w32 = (B[4:0] == 0) ? A[31:0] : (A[31:0] >> B[4:0]) | (A[31:0] << (32 - B[4:0]));
+        ALUOut = {{(XLEN-32){w32[31]}}, w32};  // rorw/roriw
+    end else
+        ALUOut = (B[SHAMT_WIDTH-1:0] == 0) ? A :
+                  (A >> B[SHAMT_WIDTH-1:0]) | (A << (XLEN - B[SHAMT_WIDTH-1:0]));
+    `ALUCTL_CLZ:
+        begin
+            count = 0;
+            done = 0;
+            if (wordOp) begin  // clzw: count from bit 31 downward, 32 is the all-zero answer
+                for (i = 31; i >= 0; i = i - 1)
+                    if (A[i] == 0 && done == 0) count = count + 1;
+                    else done = 1;
+            end else begin
+                for (i = XLEN-1; i >= 0; i = i - 1)
+                    if (A[i] == 0 && done == 0) count = count + 1;
+                    else done = 1;
+            end
+            ALUOut = count;
+        end
+    `ALUCTL_CPOP:
+        begin
+            count = 0;
+            if (wordOp) begin
+                for (i = 0; i < 32; i = i + 1) count = count + A[i];
+            end else begin
+                for (i = 0; i < XLEN; i = i + 1) count = count + A[i];
+            end
+            ALUOut = count;
+        end
+    `ALUCTL_SEXTB: ALUOut = {{(XLEN-8){A[7]}}, A[7:0]};
+    `ALUCTL_SEXTH: ALUOut = {{(XLEN-16){A[15]}}, A[15:0]};
+    `ALUCTL_ORCB:
+        begin
+            for (i = 0; i < XLEN/8; i = i + 1)
+                ALUOut[i*8 +: 8] = (A[i*8 +: 8] != 8'h00) ? 8'hFF : 8'h00;
+        end
+    `ALUCTL_REV8:
+        begin
+            for (i = 0; i < XLEN/8; i = i + 1)
+                ALUOut[i*8 +: 8] = A[(XLEN/8-1-i)*8 +: 8];
+        end
+    `ALUCTL_BCLR: ALUOut = A & ~({{(XLEN-1){1'b0}},1'b1} << B[SHAMT_WIDTH-1:0]);
+    `ALUCTL_BEXT: ALUOut = (A >> B[SHAMT_WIDTH-1:0]) & {{(XLEN-1){1'b0}},1'b1};
+    `ALUCTL_BINV: ALUOut = A ^ ({{(XLEN-1){1'b0}},1'b1} << B[SHAMT_WIDTH-1:0]);
+    `ALUCTL_BSET: ALUOut = A | ({{(XLEN-1){1'b0}},1'b1} << B[SHAMT_WIDTH-1:0]);
+    `ALUCTL_SH1ADD: ALUOut = (A << 1) + B;
+    `ALUCTL_SH2ADD: ALUOut = (A << 2) + B;
+    `ALUCTL_SH3ADD: ALUOut = (A << 3) + B;
+    `ALUCTL_ADD_UW:    ALUOut = {{(XLEN-32){1'b0}}, A[31:0]} + B;
+    `ALUCTL_SH1ADD_UW: ALUOut = ({{(XLEN-32){1'b0}}, A[31:0]} << 1) + B;
+    `ALUCTL_SH2ADD_UW: ALUOut = ({{(XLEN-32){1'b0}}, A[31:0]} << 2) + B;
+    `ALUCTL_SH3ADD_UW: ALUOut = ({{(XLEN-32){1'b0}}, A[31:0]} << 3) + B;
+    `ALUCTL_SLLI_UW:
+        begin
+            w32 = A[31:0] << B[4:0];
+            ALUOut = {{(XLEN-32){1'b0}}, w32};  // zero-extended, NOT sign-extended -- distinct from ordinary wordOp shifts
         end
 
     // RV32M multiply -- single-cycle is a reasonable simplification for
