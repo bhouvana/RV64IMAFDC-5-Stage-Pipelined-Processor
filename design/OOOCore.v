@@ -69,10 +69,17 @@ module OOOCore #(
                                         // independent of XLEN
     parameter RS_FALU_ENTRIES = 8,    // Gen6-H
 
+    parameter NUM_VREGS       = 32,   // Gen7 Pillar V Phase 1 (docs/adr/0061) -- v0-v31
+    parameter NUM_VPREGS      = 64,   // vector physical register count
+    parameter VLEN            = 512,  // bits per vector register (user-confirmed
+                                        // most-ambitious VLEN option via AskUserQuestion)
+
     parameter AREG_BITS  = $clog2(NUM_AREGS),
     parameter PREG_BITS  = $clog2(NUM_PREGS),
     parameter FAREG_BITS = $clog2(NUM_FREGS),
     parameter FPREG_BITS = $clog2(NUM_FPREGS),
+    parameter VAREG_BITS = $clog2(NUM_VREGS),
+    parameter VPREG_BITS = $clog2(NUM_VPREGS),
     parameter ROB_IDX_BITS = $clog2(ROB_ENTRIES),
     // Reservation-station payload: {use_forced_a, use_link_b,
     // forced_a_value[XLEN-1:0], ALUSrc, ALUCtl[5:0], imm[XLEN-1:0]}.
@@ -946,6 +953,77 @@ RegisterAliasTable #(.NUM_AREGS(NUM_FREGS), .NUM_PREGS(NUM_FPREGS), .HARDWIRE_RE
     .cwen0(rob_retire_valid0 && rob_retire_has_dest0 && rob_retire_is_fp_dest0), .cwaddr0(rob_retire_areg0), .cwpreg0(rob_retire_preg0),
     .cwen1(rob_retire_valid1 && rob_retire_has_dest1 && rob_retire_is_fp_dest1), .cwaddr1(rob_retire_areg1), .cwpreg1(rob_retire_preg1),
     .restore_en(1'b0)
+);
+
+// ==========================================================================
+// Generation 7, Pillar V, Phase 1 (docs/adr/0061). Vector rename stack --
+// a THIRD, genuinely independent register-file-class instance, exactly
+// mirroring the float triad above (m_FreeList_Float/m_RAT_Float/
+// m_PRF_Float, docs/adr/0047's own "a real, clean design pattern worth
+// reusing if a future phase needs a third register-file space" note).
+// HARDWIRE_REG0/HARDWIRE_PREG0=0: v0 is the real, addressable RVV mask
+// register, not a hardwired-zero register (unlike x0) -- same reasoning
+// f0-f31's own HARDWIRE_REG0=0 already established.
+//
+// No dispatch wiring to this triad yet -- alloc_en0/wen0/etc are all
+// tied 0 this phase. A future phase (the vector-crack dispatch sequencer
+// + RS_VALU + VALU.v) is what actually drives these; this task only
+// proves the triad itself elaborates and resets correctly, matching this
+// project's own "declare before any RTL consumes it" precedent
+// (docs/adr/0019's own Phase C1 for RV32F's encoding constants).
+// ==========================================================================
+wire [VPREG_BITS-1:0] fl_v_alloc_preg0;
+wire                  fl_v_alloc_ok0;
+wire [VPREG_BITS-1:0] rat_v_rpreg0, rat_v_rpreg1;
+wire [VPREG_BITS-1:0] rat_v_old_preg0;
+
+FreeList #(.NUM_PREGS(NUM_VPREGS), .NUM_AREGS(NUM_VREGS)) m_FreeList_Vec(
+    .clk(clk), .rst(rst),
+    .alloc_en0(1'b0), .alloc_en1(1'b0),
+    .alloc_preg0(fl_v_alloc_preg0), .alloc_preg1(),
+    .alloc_ok0(fl_v_alloc_ok0), .alloc_ok1(),
+    .commit_en0(1'b0), .commit_en1(1'b0),
+    .free_en0(1'b0), .free_preg0({VPREG_BITS{1'b0}}),
+    .free_en1(1'b0), .free_preg1({VPREG_BITS{1'b0}}),
+    .free_count()
+);
+
+RegisterAliasTable #(.NUM_AREGS(NUM_VREGS), .NUM_PREGS(NUM_VPREGS), .HARDWIRE_REG0(0)) m_RAT_Vec(
+    .clk(clk), .rst(rst),
+    .raddr0({VAREG_BITS{1'b0}}), .raddr1({VAREG_BITS{1'b0}}),
+    .raddr2({VAREG_BITS{1'b0}}), .raddr3({VAREG_BITS{1'b0}}),
+    .rpreg0(rat_v_rpreg0), .rpreg1(rat_v_rpreg1), .rpreg2(), .rpreg3(),
+    .wen0(1'b0), .waddr0({VAREG_BITS{1'b0}}), .wpreg0({VPREG_BITS{1'b0}}), .old_preg0(rat_v_old_preg0),
+    .wen1(1'b0), .waddr1({VAREG_BITS{1'b0}}), .wpreg1({VPREG_BITS{1'b0}}), .old_preg1(),
+    .cwen0(1'b0), .cwaddr0({VAREG_BITS{1'b0}}), .cwpreg0({VPREG_BITS{1'b0}}),
+    .cwen1(1'b0), .cwaddr1({VAREG_BITS{1'b0}}), .cwpreg1({VPREG_BITS{1'b0}}),
+    .restore_en(1'b0)
+);
+
+wire [VLEN-1:0] prf_v_rdata0, prf_v_rdata1;
+wire            prf_v_rvalid0, prf_v_rvalid1;
+
+// SP_INIT explicitly sized to VLEN bits -- an unsized `0` override would
+// hit the same Icarus-self-determines-32-bit-width quirk Gen6-L's own
+// SP_INIT bug already found (docs/adr/0048), here just a compile warning
+// (this preg's reset value is never architecturally meaningful for a
+// vector register file) rather than real corruption, but fixed at the
+// root the same way regardless.
+PhysicalRegisterFile #(.XLEN(VLEN), .NUM_PREGS(NUM_VPREGS), .NUM_AREGS(NUM_VREGS), .HARDWIRE_PREG0(0), .SP_INIT({VLEN{1'b0}})) m_PRF_Vec(
+    .clk(clk), .rst(rst),
+    .raddr0(rat_v_rpreg0), .raddr1(rat_v_rpreg1),
+    .raddr2({VPREG_BITS{1'b0}}), .raddr3({VPREG_BITS{1'b0}}), .raddr4({VPREG_BITS{1'b0}}),
+    .raddr5({VPREG_BITS{1'b0}}), .raddr6({VPREG_BITS{1'b0}}), .raddr7({VPREG_BITS{1'b0}}),
+    .raddr8({VPREG_BITS{1'b0}}), .raddr9({VPREG_BITS{1'b0}}), .raddr10({VPREG_BITS{1'b0}}),
+    .rdata0(prf_v_rdata0), .rdata1(prf_v_rdata1), .rdata2(), .rdata3(), .rdata4(), .rdata5(),
+    .rdata6(), .rdata7(), .rdata8(), .rdata9(), .rdata10(),
+    .rvalid0(prf_v_rvalid0), .rvalid1(prf_v_rvalid1), .rvalid2(), .rvalid3(), .rvalid4(), .rvalid5(),
+    .rvalid6(), .rvalid7(), .rvalid8(), .rvalid9(), .rvalid10(),
+    .wen0(1'b0), .waddr0({VPREG_BITS{1'b0}}), .wdata0({VLEN{1'b0}}),
+    .wen1(1'b0), .waddr1({VPREG_BITS{1'b0}}), .wdata1({VLEN{1'b0}}),
+    .wen2(1'b0), .waddr2({VPREG_BITS{1'b0}}), .wdata2({VLEN{1'b0}}),
+    .alloc_en0(1'b0), .alloc_preg0({VPREG_BITS{1'b0}}),
+    .alloc_en1(1'b0), .alloc_preg1({VPREG_BITS{1'b0}})
 );
 
 wire [XLEN-1:0] prf_rdata0, prf_rdata1, prf_rdata2, prf_rdata3;
