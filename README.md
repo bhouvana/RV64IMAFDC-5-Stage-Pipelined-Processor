@@ -1,21 +1,22 @@
 <div align="center">
 
-# RV64IMAFD 5-Stage Pipelined RISC-V Core
+# RV64IMAFDC RISC-V Core — In-Order Pipeline + Out-of-Order Core + Advanced ISA Extensions
 
-**A synthesizable, hardware-verified 5-stage in-order RISC-V pipeline — RV64IMAFD, Sv32/Sv39 MMU,
-M/S/U privilege modes, real asynchronous interrupts, a Wishbone-style bus with a Linux-driver-compatible
-UART/CLINT, RVC (compressed instruction) support, the 'A' (atomic) extension, a hand-rolled SBI
-firmware, and a Verilator-backed real Linux kernel boot attempt.**
+**A synthesizable, hardware-verified RISC-V core project spanning two real microarchitectures: an
+in-order 5-stage pipeline that boots real Linux kernel code, and a from-scratch out-of-order core
+(register renaming, reservation stations, ROB, LSQ, Tomasulo scheduling, dual-issue) now extended with
+ratified Bit-Manipulation, Vector, and Cryptography ISA extensions — all decoded through the same shared
+control path, zero duplicated pipelines per extension.**
 
-![ISA](https://img.shields.io/badge/ISA-RV64IMAFD%2BC-2f7fd6?style=flat-square)
+![ISA](https://img.shields.io/badge/ISA-RV64IMAFD%2BC%2BBVK-2f7fd6?style=flat-square)
 ![HDL](https://img.shields.io/badge/HDL-Verilog--2005-2f7fd6?style=flat-square)
 ![Simulator](https://img.shields.io/badge/simulators-Icarus%20Verilog%20%2B%20Verilator-2f7fd6?style=flat-square)
-![MMU](https://img.shields.io/badge/MMU-Sv32%20%2B%20Sv39-2f7fd6?style=flat-square)
-![Tests](https://img.shields.io/badge/directed%20tests-88%2F90%20passing-1f8f6e?style=flat-square)
+![Microarch](https://img.shields.io/badge/microarch-in--order%20%2B%20out--of--order-2f7fd6?style=flat-square)
+![Tests](https://img.shields.io/badge/directed%20tests-152%2F152%20passing-1f8f6e?style=flat-square)
 ![Random cross-check](https://img.shields.io/badge/random%20cross--check-1000%2B%20programs-1f8f6e?style=flat-square)
 ![Lint](https://img.shields.io/badge/iverilog--Wall-0%20warnings-1f8f6e?style=flat-square)
 ![Linux](https://img.shields.io/badge/Linux%20boot-deep%20real--kernel%20execution-b5790c?style=flat-square)
-![ADRs](https://img.shields.io/badge/design%20decisions-39%20ADRs-b5790c?style=flat-square)
+![ADRs](https://img.shields.io/badge/design%20decisions-67%20ADRs-b5790c?style=flat-square)
 
 </div>
 
@@ -24,7 +25,7 @@ firmware, and a Verilator-backed real Linux kernel boot attempt.**
 Every number in this README is read off real simulation output, not aspirational. The project's own
 rule: nothing gets claimed as "done" until it's been run under a real simulator and, for anything that
 touches RTL behavior, cross-checked against an independent reference simulator. `docs/adr/` has the
-receipts — including every real bug this process has found and fixed, across 39 ADRs and three
+receipts — including every real bug this process has found and fixed, across 67 ADRs and six closed
 generations of work.
 
 ## Contents
@@ -32,7 +33,9 @@ generations of work.
 - [What this is](#what-this-is)
 - [Generations](#generations)
 - [The Linux boot attempt](#the-linux-boot-attempt)
-- [Architecture](#architecture)
+- [Architecture — the in-order pipeline](#architecture--the-in-order-pipeline)
+- [The out-of-order core (Generation 6)](#the-out-of-order-core-generation-6)
+- [Advanced ISA extensions (Generation 7)](#advanced-isa-extensions-generation-7)
 - [Privilege, MMU, and interrupts](#privilege-mmu-and-interrupts)
 - [RV64F/D floating point](#rv64fd-floating-point)
 - [SoC integration: bus, UART/CLINT, real interrupts](#soc-integration-bus-uartclint-real-interrupts)
@@ -46,35 +49,27 @@ generations of work.
 
 ## What this is
 
-A classic 5-stage in-order RISC-V core — **Fetch → Decode → Execute → Memory → Writeback** — implemented
-from scratch in Verilog, grown from a basic student pipeline into a core that boots into real,
-unmodified Linux kernel code:
+Two real cores, sharing one repository, one ISA lineage, and one verification methodology:
 
-- **RV64IMAFD + C (compressed instructions)**: full integer/branch/jump/load-store ISA at XLEN=64,
-  `mul`/`div`/`rem`, full single- and double-precision floating point, and a from-scratch RVC decoder
-  (`design/CompressedExpander.v`) covering the complete standard quadrant table this ISA subset needs.
-- **The 'A' (atomic) extension**: `lr`/`sc`/`amoadd`/`amoswap`/`amoxor`/`amoand`/`amoor`/`amomin`/
-  `amomax`/`amominu`/`amomaxu`, a real 2-phase MEM-stage interlock, not a stub.
-- **Full privilege architecture**: M/S/U modes, real trap delegation (`mideleg`/`medeleg`), and both
-  Sv32 (RV32) and Sv39 (RV64) MMUs — genuinely separate TLB/page-table-walker implementations, not one
-  ported to the other.
-- **A hand-rolled M-mode SBI firmware** (`sim/firmware/`) — real v0.1 legacy *and* v0.2+ extensions,
-  a real machine-timer-interrupt-forwarding round trip into a software-synthesized supervisor interrupt,
-  and a hand-rolled device-tree-blob emitter (no `dtc` dependency).
-- **A Linux-driver-compatible on-chip bus**: a Wishbone-style handshake connects the LSU to data memory,
-  a real 8-register ns16550a-compatible UART, and a real RISC-V CLINT (`msip`/`mtimecmp`/`mtime` at the
-  exact byte offsets Linux's own drivers hardcode) — a real kernel needs no patch to talk to either.
-- **A real Linux kernel boot attempt**, Verilator-backed for real throughput (~1.4M cycles/sec, ~1000x
-  Icarus): see [The Linux boot attempt](#the-linux-boot-attempt) below for how far it gets and what's
-  still open.
-- **Hardware hazard handling**: a forwarding unit resolves most RAW hazards same-cycle; a hazard-detection
-  unit stalls the one case forwarding can't fix (load-use); control hazards flush speculatively-fetched
-  instructions on a resolved branch, jump, trap, or interrupt.
+- **`design/riscvpipeline.v`** — a classic 5-stage in-order pipeline
+  (**Fetch → Decode → Execute → Memory → Writeback**) grown from a basic student pipeline into a core
+  that boots into real, unmodified Linux kernel code. RV64IMAFD+C, the 'A' (atomic) extension, full M/S/U
+  privilege with Sv32/Sv39 MMUs, real asynchronous interrupts, a hand-rolled SBI firmware, and a
+  Linux-driver-compatible on-chip bus.
+- **`design/OOOCore.v`** — a genuinely separate, from-scratch out-of-order core (register renaming,
+  physical register file, reservation stations, reorder buffer, load/store queue, Tomasulo CDB
+  scheduling, speculative branch/jalr execution, dual-issue) that **coexists** with the in-order pipeline
+  rather than replacing it — `design/HeteroSoC.v` runs both simultaneously as a real heterogeneous
+  dual-core SoC. Now extended with three ratified ISA extensions (Bit-Manipulation, Vector, Cryptography)
+  reusing its existing scheduling/retirement machinery, not a bolted-on side pipeline per extension.
+
+Shared foundations across both cores:
+
+- **Verified against an independent instruction-set simulator** (`sim/tools/iss.py`), not just directed
+  tests — including an interrupt-injection mode that fires real, unpredictably-timed interrupts
+  mid-random-program and still requires bit-for-bit agreement. See [Verification](#verification).
 - **Research-platform toggles at elaboration time, zero cost when unused**: swappable hazard strategy,
   pipeline depth, branch predictor, cache mode, and memory latency — each independently benchmarked.
-- **Verified against an independent instruction-set simulator**, not just directed tests — including an
-  interrupt-injection mode that fires real, unpredictably-timed interrupts mid-random-program and still
-  requires bit-for-bit agreement. See [Verification](#verification).
 - **FPGA-ready scaffolding**: parameterized memory sizes, a vendor-neutral top level, a debug
   observability port. Not yet validated on real hardware.
 
@@ -87,10 +82,11 @@ This project tracks its own long-term roadmap as a sequence of "generations" (`d
 | **Gen 1** — RV32IMAF Research Processor | Base pipeline, M-extension, F-extension, Sv32 MMU, caches, branch prediction, formal verification | ✅ **CLOSED** |
 | **Gen 2** — RV64 Processor | Full XLEN=64 migration, RV64-only instruction family | ✅ **CLOSED** |
 | **Gen 3** — Linux-capable RV64 Processor | Privilege/MMU (Sv39), UART/CLINT Linux-compat, SBI firmware, RVC, A-extension, real Linux boot attempt | ✅ **CLOSED**, boot progress ongoing — see below |
-| Gen 4-10 | Advanced memory, multicore, out-of-order, advanced ISA extensions (vector/bit-manipulation/crypto/hypervisor/packed-SIMD), security, FPGA SoC, configurable research platform | Not started — full plan in `docs/ROADMAP_VISION.md` |
-
-Generation 3 closed with a real, substantial result; the boot attempt itself is still an active,
-honestly-tracked effort — see the next section for where it stands now.
+| Gen 4 — Advanced Memory System | Multi-level cache hierarchy, prefetching, coherence | Not started |
+| Gen 5 — Multicore SoC | Explicitly skipped, straight to Gen 6 per project decision (`docs/adr/0050` revives it asymmetrically as `HeteroSoC.v`) | Skipped |
+| **Gen 6** — Out-of-Order Core | Register renaming, PRF, reservation stations, ROB, LSQ, Tomasulo scheduling, speculative execution, dual-issue | ✅ **CLOSED** (`docs/adr/0058`) |
+| **Gen 7** — Advanced ISA Extensions | Five pillars on top of the Gen 6 OoO core: Bit-Manipulation, Vector, Cryptography, Hypervisor, Packed-SIMD | 🚧 **In progress** — B/V/K **CLOSED**, H/P not started — see below |
+| Gen 8-10 | Security/reliability, FPGA SoC, configurable research platform | Not started — full plan in `docs/ROADMAP_VISION.md` |
 
 ## The Linux boot attempt
 
@@ -128,7 +124,7 @@ never a reachable goal here regardless of kernel progress — the only output pa
 See `docs/adr/0036` through `0039` for the full designs, every bug found (RTL and tooling), and what's
 still open.
 
-## Architecture
+## Architecture — the in-order pipeline
 
 Five stages, separated by four pipeline registers (`reg1`–`reg4`), in the default profile:
 
@@ -172,16 +168,98 @@ graph LR
 | **MEM** | Wishbone bus decode/mux to data memory, UART, or CLINT; 2-phase atomic read-modify-write | `WbDecoder.v`, `RamWishboneAdapter.v`, `DataMemoryBRAM.v`, `Uart.v`, `Timer.v` |
 | **WB** | Selects ALU / float / memory / PC+link / AMO result back into the integer or float register file | `Register.v`, `FRegister.v`, `Mux4to1.v` |
 
+## The out-of-order core (Generation 6)
+
+`design/OOOCore.v` is a genuinely new top-level module — not a modification of `riscvpipeline.v`, per
+the project's own explicit design constraint. It implements a real dynamically-scheduled machine:
+
+- **Register renaming + physical register file**, separate integer and float PRFs, eliminating WAW/WAR
+  hazards the classic pipeline handles by stalling instead.
+- **Reservation stations** per functional unit (ALU, integer divider, float ALU, float divider) —
+  `ReservationStation.v`, dispatching operands the moment they're ready via a Tomasulo-style Common Data
+  Bus, not in program order.
+- **A reorder buffer** (`ReorderBuffer.v`) — multi-ported completion, in-order retirement, precise
+  exceptions.
+- **A load/store queue** (`LoadStoreQueue.v`) — memory-ordering enforcement independent of the ALU
+  pipeline's own out-of-order completion.
+- **Speculative execution** — branch and `jalr` prediction with real misprediction recovery, a shared BTB
+  for both.
+- **Dual-issue** dispatch, two instructions per cycle when dependencies allow.
+- **Full privilege/MMU/interrupt support**: `lui`/`auipc`/`jal`/`jalr`/`csrrX`, general AMO-RMW+SC,
+  Sv39 translation (reusing `Tlb39.v`/`Ptw39.v` unmodified), real machine-level interrupts, `fdiv.s`/
+  `fsqrt.s`.
+- **A real heterogeneous dual-core SoC** (`design/HeteroSoC.v`, `docs/adr/0050`) — `OOOCore.v` and
+  `riscvpipeline.v` (`PIPELINED`) running simultaneously, sharing a bus, genuinely two different
+  microarchitectures on one SoC, not two copies of the same core.
+
+Closed per `docs/adr/0047` through `0058` (Gen6-A through P6): 135/135 directed suite at closure, zero-
+warning compile, `--ooo` constrained-random cross-check clean. Real bugs found along the way include four
+deadlock/correctness gaps in the Sv39 D-side late-injection path (found by design, before any test ran),
+a restart-race in the OoO test harness, a dual-issue misclassification for `fdiv.s`/`fsqrt.s` in slot 1,
+and a genuine CDB-port-starvation hang in `RS_FALU` — all fixed, all documented in their own ADRs.
+
+## Advanced ISA extensions (Generation 7)
+
+Five pillars planned (`docs/adr/0059`), each a real RISC-V ISA extension integrated with the Gen 6 OoO
+core's *existing* scheduling and retirement machinery — no new reservation station, ROB port, or CDB port
+per extension, and no standalone processor per extension. **Three are closed:**
+
+### B — Bit-Manipulation — ✅ CLOSED (`docs/adr/0060`)
+
+Full ratified B (`Zba`+`Zbb`+`Zbs`, ~39 mnemonics including RV64-only word variants: `sh1add`, `clz`,
+`rori`, `bext`, `add.uw`, `slli.uw`, …), decoded through the existing shared `Control.v`/`ALUCtrl.v`/
+`ALU.v` path — the same shared-file edit gave both `riscvpipeline.v` and `OOOCore.v` the extension at
+once. 137/137 directed suite at closure, constrained-random clean across scalar/`--ooo` × XLEN 32/64 ×
+Sv32/Sv39-MMU. Real finding: several RV64-only word-variant decode gaps (`add.uw`, `sh*add.uw`,
+`slli.uw`, `ctzw`) that only `--xlen 64` constrained-random caught, not directed tests.
+
+### V — Vector Processing — ✅ CLOSED (`docs/adr/0065`, `0066`)
+
+A real vector register file, `vtype`/`vl` configuration state, a per-element vector ALU
+(`design/RS_VALU.v`) and vector load/store unit (`design/VLSU.v`, a 3rd requester on the shared memory
+port), integer arithmetic, logical ops, comparisons, mask operations, and a full-LMUL crack sequencer —
+both reusing the existing `ReservationStation.v` rather than a new one. 146/146 directed suite. Real
+findings: the closure benchmark itself found 2 further bugs (a cross-namespace CDB tag collision, a wrong
+PRF dispatch-readiness port) that no earlier isolated test had triggered. Honest backlog documented in
+`docs/adr/0066`: indexed/strided/segment load-store, EMUL reshaping, full-LMUL compares, vector
+floating-point.
+
+### K — Cryptography — ✅ CLOSED (`docs/adr/0067`)
+
+Full ratified `Zkn` (`Zbkb`+`Zbkc`+`Zbkx`+`Zkne`+`Zknd`+`Zknh`, 22 mnemonics: AES encrypt/decrypt/
+key-schedule, SHA-256/512 sigma/sum, carry-less multiply, pack/brev8, nibble/byte crossbar) — same shared
+`Control.v`/`ALUCtrl.v`/`ALU.v` path, zero new reservation station/ROB/CDB port, a single-cycle
+combinational AES S-box (256-entry ROM). Real ratified-spec encodings (`riscv-opcodes`) and real
+reference-model semantics (the spec's own pinned Sail source) — the AES register-half convention wasn't
+derivable by hand, so it was brute-forced against the real FIPS-197 AES-128 known-answer test via a
+standalone Python model, then transcribed into both the RTL testbench and `sim/tools/iss.py`; both now
+match the KAT end-to-end. 152/152 directed suite, 25/25 constrained-random on every axis any K mnemonic
+reaches, a real measured scalar-vs-hardware benchmark (`clmul`: 12 cycles scalar vs. 7 hardware, −42%).
+Real findings: a missing `ALUCtrl.v` decode arm for the 5 AES R-type ops, plus two independent,
+pre-existing Pillar B bugs in `slli.uw` (a 32-bit-truncated shift in `ALU.v`, a 5-bit-instead-of-6-bit
+shamt slice in `ImmGen.v`) — found by this pillar's own constrained-random cross-check, unrelated to K
+itself, fixed anyway. Honest backlog: `Zksed`/`Zksh` (SM4/SM3), `Zkr` entropy source, `Zkt`
+timing-independence review, an XLEN=32 decode-trap gap, a full AES-128 scalar-vs-hardware benchmark.
+
+### H — Hypervisor, P — Packed-SIMD/DSP — not started
+
+Scoped in `docs/adr/0059`. H needs a real prerequisite this project hasn't built yet: `OOOCore.v` has no
+working S-mode (`sret` is currently hardwired off, trap delegation unwired) for HS/VS/VU levels to sit on
+top of. P is explicitly a draft/provisional RISC-V extension (not yet ratified) and will be labeled as
+such throughout, never claimed as spec-complete.
+
 ## Privilege, MMU, and interrupts
 
-Full M/S/U privilege architecture: real trap delegation (`mideleg`/`medeleg`), CSR-level privilege
-enforcement, and `mret`/`sret`. Two independent MMU implementations — Sv32 (`Tlb.v`/`Ptw.v`, RV32) and
-Sv39 (`Tlb39.v`/`Ptw39.v`, RV64) — genuinely separate designs (a real, from-scratch 3-level walker for
-Sv39, not a port of the 2-level Sv32 one), each with its own TLB, page-table walker, and full
-constrained-random cross-check against an independent ISS-side walker. A supervisor-interrupt path
-(`ssi_pending`/`sti_pending`, gated on `sstatus.SIE`) lets M-mode firmware synthesize a software
-supervisor timer/software interrupt for S-mode — the real mechanism a Linux kernel's own scheduler tick
-needs, reusing the existing `mideleg`/`scause`/`sstatus`-swap delegation machinery unmodified.
+Full M/S/U privilege architecture in `riscvpipeline.v`: real trap delegation (`mideleg`/`medeleg`),
+CSR-level privilege enforcement, and `mret`/`sret`. Two independent MMU implementations — Sv32
+(`Tlb.v`/`Ptw.v`, RV32) and Sv39 (`Tlb39.v`/`Ptw39.v`, RV64) — genuinely separate designs (a real,
+from-scratch 3-level walker for Sv39, not a port of the 2-level Sv32 one), each with its own TLB,
+page-table walker, and full constrained-random cross-check against an independent ISS-side walker. A
+supervisor-interrupt path (`ssi_pending`/`sti_pending`, gated on `sstatus.SIE`) lets M-mode firmware
+synthesize a software supervisor timer/software interrupt for S-mode — the real mechanism a Linux
+kernel's own scheduler tick needs, reusing the existing `mideleg`/`scause`/`sstatus`-swap delegation
+machinery unmodified. `OOOCore.v` currently implements the M/U subset of this (Sv39 translation, real
+M-mode interrupts) — S-mode delegation there is Pillar H's own open prerequisite, above.
 
 ## RV64F/D floating point
 
@@ -216,42 +294,53 @@ Linux-compat redesign), and `0035` (supervisor-interrupt path) for the full desi
 
 | Area | Status |
 |---|---|
-| RV64I base ISA + RVC (compressed) | ✅ Complete |
+| RV64I base ISA + RVC (compressed) | ✅ Complete (both cores) |
 | RV64M (`mul`/`div`/`rem`) | ✅ Complete, real multi-cycle divider |
-| RV64A (atomics: `lr`/`sc`/`amo*`) | ✅ Complete, real 2-phase interlock |
+| RV64A (atomics: `lr`/`sc`/`amo*`) | ✅ Complete, real 2-phase interlock (both cores) |
 | RV64F/D (single + double precision float) | ✅ Complete, full forwarding, full FMA/div/sqrt |
-| CSRs + M/S/U privilege + synchronous exceptions | ✅ Complete |
+| CSRs + M/S/U privilege + synchronous exceptions | ✅ Complete in `riscvpipeline.v`; M/U subset in `OOOCore.v` |
 | Sv32 MMU (RV32) + Sv39 MMU (RV64) | ✅ Complete, independent implementations |
 | Real asynchronous interrupts (timer, UART, software, supervisor-synthesized) | ✅ Complete, spec-mandated priority |
 | On-chip Wishbone-style bus + ns16550a UART + CLINT | ✅ Complete, Linux-driver-compatible |
 | Hand-rolled M-mode SBI firmware (v0.1 + v0.2+) | ✅ Complete |
 | Real Linux kernel boot attempt (Verilator-backed) | 🚧 Deep real-kernel execution (200M+ cycles, zero crashes); reaches a real Sv39 page fault in the kernel's own MMU-enable sequence — see [The Linux boot attempt](#the-linux-boot-attempt) |
+| Out-of-order core: renaming, PRF, RS, ROB, LSQ, Tomasulo, speculation, dual-issue | ✅ Complete (Gen 6, `docs/adr/0058`) |
+| Heterogeneous dual-core SoC (`OOOCore.v` + `riscvpipeline.v` together) | ✅ Complete (`design/HeteroSoC.v`) |
+| Gen 7 Pillar B — Bit-Manipulation | ✅ Complete (`docs/adr/0060`) |
+| Gen 7 Pillar V — Vector Processing | ✅ Complete (`docs/adr/0065`, `0066`) |
+| Gen 7 Pillar K — Cryptography (Zkn) | ✅ Complete (`docs/adr/0067`) |
+| Gen 7 Pillar H — Hypervisor | ⏳ Not started; needs real S-mode wired into `OOOCore.v` first |
+| Gen 7 Pillar P — Packed-SIMD/DSP (draft extension) | ⏳ Not started |
 | Hazard forwarding + stall-only, pipeline depth, branch prediction, caches | ✅ Complete, elaboration-time swappable |
 | Directed + random-cross-check verification (incl. interrupt injection) | ✅ Complete, see below |
 | Interactive pipeline visualizer, independent-ISS step debugger | ✅ Complete |
 | Compiled-C toolchain (real GCC → this core) | ✅ Infrastructure verified end-to-end |
 | FPGA real-hardware validation | 🚧 Scaffolding hardened, not yet run against a real toolchain or board |
 | Signal-naming/port-ordering consistency pass | 🚧 Deliberately deferred |
-| Multicore, out-of-order, advanced ISA extensions (vector/B/K/H/P), dual-issue | ⏳ Not started (Generations 4+) |
+| Multicore (general), dual-issue *in-order* | ⏳ Not started / superseded by Gen 6's own OoO dual-issue |
 
 ## Verification
 
-Directed tests only catch what you thought to test for. This core is also cross-checked against
+Directed tests only catch what you thought to test for. Both cores are also cross-checked against
 **`sim/tools/iss.py`**, an independent instruction-set simulator with no shared code path to the RTL —
 constrained-random programs run on both, and any divergence is treated as a real bug. That process alone
 has found and fixed dozens of real RTL bugs no directed test caught (see `docs/adr/`).
 
-- **95/95 directed tests** — ISA coverage, forwarding, hazards, multi-cycle division, float
-  arithmetic/divide/sqrt/FMA, CSR/exception/privilege handling, Sv32/Sv39 MMU translation, branch/jump
-  resolution, bus/UART/CLINT behavior, interrupt redirect correctness (timer/UART/software/supervisor),
-  SBI firmware end-to-end (M→S mode switch, DTB read-back, ecall dispatch, real UART output), and cache
-  replacement policy (round-robin/FIFO/LRU, `docs/adr/0041`).
+- **152/152 directed tests** (`bash sim/run_tests.sh`) — ISA coverage, forwarding, hazards, multi-cycle
+  division, float arithmetic/divide/sqrt/FMA, CSR/exception/privilege handling, Sv32/Sv39 MMU
+  translation, branch/jump resolution, bus/UART/CLINT behavior, interrupt redirect correctness
+  (timer/UART/software/supervisor), SBI firmware end-to-end (M→S mode switch, DTB read-back, ecall
+  dispatch, real UART output), cache replacement policy (round-robin/FIFO/LRU, `docs/adr/0041`), the
+  full out-of-order core (renaming/RS/ROB/LSQ/speculation/dual-issue), and every Gen 7 B/V/K instruction.
 - **1000+ constrained-random programs** matched bit-for-bit against the independent ISS reference model
   across this project's history (`make random-test`) — including an opt-in interrupt-injection mode
-  (`--interrupt timer|uart|msi|both`) and full MMU-aware generation for both Sv32 and Sv39.
+  (`--interrupt timer|uart|msi|both`), full MMU-aware generation for both Sv32 and Sv39, and an `--ooo`
+  mode exercising the out-of-order core across every extension it now supports.
 - **Real Linux kernel execution** as its own verification signal beyond synthetic tests: RVC and
   A-extension correctness established by running dozens of real compressed/atomic instructions from an
   unmodified kernel `Image` and hand-verifying each against its expected decode.
+- **Real scalar-vs-hardware benchmarks** for Gen 7 extensions with expected-result comparisons, per
+  `docs/adr/0059`'s own verification bar (e.g. Pillar K's `clmul`: 7 cycles hardware vs. 12 scalar).
 - **Zero-warning compile** across the whole design (Icarus `-Wall`; Verilator lint for the Verilator-
   specific harness).
 
@@ -268,7 +357,7 @@ memory latency (fixed-cycle vs. variable). See `docs/adr/0016`, `0018`, `0021`, 
 | Tool | What it does |
 |---|---|
 | `make test` | Self-checking directed suite, PASS/FAIL summary |
-| `make random-test` | Constrained-random cross-check vs. the independent ISS (`ARGS="--interrupt timer\|uart\|msi\|both"`, `--mmu`, `--xlen 64`) |
+| `make random-test` | Constrained-random cross-check vs. the independent ISS (`ARGS="--interrupt timer\|uart\|msi\|both"`, `--mmu`, `--xlen 64`, `--ooo`) |
 | `make coverage` | Functional coverage report across the directed suite |
 | `make viewer` | Regenerates the interactive cycle-accurate pipeline viewer (`site/index.html`'s trace section) |
 | `make debug PROGRAM=path/to/foo.s` | Interactive step debugger (`sim/tools/debugger.py`) |
@@ -277,6 +366,7 @@ memory latency (fixed-cycle vs. variable). See `docs/adr/0016`, `0018`, `0021`, 
 | `sim/tools/build_c_bench.py` | Compile real C (GCC) → link → convert → run on the RTL |
 | `sim/tools/build_sbi_firmware.py` | Build the M-mode SBI firmware + DTB (`sim/firmware/`) |
 | `sim/tools/build_linux_boot.py` + `sim/tools/build_kernel_boot.py` | Build a real Linux kernel + initramfs + DTB memory image and the Verilator model to boot it |
+| `sim/tools/asm.py` / `disasm.py` / `iss.py` / `random_gen.py` | Assembler, disassembler, reference ISS, and constrained-random program generator — all extension-aware (B/V/K) |
 | `sim/tb/dump_waves.v` | Full `$dumpvars(0, dut)` VCD dump for any waveform viewer (GTKWave, etc.) |
 
 ## Getting started
@@ -290,11 +380,12 @@ an existing OSS CAD Suite install with no internet-facing package manager.
 git clone <this-repo>
 cd 5-stage-pipelined-processor
 
-make test          # run the full directed suite
+make test          # run the full directed suite (both cores, 152/152)
 make viewer         # regenerate the interactive pipeline viewer
 make benchmark       # cycle/IPC numbers for the hand-written kernels
 make random-test ARGS="--count 100"   # cross-check more random programs
 make random-test ARGS="--count 50 --interrupt both"   # ...with interrupts firing mid-program
+make random-test ARGS="--count 100 --ooo"             # ...against the out-of-order core
 ```
 
 To trace a different program through the viewer: point `sim/tb/gen_trace.v`'s `INIT_FILE` at another
@@ -304,9 +395,12 @@ To trace a different program through the viewer: point `sim/tb/gen_trace.v`'s `I
 
 ```
 design/          RTL — every stage, functional unit, MMU, pipeline register, FPU unit, bus, and peripheral
+  riscvpipeline.v   The in-order 5-stage pipeline (Gen 1-3)
+  OOOCore.v         The out-of-order core (Gen 6) + Gen 7 B/V/K extensions
+  HeteroSoC.v       Both cores running together as a real heterogeneous dual-core SoC
 sim/
   programs/      Hand-assembled directed test programs (this core's own tiny assembler, asm.py)
-  benchmarks/    Hand-written benchmark kernels + the compiled-C toolchain (c/)
+  benchmarks/    Hand-written benchmark kernels + the compiled-C toolchain (c/) + Gen 7 extension benchmarks
   firmware/      Hand-rolled M-mode SBI firmware + DTB emitter + real kernel-boot memory image builders
   verilator/     Verilator C++ harness for the real Linux boot attempt
   tb/            Testbenches: directed tests, trace generation, benchmarking, C programs
@@ -329,6 +423,6 @@ vercel.json      Points a Vercel deployment at site/ (no build step -- index.htm
 - **[docs/ROADMAP_VISION.md](docs/ROADMAP_VISION.md)** — the long-term, 10-generation roadmap.
 - **[docs/adr/](docs/adr)** — one doc per non-trivial design decision (problem, alternatives considered,
   chosen solution, validation strategy) — including every real bug this project's verification process
-  has found along the way. Start with `0036` through `0039` for the most recent work: the real Linux
-  boot attempt, the from-scratch RVC decoder, the from-scratch 'A'-extension implementation, and the
-  real hazard-detection bug fix that got the boot past its sp/tp park.
+  has found along the way. Start with `0058` for the Generation 6 (out-of-order core) closure, and
+  `0059` through `0067` for Generation 7's advanced ISA extensions (scope-setting, then Pillars B, V, and
+  K each closed in turn).

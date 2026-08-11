@@ -1,4 +1,4 @@
-<title>RV64IMAFD+C · 5-Stage Pipelined RISC-V Core</title>
+<title>RV64IMAFDC + OoO + BVK · Pipelined & Out-of-Order RISC-V Cores</title>
 <style>
   :root {
     --bg-deep: #080b10;
@@ -355,20 +355,23 @@
 <div class="hero">
   <div class="shell hero-inner">
     <p class="eyebrow">RV64IMAFD+C · Verilog · Icarus + Verilator-verified</p>
-    <h1>A 5-stage pipelined<br>RISC-V core that <em>boots</em><br>real Linux kernel code.</h1>
+    <h1>A pipelined RISC-V core<br>that <em>boots</em> real Linux<br>— now out-of-order, too.</h1>
     <p class="lede">
-      In-order Fetch&nbsp;→ Decode&nbsp;→ Execute&nbsp;→ Memory&nbsp;→ Writeback, with hardware
-      forwarding, hazard detection, a real multi-cycle divider, full single- and double-precision
-      floating point, a from-scratch RVC (compressed instruction) decoder, the 'A' (atomic) extension,
-      M/S/U privilege modes with Sv32 and Sv39 MMUs, real asynchronous interrupts, a hand-rolled SBI
-      firmware, and an on-chip Wishbone-style bus with a Linux-driver-compatible ns16550a UART and CLINT
-      — checked against an independent instruction-set simulator, not just directed tests, and against a
-      real, unmodified Linux kernel image running on a Verilator-backed model. Every number on this page,
-      including the trace viewer at the bottom, is read directly off <code>design/riscvpipeline.v</code>
-      in simulation. Nothing here is illustrated.
+      An in-order 5-stage pipeline (Fetch&nbsp;→ Decode&nbsp;→ Execute&nbsp;→ Memory&nbsp;→ Writeback)
+      with hardware forwarding, hazard detection, a real multi-cycle divider, full single- and
+      double-precision floating point, a from-scratch RVC decoder, the 'A' (atomic) extension, M/S/U
+      privilege with Sv32/Sv39 MMUs, real asynchronous interrupts, a hand-rolled SBI firmware, and a
+      Linux-driver-compatible on-chip bus — checked against an independent instruction-set simulator and
+      a real, unmodified Linux kernel image on a Verilator-backed model. Alongside it, a genuinely
+      separate <strong>out-of-order core</strong> (register renaming, reservation stations, ROB, LSQ,
+      Tomasulo scheduling, dual-issue) now extended with ratified <strong>Bit-Manipulation, Vector, and
+      Cryptography</strong> ISA extensions, both cores running together on one heterogeneous SoC. Every
+      number on this page, including the trace viewer at the bottom, is read directly off the RTL in
+      simulation. Nothing here is illustrated.
     </p>
     <div class="hero-actions">
       <a class="btn primary" href="#viewer">Watch it execute →</a>
+      <a class="btn" href="#ooo">The out-of-order core →</a>
       <a class="btn" href="#verification">Verification evidence</a>
     </div>
   </div>
@@ -416,10 +419,11 @@
   </div>
 
   <div class="readout">
-    <div class="stat"><div class="v">90<span class="unit">/90</span></div><div class="l">directed tests passing</div></div>
+    <div class="stat"><div class="v">152<span class="unit">/152</span></div><div class="l">directed tests passing, both cores</div></div>
     <div class="stat"><div class="v">1000<span class="unit">+</span></div><div class="l">random programs vs. reference ISS</div></div>
     <div class="stat"><div class="v">200<span class="unit">M+</span></div><div class="l">real Linux kernel cycles, zero crashes</div></div>
-    <div class="stat"><div class="v">38</div><div class="l">ADRs — every real bug documented</div></div>
+    <div class="stat"><div class="v">67</div><div class="l">ADRs — every real bug documented</div></div>
+    <div class="stat"><div class="v">3<span class="unit">/5</span></div><div class="l">Gen 7 ISA extensions closed (B/V/K)</div></div>
     <div class="stat"><div class="v">0</div><div class="l">iverilog -Wall warnings</div></div>
   </div>
 </div>
@@ -530,6 +534,50 @@
     </p>
   </section>
 
+  <section class="block tight" id="ooo">
+    <h2>A second core: out-of-order, dynamically scheduled</h2>
+    <p class="intro">
+      <code>design/OOOCore.v</code> is a genuinely new top-level module, not a modification of
+      <code>riscvpipeline.v</code> — register renaming, a physical register file, per-unit reservation
+      stations, a reorder buffer, a load/store queue, Tomasulo-style Common-Data-Bus scheduling,
+      speculative branch/<code>jalr</code> execution, and dual-issue dispatch. <code>design/HeteroSoC.v</code>
+      runs it alongside <code>riscvpipeline.v</code> at the same time — a real heterogeneous dual-core SoC,
+      two different microarchitectures sharing one bus, not two copies of the same core. Closed as
+      Generation 6 (<code>docs/adr/0058</code>): 135/135 directed suite at closure, every scope item the
+      roadmap named (renaming, PRF, reservation stations, ROB, LSQ, Tomasulo, speculation, dual-issue)
+      done and verified.
+    </p>
+    <div class="vgrid">
+      <div class="vcard"><div class="k">ReservationStation.v</div><div class="d">One per functional unit (ALU/DIV/FALU/FDIV) — operands dispatch the moment they're ready, not in program order.</div></div>
+      <div class="vcard"><div class="k">ReorderBuffer.v</div><div class="d">Multi-ported completion, in-order retirement, precise exceptions.</div></div>
+      <div class="vcard"><div class="k">LoadStoreQueue.v</div><div class="d">Memory-ordering enforcement independent of the ALU pipeline's own out-of-order completion.</div></div>
+      <div class="vcard"><div class="k">HeteroSoC.v</div><div class="d">Both cores, one bus — a real heterogeneous dual-core SoC, not a hypothetical.</div></div>
+    </div>
+  </section>
+
+  <section class="block tight" id="gen7">
+    <h2>Generation 7: ratified ISA extensions, same shared decode path</h2>
+    <p class="intro">
+      Five pillars planned (<code>docs/adr/0059</code>), each a real RISC-V extension wired into the
+      out-of-order core's <em>existing</em> reservation stations, ROB, and CDB — zero new ports per
+      extension, zero standalone processor per extension. Three closed so far.
+    </p>
+    <div class="vgrid">
+      <div class="vcard"><div class="k">B — Bit-Manipulation <span class="status-pill done">closed</span></div><div class="d">Full ratified <code>Zba+Zbb+Zbs</code>, ~39 mnemonics incl. RV64-only word variants. 137/137 directed suite, constrained-random clean across scalar/OoO × XLEN 32/64 × Sv32/Sv39. <code>docs/adr/0060</code>.</div></div>
+      <div class="vcard"><div class="k">V — Vector Processing <span class="status-pill done">closed</span></div><div class="d">Vector register file, <code>vtype</code>/<code>vl</code> config, a per-element vector ALU + load/store unit, full-LMUL crack sequencer. 146/146 directed suite. <code>docs/adr/0065</code>/<code>0066</code>.</div></div>
+      <div class="vcard"><div class="k">K — Cryptography <span class="status-pill done">closed</span></div><div class="d">Full ratified <code>Zkn</code> — AES encrypt/decrypt/key-schedule, SHA-256/512, carry-less multiply, 22 mnemonics. FIPS-197 KAT verified end-to-end. 152/152 directed suite, real <code>clmul</code> benchmark (7 cycles HW vs. 12 scalar). <code>docs/adr/0067</code>.</div></div>
+      <div class="vcard"><div class="k">H — Hypervisor, P — Packed-SIMD <span class="status-pill wip">not started</span></div><div class="d">H needs real S-mode wired into <code>OOOCore.v</code> first (currently <code>sret</code> is hardwired off). P is an unratified draft extension, will be labeled as such throughout.</div></div>
+    </div>
+    <p class="intro" style="margin-top:18px">
+      Real bugs found along the way, not just decode gaps: RV64-only word-variant decode holes only
+      <code>--xlen 64</code> random testing caught (B); two independent pre-existing <code>slli.uw</code>
+      bugs in <code>ALU.v</code>/<code>ImmGen.v</code> found by K's own cross-check, unrelated to K itself
+      but fixed anyway; a cross-namespace CDB tag collision and a wrong PRF dispatch-readiness port found
+      by V's own closure benchmark. See <code>docs/adr/0058</code> through <code>0067</code> for the full
+      story.
+    </p>
+  </section>
+
   <section class="block tight" id="verification">
     <h2>Verification, not vibes</h2>
     <p class="intro">
@@ -539,8 +587,8 @@
       That process alone has found and fixed dozens of RTL bugs that no directed test caught.
     </p>
     <div class="vgrid">
-      <div class="vcard"><div class="k">Directed suite</div><div class="d">47 self-checking tests, 655 checks — ISA coverage, forwarding, hazards, float arithmetic, CSR/exception handling, branch resolution, bus/UART/timer behavior, interrupt redirect correctness.</div></div>
-      <div class="vcard"><div class="k">Random cross-check</div><div class="d">1000+ constrained-random programs matched bit-for-bit against the independent ISS reference model — including an opt-in mode that fires a real, unpredictably-timed interrupt mid-program while the ISS independently schedules its own.</div></div>
+      <div class="vcard"><div class="k">Directed suite</div><div class="d">152 self-checking tests, both cores — ISA coverage, forwarding, hazards, float arithmetic, CSR/exception handling, branch resolution, bus/UART/timer behavior, interrupt redirect correctness, out-of-order renaming/RS/ROB/LSQ/speculation, and every B/V/K instruction.</div></div>
+      <div class="vcard"><div class="k">Random cross-check</div><div class="d">1000+ constrained-random programs matched bit-for-bit against the independent ISS reference model — including an opt-in mode that fires a real, unpredictably-timed interrupt mid-program, and an <code>--ooo</code> mode targeting the out-of-order core.</div></div>
       <div class="vcard"><div class="k">RTL assertions</div><div class="d">4 embedded invariants (forwarding-select legality, stall/flush consistency, x0 hard-wired to zero, store-forwarding correctness) — verified to actually fire by deliberately reintroducing the bug each one guards against.</div></div>
       <div class="vcard"><div class="k">Functional coverage</div><div class="d">Per-opcode / per-branch-direction counters closed a real gap: <code>bne</code> was untested by any directed program until coverage caught it.</div></div>
     </div>
