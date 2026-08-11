@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 Minimal functional reference model (instruction set simulator) for this
-core's exact ISA -- RV32I + RV32M plus its specific deviations from
-standard RISC-V (the ble/bgt custom branches, the ctz custom op --
-ctz(0)==XLEN, matching real ctz semantics, since docs/adr/0041 fixed the
-prior ctz(0)==XLEN-1 off-by-one in both ALU.v and here). Sequential, one
-instruction at a time --
+core's exact ISA -- RV32I + RV32M + the B extension (Zba+Zbb+Zbs, docs/
+adr/0060) plus its specific deviations from standard RISC-V (the ble/bgt
+custom branches; ctz(0)==XLEN, matching real ctz semantics, since docs/
+adr/0041 fixed the prior ctz(0)==XLEN-1 off-by-one -- ctz itself now lives
+at its real Zbb encoding, not a custom opcode, since docs/adr/0060).
+Sequential, one instruction at a time --
 no pipeline, no hazards, because a sequential model has none by
 construction. Used by sim/tools/random_gen.py to compute expected final
 architectural state for constrained-random programs (docs/ROADMAP.md V-4),
@@ -1036,19 +1037,45 @@ class ISS:
                 else:  # remu
                     res = A if B == 0 else (self.uxlen(A) % self.uxlen(B))
                 self.wr(rd, res)
-            elif f7 == 0b0100000 and f3 == 0b111:  # custom ctz -- design/ALU.v's
-                # own CTZ case iterates `xl` cycles (docs/adr/0028's own
-                # XLEN-generalization). Was `xl - 1` (a real off-by-one only
-                # visible at A==0, giving xl-1 instead of the correct xl) --
-                # fixed in ALU.v, mirrored here (docs/adr/0041).
-                count = 0
-                done = False
-                for i in range(xl):
-                    if (A >> i) & 1 == 0 and not done:
-                        count += 1
-                    else:
-                        done = True
-                self.wr(rd, count)
+            # B extension (docs/adr/0060) -- FUNCT7_ALT+111 is now real
+            # `andn`, not the retired custom ctz (real ctz moved to its own
+            # Zbb I-type encoding under op==0b0010011 below).
+            elif f7 == 0b0100000 and f3 == 0b111:  # andn
+                self.wr(rd, A & (~B))
+            elif f7 == 0b0100000 and f3 == 0b110:  # orn
+                self.wr(rd, A | (~B))
+            elif f7 == 0b0100000 and f3 == 0b100:  # xnor
+                self.wr(rd, ~(A ^ B))
+            elif f7 == 0b0000101 and f3 == 0b100:  # min
+                self.wr(rd, A if self.sxlen(A) < self.sxlen(B) else B)
+            elif f7 == 0b0000101 and f3 == 0b101:  # minu
+                self.wr(rd, A if self.uxlen(A) < self.uxlen(B) else B)
+            elif f7 == 0b0000101 and f3 == 0b110:  # max
+                self.wr(rd, A if self.sxlen(A) > self.sxlen(B) else B)
+            elif f7 == 0b0000101 and f3 == 0b111:  # maxu
+                self.wr(rd, A if self.uxlen(A) > self.uxlen(B) else B)
+            elif f7 == 0b0110000 and f3 == 0b001:  # rol
+                sh = B & (xl - 1)
+                a = self.uxlen(A)
+                self.wr(rd, ((a << sh) | (a >> (xl - sh))) if sh else a)
+            elif f7 == 0b0110000 and f3 == 0b101:  # ror
+                sh = B & (xl - 1)
+                a = self.uxlen(A)
+                self.wr(rd, ((a >> sh) | (a << (xl - sh))) if sh else a)
+            elif f7 == 0b0010000 and f3 == 0b010:  # sh1add
+                self.wr(rd, (A << 1) + B)
+            elif f7 == 0b0010000 and f3 == 0b100:  # sh2add
+                self.wr(rd, (A << 2) + B)
+            elif f7 == 0b0010000 and f3 == 0b110:  # sh3add
+                self.wr(rd, (A << 3) + B)
+            elif f7 == 0b0100100 and f3 == 0b001:  # bclr
+                self.wr(rd, A & ~(1 << (B & (xl - 1))))
+            elif f7 == 0b0100100 and f3 == 0b101:  # bext
+                self.wr(rd, (A >> (B & (xl - 1))) & 1)
+            elif f7 == 0b0110100 and f3 == 0b001:  # binv
+                self.wr(rd, A ^ (1 << (B & (xl - 1))))
+            elif f7 == 0b0010100 and f3 == 0b001:  # bset
+                self.wr(rd, A | (1 << (B & (xl - 1))))
             else:
                 if f3 == 0 and f7 == 0:
                     res = self.uxlen(A + B)
@@ -1123,32 +1150,120 @@ class ISS:
                     res32 = u32(A) >> (B & 0x1F)
                 elif f3 == 5 and f7 == 0b0100000:  # sraw
                     res32 = u32(s32(A) >> (B & 0x1F))
+                # B extension (docs/adr/0060) -- RV64-only word variants
+                elif f7 == 0b0110000 and f3 == 0b001:  # rolw
+                    a = u32(A)
+                    sh = B & 0x1F
+                    res32 = ((a << sh) | (a >> (32 - sh))) & 0xFFFFFFFF if sh else a
+                elif f7 == 0b0110000 and f3 == 0b101:  # rorw
+                    a = u32(A)
+                    sh = B & 0x1F
+                    res32 = ((a >> sh) | (a << (32 - sh))) & 0xFFFFFFFF if sh else a
+                elif f7 == 0b0000100 and f3 == 0b000:  # add.uw (rs1=x0 form is the zext.w pseudo-op)
+                    self.wr(rd, (u32(A) + B))
+                    self.pc = next_pc
+                    return
+                elif f7 == 0b0010000 and f3 == 0b010:  # sh1add.uw
+                    self.wr(rd, (u32(A) << 1) + B)
+                    self.pc = next_pc
+                    return
+                elif f7 == 0b0010000 and f3 == 0b100:  # sh2add.uw
+                    self.wr(rd, (u32(A) << 2) + B)
+                    self.pc = next_pc
+                    return
+                elif f7 == 0b0010000 and f3 == 0b110:  # sh3add.uw
+                    self.wr(rd, (u32(A) << 3) + B)
+                    self.pc = next_pc
+                    return
                 else:
                     raise ValueError(f"unknown OP-32 f3={f3} f7={f7}")
             self.wr(rd, s32(res32))
             self.pc = next_pc
 
-        elif op == 0b0001011:  # custom ctz (opcode 0001011, docs/adr/0041 -- see design/riscv_defs.vh OPCODE_CUSTOM)
-            # docs/adr/0041: was `xl - 1` (same off-by-one as the other ctz
-            # dispatch site above), fixed to `xl`.
-            count = 0
-            done = False
-            for i in range(xl):
-                if (A >> i) & 1 == 0 and not done:
-                    count += 1
-                else:
-                    done = True
-            self.wr(rd, count)
-            self.pc = next_pc
-
         elif op == 0b0010011:  # I-type ALU
-            if f3 in (1, 5):
+            imm12 = (word >> 20) & 0xFFF
+            f6 = (word >> 26) & 0x3F  # funct7[6:1] -- real for every XLEN, see riscv_defs.vh's FUNCT6_ALT comment
+            if f3 in (1, 5) and f6 == 0b010010:  # bclri(f3=001) / bexti(f3=101)
+                sh = imm12 & (xl - 1)
+                if f3 == 1:
+                    self.wr(rd, A & ~(1 << sh))
+                else:
+                    self.wr(rd, (A >> sh) & 1)
+                self.pc = next_pc
+                return
+            elif f3 == 1 and f6 == 0b011010:  # binvi
+                sh = imm12 & (xl - 1)
+                self.wr(rd, A ^ (1 << sh))
+                self.pc = next_pc
+                return
+            elif f3 == 1 and f6 == 0b001010:  # bseti
+                sh = imm12 & (xl - 1)
+                self.wr(rd, A | (1 << sh))
+                self.pc = next_pc
+                return
+            elif f3 == 1 and f6 == 0b011000 and (imm12 & 0x1F) == 0b00000:  # clz
+                count = 0
+                for i in range(xl - 1, -1, -1):
+                    if (A >> i) & 1:
+                        break
+                    count += 1
+                self.wr(rd, count)
+                self.pc = next_pc
+                return
+            elif f3 == 1 and f6 == 0b011000 and (imm12 & 0x1F) == 0b00001:  # ctz -- real Zbb encoding (docs/adr/0060)
+                count = 0
+                done = False
+                for i in range(xl):
+                    if (A >> i) & 1 == 0 and not done:
+                        count += 1
+                    else:
+                        done = True
+                self.wr(rd, count)
+                self.pc = next_pc
+                return
+            elif f3 == 1 and f6 == 0b011000 and (imm12 & 0x1F) == 0b00010:  # cpop
+                self.wr(rd, bin(self.uxlen(A)).count("1"))
+                self.pc = next_pc
+                return
+            elif f3 == 1 and f6 == 0b011000 and (imm12 & 0x1F) == 0b00100:  # sext.b
+                self.wr(rd, sext(A & 0xFF, 8))
+                self.pc = next_pc
+                return
+            elif f3 == 1 and f6 == 0b011000 and (imm12 & 0x1F) == 0b00101:  # sext.h
+                self.wr(rd, sext(A & 0xFFFF, 16))
+                self.pc = next_pc
+                return
+            elif f3 == 5 and f6 == 0b011000:  # rori
+                sh = imm12 & (xl - 1)
+                a = self.uxlen(A)
+                self.wr(rd, ((a >> sh) | (a << (xl - sh))) if sh else a)
+                self.pc = next_pc
+                return
+            elif f3 == 5 and imm12 == 0x287:  # orc.b
+                a = self.uxlen(A)
+                nbytes = xl // 8
+                out = 0
+                for i in range(nbytes):
+                    byte = (a >> (i * 8)) & 0xFF
+                    out |= (0xFF if byte != 0 else 0x00) << (i * 8)
+                self.wr(rd, out)
+                self.pc = next_pc
+                return
+            elif f3 == 5 and imm12 == (0x698 if xl == 32 else 0x6B8):  # rev8
+                a = self.uxlen(A)
+                nbytes = xl // 8
+                out = 0
+                for i in range(nbytes):
+                    out |= ((a >> (i * 8)) & 0xFF) << ((nbytes - 1 - i) * 8)
+                self.wr(rd, out)
+                self.pc = next_pc
+                return
+            elif f3 in (1, 5):
                 # Generation 2: 6-bit shamt/6-bit funct6 at xlen>=64,
                 # matching design/ImmGen.v/design/ALUCtrl.v's own split --
                 # bit-exact with the original 5-bit/7-bit form at xlen=32.
                 if xl >= 64:
                     shamt = (word >> 20) & 0x3F
-                    f6 = (word >> 26) & 0x3F
                     is_alt = (f6 == 0b010000)
                 else:
                     shamt = (word >> 20) & 0x1F
@@ -1180,7 +1295,45 @@ class ISS:
             # srliw/sraiw. shamt always exactly 5 bits regardless of XLEN
             # (unlike OPCODE_I's shamt above) -- this opcode only ever means
             # a 32-bit result.
-            if f3 in (1, 5):
+            # B extension (docs/adr/0060) -- RV64-only word variants.
+            if f3 == 1 and f7 == 0b0110000 and rs2 == 0b00000:  # clzw
+                count = 0
+                for i in range(31, -1, -1):
+                    if (A >> i) & 1:
+                        break
+                    count += 1
+                self.wr(rd, count)
+                self.pc = next_pc
+                return
+            elif f3 == 1 and f7 == 0b0110000 and rs2 == 0b00001:  # ctzw
+                v = u32(A)
+                count = 0
+                done = False
+                for i in range(32):
+                    if (v >> i) & 1 == 0 and not done:
+                        count += 1
+                    else:
+                        done = True
+                self.wr(rd, count)
+                self.pc = next_pc
+                return
+            elif f3 == 1 and f7 == 0b0110000 and rs2 == 0b00010:  # cpopw
+                self.wr(rd, bin(u32(A)).count("1"))
+                self.pc = next_pc
+                return
+            elif f3 == 5 and f7 == 0b0110000:  # roriw
+                sh = (word >> 20) & 0x1F
+                a = u32(A)
+                res32 = ((a >> sh) | (a << (32 - sh))) & 0xFFFFFFFF if sh else a
+                self.wr(rd, s32(res32))
+                self.pc = next_pc
+                return
+            elif f3 == 1 and ((word >> 26) & 0x3F) == 0b000010:  # slli.uw -- 6-bit shamt, zero-extended result (not sign-extended)
+                sh = (word >> 20) & 0x3F
+                self.wr(rd, (u32(A) << sh))
+                self.pc = next_pc
+                return
+            elif f3 in (1, 5):
                 shamt = (word >> 20) & 0x1F
                 if f3 == 1:
                     res32 = u32(u32(A) << shamt)
