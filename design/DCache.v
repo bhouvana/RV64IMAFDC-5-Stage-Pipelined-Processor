@@ -288,6 +288,11 @@ reg [WAY_BITS-1:0]  age     [0:NUM_SETS-1][0:WAYS-1];
 // hit-write commit and has no ICache.v analog, since a read-only cache
 // never needs to identify a line to write into).
 genvar gw;
+// ADR 0068: declared here (not at its original site just above
+// gen_mshr_conflict, further down) because it's also used by
+// gen_pf_mshr_conflict, which comes first textually -- Vivado requires a
+// genvar declared before its first use; Icarus didn't care about order.
+genvar gm;
 wire [WAYS-1:0]          way_hit;
 wire [XLEN-1:0]          way_data   [0:WAYS-1];
 wire [LINE_IDX_BITS-1:0] way_lineidx[0:WAYS-1];
@@ -817,7 +822,7 @@ wire [31:0] fill_value = fill_do_merge
 // Generation 4, Phase E (docs/adr/0044-non-blocking-dcache-mshr-phase-e.md).
 // Does req_addr's own line already have an outstanding MSHR (queued or
 // actively being serviced)? Same N-way-compare shape way_hit already uses.
-genvar gm;
+// (genvar gm is declared once, up near genvar gw -- see that comment.)
 wire [MSHR_ENTRIES-1:0] mshr_line_match;
 generate
     for (gm = 0; gm < MSHR_ENTRIES; gm = gm + 1) begin : gen_mshr_conflict
