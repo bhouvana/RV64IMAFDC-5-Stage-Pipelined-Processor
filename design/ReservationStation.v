@@ -45,6 +45,36 @@ module ReservationStation #(
     parameter PREG_BITS     = 6,
     parameter ROB_IDX_BITS  = 5,
     parameter PAYLOAD_BITS  = 8,    // caller-defined opcode/control payload
+    // Generation 7, Pillar V backlog closure (docs/adr/0066). Real bug
+    // found by running (this project's own new --compare-vector
+    // benchmark, not a directed test): cdb_preg0..3 carry plain preg
+    // NUMBERS (0..PREG_BITS'd max) with no namespace tag distinguishing
+    // integer/float/vector register files -- RS_VLSU/RS_VALU/RS_FALU all
+    // mix integer- and vector/float-namespace sources on the SAME 4
+    // ports (documented as a real, flagged, "never observed" risk since
+    // Gen6-H / docs/adr/0062). A vector preg number can numerically equal
+    // an unrelated, concurrently-completing INTEGER preg number (both
+    // spaces are 0..63) -- when that source is fed into a src1/src2 field
+    // that can ONLY ever be produced by a SUBSET of the 4 ports (e.g.
+    // RS_VLSU's own vs3 store-data operand is always vector-namespace,
+    // never produced by ports 2/3's own integer completions), snooping
+    // ALL 4 ports unconditionally lets a same-numbered integer op
+    // spuriously mark that operand ready one or more cycles early --
+    // this project's own new bench_vecadd_vector.s kernel (mixed
+    // scalar+vector traffic, unlike every earlier isolated Gen7-V
+    // directed test) finally triggered it: a vse32.v issued with v3's
+    // pre-vadd.vv (reset-zero) value, silently storing zeros instead of
+    // the real computed result. Real fix: a per-instance, per-source
+    // STATIC port mask (caller knows, at ELABORATION time, which CDB
+    // ports can ever legitimately produce a given source -- this never
+    // varies dispatch-to-dispatch for a fixed operand ROLE, only the
+    // *value* riding that port does) -- defaults to 4'b1111 (every port
+    // live), bit-exact for every pre-existing instantiation that never
+    // passes these parameters at all (RS_ALU/RS_DIV/RS_FDIV, and
+    // RS_FALU/RS_VALU's own still-genuinely-mixed src2, left as
+    // pre-existing documented risk, not silently claimed fixed here).
+    parameter SRC1_PORT_MASK = 4'b1111,
+    parameter SRC2_PORT_MASK = 4'b1111,
     parameter ENTRY_BITS    = $clog2(RS_ENTRIES),
     parameter CNT_BITS      = $clog2(RS_ENTRIES+1)
 )(
@@ -171,10 +201,10 @@ wire disp1_ok = disp_en1 && alloc1_found;
 // PhysicalRegisterFile.v's own write-first bypass reasoning: a producer
 // broadcasting the exact cycle a dependent instruction dispatches must
 // be visible immediately, not one cycle late.
-wire disp0_s1_ready = disp_src1_ready0 || (cdb_valid0 && cdb_preg0 == disp_src1_preg0) || (cdb_valid1 && cdb_preg1 == disp_src1_preg0) || (cdb_valid2 && cdb_preg2 == disp_src1_preg0) || (cdb_valid3 && cdb_preg3 == disp_src1_preg0);
-wire disp0_s2_ready = disp_src2_ready0 || (cdb_valid0 && cdb_preg0 == disp_src2_preg0) || (cdb_valid1 && cdb_preg1 == disp_src2_preg0) || (cdb_valid2 && cdb_preg2 == disp_src2_preg0) || (cdb_valid3 && cdb_preg3 == disp_src2_preg0);
-wire disp1_s1_ready = disp_src1_ready1 || (cdb_valid0 && cdb_preg0 == disp_src1_preg1) || (cdb_valid1 && cdb_preg1 == disp_src1_preg1) || (cdb_valid2 && cdb_preg2 == disp_src1_preg1) || (cdb_valid3 && cdb_preg3 == disp_src1_preg1);
-wire disp1_s2_ready = disp_src2_ready1 || (cdb_valid0 && cdb_preg0 == disp_src2_preg1) || (cdb_valid1 && cdb_preg1 == disp_src2_preg1) || (cdb_valid2 && cdb_preg2 == disp_src2_preg1) || (cdb_valid3 && cdb_preg3 == disp_src2_preg1);
+wire disp0_s1_ready = disp_src1_ready0 || (SRC1_PORT_MASK[0] && cdb_valid0 && cdb_preg0 == disp_src1_preg0) || (SRC1_PORT_MASK[1] && cdb_valid1 && cdb_preg1 == disp_src1_preg0) || (SRC1_PORT_MASK[2] && cdb_valid2 && cdb_preg2 == disp_src1_preg0) || (SRC1_PORT_MASK[3] && cdb_valid3 && cdb_preg3 == disp_src1_preg0);
+wire disp0_s2_ready = disp_src2_ready0 || (SRC2_PORT_MASK[0] && cdb_valid0 && cdb_preg0 == disp_src2_preg0) || (SRC2_PORT_MASK[1] && cdb_valid1 && cdb_preg1 == disp_src2_preg0) || (SRC2_PORT_MASK[2] && cdb_valid2 && cdb_preg2 == disp_src2_preg0) || (SRC2_PORT_MASK[3] && cdb_valid3 && cdb_preg3 == disp_src2_preg0);
+wire disp1_s1_ready = disp_src1_ready1 || (SRC1_PORT_MASK[0] && cdb_valid0 && cdb_preg0 == disp_src1_preg1) || (SRC1_PORT_MASK[1] && cdb_valid1 && cdb_preg1 == disp_src1_preg1) || (SRC1_PORT_MASK[2] && cdb_valid2 && cdb_preg2 == disp_src1_preg1) || (SRC1_PORT_MASK[3] && cdb_valid3 && cdb_preg3 == disp_src1_preg1);
+wire disp1_s2_ready = disp_src2_ready1 || (SRC2_PORT_MASK[0] && cdb_valid0 && cdb_preg0 == disp_src2_preg1) || (SRC2_PORT_MASK[1] && cdb_valid1 && cdb_preg1 == disp_src2_preg1) || (SRC2_PORT_MASK[2] && cdb_valid2 && cdb_preg2 == disp_src2_preg1) || (SRC2_PORT_MASK[3] && cdb_valid3 && cdb_preg3 == disp_src2_preg1);
 
 // -- Issue (select): lowest-index entry with both operands ready --
 // same accumulator-chain style as the alloc scan above.
@@ -227,10 +257,10 @@ always @(posedge clk) begin
         // a live CDB broadcast becomes ready next cycle.
         for (reset_i = 0; reset_i < RS_ENTRIES; reset_i = reset_i + 1) begin
             if (valid[reset_i] && !src1_ready[reset_i]
-                && ((cdb_valid0 && cdb_preg0 == src1_preg[reset_i]) || (cdb_valid1 && cdb_preg1 == src1_preg[reset_i]) || (cdb_valid2 && cdb_preg2 == src1_preg[reset_i]) || (cdb_valid3 && cdb_preg3 == src1_preg[reset_i])))
+                && ((SRC1_PORT_MASK[0] && cdb_valid0 && cdb_preg0 == src1_preg[reset_i]) || (SRC1_PORT_MASK[1] && cdb_valid1 && cdb_preg1 == src1_preg[reset_i]) || (SRC1_PORT_MASK[2] && cdb_valid2 && cdb_preg2 == src1_preg[reset_i]) || (SRC1_PORT_MASK[3] && cdb_valid3 && cdb_preg3 == src1_preg[reset_i])))
                 src1_ready[reset_i] <= 1'b1;
             if (valid[reset_i] && !src2_ready[reset_i]
-                && ((cdb_valid0 && cdb_preg0 == src2_preg[reset_i]) || (cdb_valid1 && cdb_preg1 == src2_preg[reset_i]) || (cdb_valid2 && cdb_preg2 == src2_preg[reset_i]) || (cdb_valid3 && cdb_preg3 == src2_preg[reset_i])))
+                && ((SRC2_PORT_MASK[0] && cdb_valid0 && cdb_preg0 == src2_preg[reset_i]) || (SRC2_PORT_MASK[1] && cdb_valid1 && cdb_preg1 == src2_preg[reset_i]) || (SRC2_PORT_MASK[2] && cdb_valid2 && cdb_preg2 == src2_preg[reset_i]) || (SRC2_PORT_MASK[3] && cdb_valid3 && cdb_preg3 == src2_preg[reset_i])))
                 src2_ready[reset_i] <= 1'b1;
         end
 

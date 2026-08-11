@@ -1275,7 +1275,7 @@ RegisterAliasTable #(.NUM_AREGS(NUM_VREGS), .NUM_PREGS(NUM_VPREGS), .HARDWIRE_RE
 );
 
 wire [VLEN-1:0] prf_v_rdata0, prf_v_rdata1, prf_v_rdata2, prf_v_rdata3, prf_v_rdata4, prf_v_rdata5;
-wire            prf_v_rvalid0, prf_v_rvalid1, prf_v_rvalid2, prf_v_rvalid3;
+wire            prf_v_rvalid0, prf_v_rvalid1, prf_v_rvalid2, prf_v_rvalid3, prf_v_rvalid6;
 
 // SP_INIT explicitly sized to VLEN bits -- an unsized `0` override would
 // hit the same Icarus-self-determines-32-bit-width quirk Gen6-L's own
@@ -1301,12 +1301,22 @@ PhysicalRegisterFile #(.XLEN(VLEN), .NUM_PREGS(NUM_VPREGS), .NUM_AREGS(NUM_VREGS
     // raddr5 (Gen7-V Phase 3): RS_VLSU's own issue-time vs3 (store data)
     // read -- issue_src2_preg_vlsu holds the vs3 vector preg only when
     // is_vec_store (tied to 0 for loads, a harmless unused read there).
-    .raddr5(issue_src2_preg_vlsu), .raddr6({VPREG_BITS{1'b0}}), .raddr7({VPREG_BITS{1'b0}}),
+    // raddr6 (Gen7-V backlog closure, docs/adr/0066): a REAL dispatch-time
+    // readiness query for vs3 (the store-data register), addressed by
+    // rat_v_rpreg_vs3 -- the vlsu_disp_src2_ready wire below previously
+    // reused rvalid3, which is actually raddr3's own rvalid
+    // (issue_src2_preg_valu, RS_VALU's own ISSUE-time port, addressing
+    // whatever unrelated entry RS_VALU happens to be issuing that cycle,
+    // not vs3 at all) -- a real bug found by running (this phase's own
+    // new bench_vecadd_vector.s benchmark): a vse32.v could dispatch
+    // "ready" before vadd.vv's own real result existed, storing zeros.
+    // See this section's own vlsu_disp_src2_ready comment for the fix.
+    .raddr5(issue_src2_preg_vlsu), .raddr6(rat_v_rpreg_vs3), .raddr7({VPREG_BITS{1'b0}}),
     .raddr8({VPREG_BITS{1'b0}}), .raddr9({VPREG_BITS{1'b0}}), .raddr10({VPREG_BITS{1'b0}}), .raddr11({VPREG_BITS{1'b0}}), .raddr12({VPREG_BITS{1'b0}}),
     .rdata0(prf_v_rdata0), .rdata1(prf_v_rdata1), .rdata2(prf_v_rdata2), .rdata3(prf_v_rdata3), .rdata4(prf_v_rdata4),
     .rdata5(prf_v_rdata5), .rdata6(), .rdata7(), .rdata8(), .rdata9(), .rdata10(), .rdata11(), .rdata12(),
     .rvalid0(prf_v_rvalid0), .rvalid1(prf_v_rvalid1), .rvalid2(prf_v_rvalid2), .rvalid3(prf_v_rvalid3), .rvalid4(),
-    .rvalid5(), .rvalid6(), .rvalid7(), .rvalid8(), .rvalid9(), .rvalid10(), .rvalid11(), .rvalid12(),
+    .rvalid5(), .rvalid6(prf_v_rvalid6), .rvalid7(), .rvalid8(), .rvalid9(), .rvalid10(), .rvalid11(), .rvalid12(),
     .wen0(valu_complete_valid), .waddr0(valu_complete_dest_preg), .wdata0(valu_result),
     // Gen7-V Phase 3: wen1 is VLSU's own load completion.
     .wen1(vlsu_complete_valid), .waddr1(vlsu_complete_dest_preg), .wdata1(vlsu_result),
@@ -2632,7 +2642,18 @@ wire                 valu_disp_src2_ready = vec_arith_is_vi ? 1'b1 : (vec_arith_
 // from a still-in-flight .vx integer read landing at the same preg tag.
 wire [82:0] valu_disp_payload = {vec_arith_funct6, vec_arith_vm, vec_arith_use_scalar, vec_arith_is_vi, vsew_live, vec_local_vl[6:0], vec_arith_imm_sext};
 
-ReservationStation #(.RS_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(83)) m_RS_VALU(
+// Generation 7, Pillar V backlog closure (docs/adr/0066): src1 (vs2) is
+// ALWAYS vector-namespace regardless of .vv/.vx/.vi form -- only port0
+// (VALU's own completion) can ever legitimately produce it, never
+// ports1/2/3 (all integer-namespace). Masked, closing the same real
+// cross-namespace risk RS_VLSU's own identical mask just fixed (see
+// ReservationStation.v's own header). src2 is genuinely mixed (vector
+// for .vv, integer for .vx/.vi) and can't be statically narrowed the
+// same way -- left at the default (every port live), same real,
+// pre-existing, still-open risk this section's own header comment above
+// already documents; not silently claimed fixed here.
+ReservationStation #(.RS_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(83),
+                      .SRC1_PORT_MASK(4'b0001)) m_RS_VALU(
     .clk(clk), .rst(rst),
     .disp_en0(do_dispatch && is_vec_arith),
     .disp_src1_preg0(valu_disp_src1_preg), .disp_src1_ready0(valu_disp_src1_ready),
@@ -2719,7 +2740,15 @@ assign valu_complete_dest_preg = valu_inflight_dest_preg_r;
 wire [PREG_BITS-1:0] vlsu_disp_src1_preg = rat_rpreg0;
 wire                 vlsu_disp_src1_ready = prf_rvalid0;
 wire [PREG_BITS-1:0] vlsu_disp_src2_preg = is_vec_store ? {{(PREG_BITS-VPREG_BITS){1'b0}}, rat_v_rpreg_vs3} : {PREG_BITS{1'b0}};
-wire                 vlsu_disp_src2_ready = is_vec_store ? prf_v_rvalid3 : 1'b1;   // prf_v_rvalid3 mirrors RS_VALU's own vs1 dispatch-readiness query shape, reused here for vs3's identical bit-position read
+// Generation 7, Pillar V backlog closure (docs/adr/0066): a real bug,
+// found by running (bench_vecadd_vector.s) -- this used to read
+// prf_v_rvalid3, which is actually RS_VALU's own ISSUE-time port
+// (issue_src2_preg_valu), a completely unrelated in-flight entry, not a
+// dispatch-time query of vs3 at all. m_PRF_Vec's own raddr6/rvalid6
+// (added this phase) is a REAL dispatch-time query addressed by
+// rat_v_rpreg_vs3, the same preg disp_src2_preg0 above uses -- the two
+// now agree by construction.
+wire                 vlsu_disp_src2_ready = is_vec_store ? prf_v_rvalid6 : 1'b1;
 // {is_store(1), eew(3), vm(1)} = 5 bits -- vm rides the payload same as
 // eew/is_store (real spec masking applies to vle/vse exactly like
 // vector arithmetic, not a simplification to skip).
@@ -2733,7 +2762,18 @@ wire [4:0] issue_payload_vlsu;
 wire issue_valid_vlsu;
 wire [$clog2(8+1)-1:0] rs_vlsu_count;   // debug visibility only
 
-ReservationStation #(.RS_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(5)) m_RS_VLSU(
+// Generation 7, Pillar V backlog closure (docs/adr/0066): src1 (rs1, the
+// base address) is ALWAYS integer-namespace -- only ports 2 (int ALU)
+// and 3 (int load) can ever legitimately produce it, never port0/1
+// (vlsu/valu, both vector-namespace). src2 (vs3, store data) is ALWAYS
+// vector-namespace when it matters (a load ties it always-ready,
+// docs/adr/0064) -- only ports 0/1 can ever legitimately produce it,
+// never port2/3 (both integer-namespace). Masking out the illegitimate
+// ports on each closes the real cross-namespace CDB tag-collision this
+// phase's own new bench_vecadd_vector.s benchmark found by running (see
+// ReservationStation.v's own header for the full story).
+ReservationStation #(.RS_ENTRIES(8), .PREG_BITS(PREG_BITS), .ROB_IDX_BITS(ROB_IDX_BITS), .PAYLOAD_BITS(5),
+                      .SRC1_PORT_MASK(4'b1100), .SRC2_PORT_MASK(4'b0011)) m_RS_VLSU(
     .clk(clk), .rst(rst),
     .disp_en0(do_dispatch && is_vec_ls),
     .disp_src1_preg0(vlsu_disp_src1_preg), .disp_src1_ready0(vlsu_disp_src1_ready),

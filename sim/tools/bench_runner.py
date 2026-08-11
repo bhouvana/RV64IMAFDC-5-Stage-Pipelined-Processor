@@ -269,6 +269,87 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
 OOO_COMPATIBLE_BENCHES = ("bench_fib", "bench_sum_array")
 
 
+# Generation 7, Pillar V backlog closure (docs/adr/0066). --compare-vector's
+# own benchmark pair -- see bench_vecadd_scalar.s/bench_vecadd_vector.s's
+# own headers for the real workload (C[i]=A[i]+B[i], 8x int32). Both hand-
+# computed independent of any model: x10=396 is the real checksum
+# (11+22+...+88); the retirement targets were derived by running the
+# SCALAR file through iss.py (ISS has no vector-opcode support, so it can
+# only ever validate that half directly) to get its true dynamic count
+# (208), then swapping in the vector kernel's own measured-region dynamic
+# count by construction (4 setup + 5 fixed instructions = 9, no loop, no
+# ambiguity) in place of the scalar measured region's own (4 setup + 8
+# iterations * 9-instruction body = 76) -- 208 - 76 + 9 = 141. The shared
+# fill/reduction portions are byte-identical between the two files by
+# construction (see both files' own headers), so this subtraction is exact,
+# not an estimate.
+VECTOR_PAIR = ("bench_vecadd_scalar", "bench_vecadd_vector")
+EXPECTED_X10_VECTOR_PAIR = 396
+TARGET_RETIRED_VECTOR_PAIR = {"bench_vecadd_scalar": 208, "bench_vecadd_vector": 141}
+
+
+def run_bench_ooo_vector(name, prog_s, work_dir, iverilog_bin, mem_size, target_retired, xlen=64):
+    """Gen7-V backlog closure (docs/adr/0066). Like run_bench_ooo() but with
+    NO iss.py cross-check at all -- iss.py has zero OP-V opcode support
+    (confirmed by direct code read, sim/tools/iss.py's own step() dispatch
+    chain traps any opcode it doesn't recognize), so it cannot validate a
+    program containing real vector instructions, and cannot report a
+    trustworthy dynamic instruction count for one either. target_retired is
+    the caller's own hand-computed value instead (see VECTOR_PAIR's own
+    comment for how). Correctness is checked directly against the RTL's own
+    retired x10 value (bench_ooocore_vector_template.v's own extra dump
+    line), not an ISS comparison.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(prog_s) as f:
+        original_text = f.read()
+    stripped_text = strip_halt_trailer_for_ooo(original_text)
+    prog_s_ooo = os.path.join(work_dir, f"{name}_ooo.s")
+    with open(prog_s_ooo, "w") as f:
+        f.write(stripped_text)
+    asm_py = os.path.join(here, "asm.py")
+    prog_mem = os.path.join(work_dir, f"{name}_ooo.mem")
+    r = subprocess.run([sys.executable, asm_py, prog_s_ooo, "-o", prog_mem,
+                         "--size", str(mem_size), "--xlen", str(xlen)],
+                        capture_output=True, text=True)
+    if r.returncode != 0:
+        return None, f"assembler error: {r.stderr.strip()}"
+
+    max_time = (target_retired * 70 + 500) * 10
+    tag = f"{name}_ooovec"
+    dump_v = os.path.join(work_dir, f"{tag}.v")
+    out_path = os.path.join(work_dir, f"{tag}.out").replace("\\", "/")
+    init_file_rel = os.path.relpath(prog_mem, start=os.getcwd()).replace("\\", "/")
+    template = os.path.join(here, "..", "tb", "bench_ooocore_vector_template.v")
+    with open(template) as f:
+        tpl = f.read()
+    tpl = (tpl.replace("__INIT_FILE__", init_file_rel).replace("__MAX_TIME__", str(max_time))
+              .replace("__OUT_FILE__", out_path).replace("__MEM_SIZE__", str(mem_size))
+              .replace("__XLEN__", str(xlen)).replace("__TARGET_RETIRED__", str(target_retired)))
+    with open(dump_v, "w") as f:
+        f.write(tpl)
+
+    vvp_path = os.path.join(work_dir, f"{tag}.vvp")
+    iverilog_exe = os.path.join(iverilog_bin, "iverilog.exe") if iverilog_bin else "iverilog"
+    vvp_exe = os.path.join(iverilog_bin, "vvp.exe") if iverilog_bin else "vvp"
+    r = subprocess.run([iverilog_exe, "-g2005", "-I", "design", "-o", vvp_path, dump_v],
+                        capture_output=True, text=True)
+    if r.returncode != 0:
+        return None, f"compile error: {r.stderr.strip()[:500]}"
+    r = subprocess.run([vvp_exe, vvp_path], capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(out_path):
+        return None, f"simulation error: {r.stdout.strip()[:500]} {r.stderr.strip()[:500]}"
+    if "TIMEOUT" in r.stdout:
+        return None, f"RTL never reached target retirement count: {r.stdout.strip()[:300]}"
+
+    with open(out_path) as f:
+        vals = [int(l.strip()) for l in f if l.strip()]
+    cycles, x10 = vals[0], vals[1]
+    if x10 != EXPECTED_X10_VECTOR_PAIR:
+        return None, f"RTL correctness check failed: x10={x10}, expected {EXPECTED_X10_VECTOR_PAIR}"
+    return {"instructions": target_retired, "cycles": cycles, "ipc": target_retired / cycles}, None
+
+
 def strip_halt_trailer_for_ooo(text):
     """Gen6-L4: every sim/benchmarks/bench_*.s kernel ends in the identical
     `fence` + `halt:` + `jal x0, halt` block -- replaces it with plain nop
@@ -490,6 +571,12 @@ def main():
                                "(at --hazard-strategy/--pipeline-profile/--branch-predictor/"
                                "--replacement-policy, forced --cache-mode 1 and --mshr-entries 2 since "
                                "D$ prefetching is a no-op otherwise) and report the delta")
+    compare.add_argument("--compare-vector", action="store_true",
+                          help="Gen7-V backlog closure (docs/adr/0066): run bench_vecadd_scalar.s vs. "
+                               "bench_vecadd_vector.s, both on OOOCore.v (the only core with real vector "
+                               "support) -- a scalar loop vs. real vle32.v/vadd.vv/vse32.v computing the "
+                               "IDENTICAL result, and report the cycle/IPC delta. A separate code path "
+                               "entirely (like --compare-ooo), not part of the axis/pairs machinery below.")
     compare.add_argument("--compare-ooo", action="store_true",
                           help="Gen6-L4: run PIPELINED (default config, --hazard-strategy/--pipeline-"
                                "profile/--branch-predictor/--cache-mode/... all as passed) vs. OOOCore.v "
@@ -498,6 +585,37 @@ def main():
                                "A separate code path entirely, not part of the axis/pairs machinery below "
                                "(none of PIPELINED's own config knobs apply to OOOCore.v)")
     args = ap.parse_args()
+
+    if args.compare_vector:
+        # docs/adr/0066: deliberately NOT args.programs_dir -- these two
+        # files contain real OP-V opcodes riscvpipeline.v's own Control.v
+        # never decodes at all; living in sim/benchmarks/vector/ (not
+        # sim/benchmarks/ itself) keeps them out of the plain `bench_*.s`
+        # glob every other --compare-* mode and the no-flag default run
+        # both use against args.programs_dir, so they can never get routed
+        # through a core that would silently misexecute them.
+        vector_dir = os.path.join(args.programs_dir, "vector")
+        with tempfile.TemporaryDirectory() as work_dir:
+            results = {}
+            for name in VECTOR_PAIR:
+                prog_s = os.path.join(vector_dir, f"{name}.s")
+                if not os.path.exists(prog_s):
+                    print(f"FAIL  {name}: not found under {args.programs_dir}")
+                    continue
+                result, err = run_bench_ooo_vector(name, prog_s, work_dir, args.iverilog_dir,
+                                                    512, TARGET_RETIRED_VECTOR_PAIR[name], xlen=64)
+                if err:
+                    print(f"FAIL  {name}: {err}")
+                    continue
+                results[name] = result
+                print(f"{name:<22} cycles={result['cycles']:<6} IPC={result['ipc']:.3f} "
+                      f"instructions={result['instructions']}")
+            if len(results) == len(VECTOR_PAIR):
+                scalar_r, vector_r = results[VECTOR_PAIR[0]], results[VECTOR_PAIR[1]]
+                delta_pct = (vector_r["cycles"] - scalar_r["cycles"]) / scalar_r["cycles"] * 100
+                print(f"\nscalar cycles={scalar_r['cycles']}  vector cycles={vector_r['cycles']}  "
+                      f"delta={delta_pct:+.1f}% (negative = vector faster)")
+        sys.exit(0)
 
     if args.compare_ooo:
         here = os.path.dirname(os.path.abspath(__file__))
