@@ -648,12 +648,16 @@ Five pillars, each a real ISA extension integrated with the Generation 6 OoO cor
 through the existing reservation stations, and retired through the existing ROB — not five standalone
 processors:
 
-### 1. V — Vector Processing — **Phase 1 done**, `docs/adr/0061`
+### 1. V — Vector Processing — **Phases 1-2b done**, `docs/adr/0061`/`0062`/`0063`
 
-Real `vsetvli`/`vsetivli` (vl=min(AVL,VLMAX), full LMUL-aware VLMAX math, VLEN=512) reusing the
-existing `RS_ALU` path, plus a new vector register-file triad (`FreeList_Vec`/`RAT_Vec`/`PRF_Vec`,
-mirrors Gen6-H's own float triad). Vector arithmetic/masking (Phase 2) and `vle`/`vse` load/store
-(Phase 3) remain open — see `docs/adr/0061`'s own Future improvements.
+Real `vsetvli`/`vsetivli` (Phase 1), real integer vector arithmetic (`vadd`/`vsub`/`vrsub`/`vand`/`vor`/
+`vxor`/`vmin`/`vmax`/`vminu`/`vmaxu`, `.vv`/`.vx`/`.vi`, Phase 2a), and real full LMUL grouping via a
+crack-into-microops dispatch sequencer (Phase 2b) all execute end-to-end on `design/OOOCore.v` (VLEN=512).
+New `design/VALU.v` (iterative per-element engine), `RS_VALU` (existing `ReservationStation.v`, zero
+module changes), an additive ROB `is_vec_dest` bit + 6th completion port, and a 12th
+`PhysicalRegisterFile.v` read port. `v0.t` masking is proven inside `VALU.v` standalone but not yet
+exercised end-to-end through real dispatch; `vle`/`vse` load/store (Phase 3) remains open — see
+`docs/adr/0063`'s own Future improvements.
 
 - Vector register file.
 - Vector configuration/state (`vtype`, `vl`).
