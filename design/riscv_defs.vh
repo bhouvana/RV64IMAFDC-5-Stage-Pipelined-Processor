@@ -649,4 +649,23 @@
 `define CSR_ADDR_VTYPE  12'hC21  // read-only, same reasoning
 `define CSR_ADDR_VLENB  12'hC22  // read-only constant, VLEN/8
 
+// Generation 7, Pillar V, Phase 2a (docs/adr/0062, gen7-v-vector-phase2a.md).
+// OP-V arithmetic funct3 (category selector) and funct6 (real op) values,
+// verified against riscv/riscv-opcodes extensions/rv_v in Phase 1's own
+// research (docs/adr/0061), reused verbatim here.
+`define F3_OPIVV 3'b000   // vd,vs2,vs1 -- both vector sources
+`define F3_OPIVX 3'b100   // vd,vs2,rs1 -- rs1 is a scalar GPR, broadcast
+`define F3_OPIVI 3'b011   // vd,vs2,simm5 -- 5-bit sign-extended immediate
+
+`define VFUNCT6_ADD  6'h00
+`define VFUNCT6_SUB  6'h02   // .vv/.vx only, no .vi form (use vadd.vi with negated imm)
+`define VFUNCT6_RSUB 6'h03   // .vx/.vi only (reverse subtract: scalar - vs2)
+`define VFUNCT6_MINU 6'h04
+`define VFUNCT6_MIN  6'h05
+`define VFUNCT6_MAXU 6'h06
+`define VFUNCT6_MAX  6'h07
+`define VFUNCT6_AND  6'h09
+`define VFUNCT6_OR   6'h0a
+`define VFUNCT6_XOR  6'h0b
+
 `endif
