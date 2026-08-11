@@ -415,6 +415,30 @@ case(ALUCtl)
             ALUOut = {sha64[18:0],sha64[63:19]} ^ {sha64[60:0],sha64[63:61]} ^ (sha64 >> 6);
         end
 
+    // ---- Zbkx (docs/adr/0059 Pillar K) ---- nibble/byte crossbar lookup
+    // into A, indexed by each nibble/byte of B. Out-of-range index -> 0
+    // (explicit guard, since Verilog's `>>` on a fixed-width value does NOT
+    // auto-zero past the top the way Sail's arbitrary-precision shift does
+    // in the ratified spec).
+    `ALUCTL_XPERM4:
+        begin
+            ALUOut = 0;
+            for (i = 0; i < XLEN/4; i = i + 1) begin
+                xperm_idx4 = B[i*4 +: 4];
+                if (xperm_idx4 < XLEN/4)
+                    ALUOut[i*4 +: 4] = A[xperm_idx4*4 +: 4];
+            end
+        end
+    `ALUCTL_XPERM8:
+        begin
+            ALUOut = 0;
+            for (i = 0; i < XLEN/8; i = i + 1) begin
+                xperm_idx8 = B[i*8 +: 8];
+                if (xperm_idx8 < XLEN/8)
+                    ALUOut[i*8 +: 8] = A[xperm_idx8*8 +: 8];
+            end
+        end
+
 endcase
             zero = branch_zero;
 end
