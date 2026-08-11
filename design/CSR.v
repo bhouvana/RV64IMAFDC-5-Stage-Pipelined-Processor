@@ -28,10 +28,15 @@
 // "unimplemented CSR writes are silently dropped" default every other
 // unimplemented address already gets.
 module CSR #(
-    parameter XLEN = 32   // docs/adr/0015-xlen-and-regcount-parameterization.md.
+    parameter XLEN = 32,  // docs/adr/0015-xlen-and-regcount-parameterization.md.
                             // csr_addr stays a fixed 12 bits regardless -- the
                             // CSR address space width is set by the privileged
                             // spec's encoding, not XLEN.
+    parameter VLEN = 512   // Gen7 Pillar V Phase 1 (docs/adr/0061) -- only
+                             // used by CSR_ADDR_VLENB's own read value below;
+                             // every existing instantiation of this module
+                             // (riscvpipeline.v, and OOOCore.v before this
+                             // phase) simply gets the default, unused.
 )(
     input clk,
     input rst,
@@ -222,7 +227,26 @@ module CSR #(
     input stall_itlb_pulse,        // itlb_miss
     input stall_dtlb_pulse,        // dtlb_miss
     input stall_icache_pulse,      // icache_miss
-    input stall_imem_wait_pulse    // imem_wait
+    input stall_imem_wait_pulse,   // imem_wait
+
+    // Gen7 Pillar V Phase 1 (docs/adr/0061). vl/vsew/vlmul/vill: live
+    // decoded vtype/vl state -- unconnected until a future phase's vector
+    // arithmetic ops need it (mirrors frm_val's own "declared ahead of its
+    // real consumer" precedent, docs/adr/0019 Phase C1). vec_cfg_write_en/
+    // vec_cfg_new_*: a dedicated side channel, separate from the generic
+    // csr_write_en path, fired only by OOOCore.v's own single-outstanding
+    // vsetvli/vsetivli issue -- same "own independent write port, not the
+    // generic mux" precedent trap-entry CSRs (mepc/mcause, both driven by
+    // trap_taken above, not csr_write_en) already established in this file.
+    output wire [XLEN-1:0] vl_o,
+    output wire [2:0]      vsew_o,
+    output wire [2:0]      vlmul_o,
+    output wire            vill_o,
+
+    input  wire             vec_cfg_write_en,
+    input  wire [7:0]       vec_cfg_new_vtype,
+    input  wire             vec_cfg_new_vill,
+    input  wire [XLEN-1:0]  vec_cfg_new_vl
 );
 
     reg [XLEN-1:0] mstatus;  // bit3(MIE)/bit7(MPIE) real since docs/adr/0011; bit1(SIE)/bit5(SPIE)/
@@ -235,6 +259,22 @@ module CSR #(
     reg [XLEN-1:0] mcause;
     reg [4:0] fflags;  // {NV, DZ, OF, UF, NX} -- sticky, OR-accumulated, not overwritten by hardware
     reg [2:0] frm;
+
+    // Gen7 Pillar V Phase 1 (docs/adr/0061). vstart is an ordinary R/W CSR
+    // (spec allows plain csrrw); vtype/vl are written ONLY via the
+    // dedicated vec_cfg_write_en side channel below -- real spec technically
+    // allows plain csrrw to vl/vtype too (recomputing vl' from the OLD vl
+    // as AVL against the NEW vtype), but this core's own dispatch never
+    // generates that path in Phase 1's scope (only vsetvli/vsetivli write
+    // them) -- a real, narrow, flagged gap if a compiled program ever
+    // issues a raw `csrrw x0, vl, x5`, same honesty standard as every
+    // other Gen6/7 phase's own documented scope cut.
+    reg [15:0]      vstart;
+    reg [7:0]       vtype_fields;   // {vma,vta,vsew[2:0],vlmul[2:0]}
+    reg             vill;
+    reg [XLEN-1:0]  vl;
+    reg [1:0]       vxrm;    // storage only, no real fixed-point consumer yet
+    reg             vxsat;   // storage only, same reason
 
     // Phase F additions (storage only in this commit -- see the module
     // header/priv_mode_val's own comment above). sstatus/sie/sip are
@@ -388,6 +428,11 @@ module CSR #(
     assign mtvec_val = mtvec;
     assign mepc_val = mepc;
     assign frm_val = frm;
+    // Gen7 Pillar V Phase 1 (docs/adr/0061).
+    assign vl_o    = vl;
+    assign vsew_o  = vtype_fields[5:3];
+    assign vlmul_o = vtype_fields[2:0];
+    assign vill_o  = vill;
     assign mstatus_mie = mstatus[3];
     assign mstatus_mpie = mstatus[7];
     assign mstatus_sie = mstatus[`MSTATUS_SIE_BIT];
@@ -468,6 +513,14 @@ module CSR #(
             `CSR_ADDR_MTVAL:    csr_rdata = mtval;
             `CSR_ADDR_MIDELEG:  csr_rdata = mideleg;
             `CSR_ADDR_MEDELEG:  csr_rdata = medeleg;
+            // Gen7 Pillar V Phase 1 (docs/adr/0061).
+            `CSR_ADDR_VSTART:   csr_rdata = {{(XLEN-16){1'b0}}, vstart};
+            `CSR_ADDR_VTYPE:    csr_rdata = {vill, {(XLEN-9){1'b0}}, vtype_fields};
+            `CSR_ADDR_VL:       csr_rdata = vl;
+            `CSR_ADDR_VLENB:    csr_rdata = (VLEN/8);
+            `CSR_ADDR_VXRM:     csr_rdata = {{(XLEN-2){1'b0}}, vxrm};
+            `CSR_ADDR_VXSAT:    csr_rdata = {{(XLEN-1){1'b0}}, vxsat};
+            `CSR_ADDR_VCSR:     csr_rdata = {{(XLEN-3){1'b0}}, vxrm, vxsat};
             default:            csr_rdata = {XLEN{1'b0}};  // unimplemented CSR reads as 0 rather than trapping
         endcase
 
@@ -618,6 +671,13 @@ module CSR #(
             satp      <= {XLEN{1'b0}};
             mideleg   <= {XLEN{1'b0}};
             medeleg   <= {XLEN{1'b0}};
+            // Gen7 Pillar V Phase 1 (docs/adr/0061).
+            vstart       <= 16'd0;
+            vtype_fields <= 8'd0;
+            vill         <= 1'b0;
+            vl           <= {XLEN{1'b0}};
+            vxrm         <= 2'd0;
+            vxsat        <= 1'b0;
             // docs/adr/0025-hpc-performance-csrs.md (Phase J). mcountinhibit
             // resets to 0 (every counter counting by default, same "reset
             // to 0" convention every other CSR here already follows).
@@ -668,6 +728,31 @@ module CSR #(
                 frm <= new_val[2:0];
             else if (csr_write_en && csr_addr == `CSR_ADDR_FCSR)
                 frm <= new_val[7:5];
+
+            // Gen7 Pillar V Phase 1 (docs/adr/0061). vstart is an ordinary
+            // csrrX-writable CSR. vtype/vl are written ONLY via the
+            // dedicated vec_cfg_write_en side channel (see this module's
+            // own header) -- never through csr_write_en, so there's no
+            // collision to arbitrate against a plain CSR write the way
+            // e.g. mepc/trap_taken need.
+            if (csr_write_en && csr_addr == `CSR_ADDR_VSTART)
+                vstart <= new_val[15:0];
+
+            if (vec_cfg_write_en) begin
+                vtype_fields <= vec_cfg_new_vtype;
+                vill         <= vec_cfg_new_vill;
+                vl           <= vec_cfg_new_vl;
+            end
+
+            if (csr_write_en && csr_addr == `CSR_ADDR_VXRM)
+                vxrm <= new_val[1:0];
+            else if (csr_write_en && csr_addr == `CSR_ADDR_VCSR)
+                vxrm <= new_val[2:1];
+
+            if (csr_write_en && csr_addr == `CSR_ADDR_VXSAT)
+                vxsat <= new_val[0];
+            else if (csr_write_en && csr_addr == `CSR_ADDR_VCSR)
+                vxsat <= new_val[0];
 
             // docs/adr/00NN-mmu-sv32.md (Phase F3). trap_taken now splits
             // on trap_target_is_s -- a trap delegated to S touches
