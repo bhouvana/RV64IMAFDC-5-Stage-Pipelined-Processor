@@ -92,7 +92,7 @@ SYSTEM_IMM12 = {"ecall": 0x000, "ebreak": 0x001, "mret": 0x302, "sret": 0x102}
 FUNCT7_SFENCE_VMA = 0b0001001  # docs/adr/00NN-mmu-sv32.md (Phase F2)
 
 FUNCT7_BASE = 0b0000000
-FUNCT7_ALT = 0b0100000    # sub/sra, and this core's custom ctz
+FUNCT7_ALT = 0b0100000    # sub/sra, and (docs/adr/0060) real andn/orn/xnor
 FUNCT7_MULDIV = 0b0000001  # RV32M
 
 R_TYPE = {  # mnemonic: (full funct7, funct3)
@@ -104,10 +104,35 @@ R_TYPE = {  # mnemonic: (full funct7, funct3)
     "mulhsu": (FUNCT7_MULDIV, 0b010), "mulhu": (FUNCT7_MULDIV, 0b011),
     "div": (FUNCT7_MULDIV, 0b100), "divu": (FUNCT7_MULDIV, 0b101),
     "rem": (FUNCT7_MULDIV, 0b110), "remu": (FUNCT7_MULDIV, 0b111),
+    # B extension: Zba+Zbb+Zbs (docs/adr/0060), verified against the real
+    # riscv/riscv-opcodes tables -- FUNCT7_ALT+111/110/100 are real
+    # andn/orn/xnor, NOT the retired custom ctz.
+    "andn": (FUNCT7_ALT, 0b111), "orn": (FUNCT7_ALT, 0b110), "xnor": (FUNCT7_ALT, 0b100),
+    "min": (0b0000101, 0b100), "minu": (0b0000101, 0b101), "max": (0b0000101, 0b110), "maxu": (0b0000101, 0b111),
+    "rol": (0b0110000, 0b001), "ror": (0b0110000, 0b101),
+    "sh1add": (0b0010000, 0b010), "sh2add": (0b0010000, 0b100), "sh3add": (0b0010000, 0b110),
+    "bclr": (0b0100100, 0b001), "bext": (0b0100100, 0b101), "binv": (0b0110100, 0b001), "bset": (0b0010100, 0b001),
 }
 I_TYPE = {  # mnemonic: funct3 (funct7[5] used only by srli/srai)
     "addi": 0b000, "slli": 0b001, "slti": 0b010, "sltiu": 0b011,
     "xori": 0b100, "srli": 0b101, "srai": 0b101, "ori": 0b110, "andi": 0b111,
+}
+# B extension (docs/adr/0060). bclri/bexti/binvi/bseti/rori share slli/srli/
+# srai's own funct6+shamt shape (see i_type()'s own xlen-dependent split) --
+# mnemonic: (funct6, funct3).
+I_TYPE_BEXT_SHAMT = {
+    "bclri": (0b010010, 0b001), "bexti": (0b010010, 0b101),
+    "binvi": (0b011010, 0b001), "bseti": (0b001010, 0b001),
+    "rori":  (0b011000, 0b101),
+}
+# clz/ctz/cpop/sext.b/sext.h -- rs1-only, no shamt at all, a fully fixed
+# 12-bit immediate (funct6<<6 | rs2-field-as-selector). ctz moved here from
+# its old custom-opcode encoding -- real Zbb slot now (docs/adr/0060).
+I_TYPE_BEXT_FIXED = {
+    "clz": (0x600, 0b001), "ctz": (0x601, 0b001), "cpop": (0x602, 0b001),
+    "sext.b": (0x604, 0b001), "sext.h": (0x605, 0b001), "orc.b": (0x287, 0b101),
+    # rev8's own immediate is XLEN-dependent (0x698 at 32, 0x6b8 at 64) --
+    # handled separately in assemble(), not via this fixed dict.
 }
 BRANCH = {  # mnemonic: funct3 -- beq/bne/blt/bge/ble/bgt/bltu/bgeu. blt/bge at real RISC-V
     # spec positions (100/101); ble/bgt are this core's own custom ops, at the reserved
@@ -128,11 +153,21 @@ R_TYPE_W = {
     "mulw": (FUNCT7_MULDIV, 0b000),
     "divw": (FUNCT7_MULDIV, 0b100), "divuw": (FUNCT7_MULDIV, 0b101),
     "remw": (FUNCT7_MULDIV, 0b110), "remuw": (FUNCT7_MULDIV, 0b111),
+    # B extension, RV64-only word variants (docs/adr/0060).
+    "rolw": (0b0110000, 0b001), "rorw": (0b0110000, 0b101),
+    "add.uw": (0b0000100, 0b000),
+    "sh1add.uw": (0b0010000, 0b010), "sh2add.uw": (0b0010000, 0b100), "sh3add.uw": (0b0010000, 0b110),
 }
 # addiw/slliw/srliw/sraiw -- shamt is always exactly 5 bits regardless of
 # XLEN (spec-mandated, unlike the plain slli/srli/srai below, which widen to
 # 6 bits at XLEN=64 -- see i_type()'s own xlen parameter).
 I_TYPE_W = {"addiw": 0b000, "slliw": 0b001, "srliw": 0b101, "sraiw": 0b101}
+# B extension, RV64-only word variants (docs/adr/0060). clzw/ctzw/cpopw: no
+# shamt, fixed 12-bit immediate under OP_IMM_32. roriw/slli.uw handled
+# separately in assemble() -- roriw keeps OP_32's own full-funct7+5-bit-shamt
+# shape (not funct6-split), slli.uw genuinely needs a 6-bit shamt despite
+# living on OP_IMM_32 (see riscv_defs.vh's own FUNCT6_ZBA_SLLIUW comment).
+I_TYPE_W_BEXT_FIXED = {"clzw": 0x600, "ctzw": 0x601, "cpopw": 0x602}
 
 # RV32F (docs/adr/0019-f-extension.md, Phase C9). Encodings mirror
 # design/riscv_defs.vh exactly -- that file is the single source of truth
@@ -268,9 +303,48 @@ def jal(rd, offset_bytes):
     return (b20 << 31) | (b19_12 << 12) | (b11 << 20) | (b10_1 << 21) | (rd << 7) | OP_JAL
 
 
-def ctz(rd, rs1):
-    # custom op: opcode 0001011 (docs/adr/0041), funct7=0100000 (FUNCT7_ALT), funct3=111 (see design/ALUCtrl.v ALUCtl=10101)
-    return (FUNCT7_ALT << 25) | (0 << 20) | (rs1 << 15) | (0b111 << 12) | (rd << 7) | OP_CUSTOM
+def i_type_raw(imm12, f3, rd, rs1, opcode=OP_I):
+    # Shared low-level I-type encoder: caller has already resolved the full
+    # 12-bit immediate and funct3 -- used by every B-ext I-type helper below
+    # instead of duplicating this one-liner four times (docs/adr/0060).
+    return (u(imm12, 12) << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | opcode
+
+
+def i_type_bext_shamt(mn, rd, rs1, immv, xlen=32):
+    # bclri/bexti/binvi/bseti/rori -- same funct6+shamt split as slli/srli/
+    # srai (see i_type()'s own comment): 5-bit shamt/7-bit-view at XLEN=32,
+    # 6-bit shamt/6-bit funct6 at XLEN=64 (docs/adr/0060).
+    f6, f3 = I_TYPE_BEXT_SHAMT[mn]
+    shamt = imm(immv, 6 if xlen >= 64 else 5, signed=False)
+    imm12 = (f6 << 6) | shamt
+    return i_type_raw(imm12, f3, rd, rs1)
+
+
+def i_type_bext_fixed(mn, rd, rs1):
+    imm12, f3 = I_TYPE_BEXT_FIXED[mn]
+    return i_type_raw(imm12, f3, rd, rs1)
+
+
+def rev8(rd, rs1, xlen=32):
+    imm12 = 0x698 if xlen == 32 else 0x6B8
+    return i_type_raw(imm12, 0b101, rd, rs1)
+
+
+def i_type_w_bext_fixed(mn, rd, rs1):
+    imm12 = I_TYPE_W_BEXT_FIXED[mn]
+    return i_type_raw(imm12, 0b001, rd, rs1, opcode=OP_IMM_32)
+
+
+def roriw(rd, rs1, immv):
+    shamt = imm(immv, 5, signed=False)
+    imm12 = (0b0110000 << 5) | shamt
+    return i_type_raw(imm12, 0b101, rd, rs1, opcode=OP_IMM_32)
+
+
+def slli_uw(rd, rs1, immv):
+    shamt = imm(immv, 6, signed=False)
+    imm12 = (0b000010 << 6) | shamt
+    return i_type_raw(imm12, 0b001, rd, rs1, opcode=OP_IMM_32)
 
 
 def fp_r_type(funct5, rd, rs1, rs2, rm):
@@ -411,18 +485,36 @@ def assemble(lines, xlen=32):
         elif mn in R_TYPE:
             rd, rs1, rs2 = reg(args[0]), reg(args[1]), reg(args[2])
             words.append(r_type(mn, rd, rs1, rs2))
-        elif mn == "ctz":
-            rd, rs1 = reg(args[0]), reg(args[1])
-            words.append(ctz(rd, rs1))
         elif mn in I_TYPE:
             rd, rs1 = reg(args[0]), reg(args[1])
             words.append(i_type(mn, rd, rs1, args[2], xlen=xlen))
+        elif mn in I_TYPE_BEXT_SHAMT:  # bclri/bexti/binvi/bseti/rori (docs/adr/0060)
+            rd, rs1 = reg(args[0]), reg(args[1])
+            words.append(i_type_bext_shamt(mn, rd, rs1, args[2], xlen=xlen))
+        elif mn in I_TYPE_BEXT_FIXED:  # clz/ctz/cpop/sext.b/sext.h/orc.b (docs/adr/0060)
+            rd, rs1 = reg(args[0]), reg(args[1])
+            words.append(i_type_bext_fixed(mn, rd, rs1))
+        elif mn == "rev8":
+            rd, rs1 = reg(args[0]), reg(args[1])
+            words.append(rev8(rd, rs1, xlen=xlen))
+        elif mn == "zext.w":  # pseudo-op: add.uw rd,rs1,x0 (RV64-only, docs/adr/0060)
+            rd, rs1 = reg(args[0]), reg(args[1])
+            words.append(r_type_w("add.uw", rd, rs1, 0))
         elif mn in R_TYPE_W:
             rd, rs1, rs2 = reg(args[0]), reg(args[1]), reg(args[2])
             words.append(r_type_w(mn, rd, rs1, rs2))
         elif mn in I_TYPE_W:
             rd, rs1 = reg(args[0]), reg(args[1])
             words.append(i_type_w(mn, rd, rs1, args[2]))
+        elif mn in I_TYPE_W_BEXT_FIXED:  # clzw/ctzw/cpopw (docs/adr/0060)
+            rd, rs1 = reg(args[0]), reg(args[1])
+            words.append(i_type_w_bext_fixed(mn, rd, rs1))
+        elif mn == "roriw":
+            rd, rs1 = reg(args[0]), reg(args[1])
+            words.append(roriw(rd, rs1, args[2]))
+        elif mn == "slli.uw":
+            rd, rs1 = reg(args[0]), reg(args[1])
+            words.append(slli_uw(rd, rs1, args[2]))
         elif mn in LOAD:
             rd = reg(args[0])
             m = re.match(r"(-?\w+)\((x\d+)\)", args[1])
