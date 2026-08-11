@@ -6,6 +6,13 @@
 // instruction class this is: load/store, R-type, I-type, or branch) plus
 // the instruction's own funct3/funct7 fields into the specific ALUCtl code
 // ALU.v's case statement switches on.
+//
+// docs/adr/0060 (Gen7-B1): gained `rs2_c` (inst[24:20]) -- most B-ext I-type
+// ops discriminate via funct6 (funct7[6:1]) same as the pre-existing SRL/SRA
+// split, but clz/ctz/cpop/sext.b/sext.h share ONE funct6+funct3 combination
+// and differ only in this rs2-like field, the same "rs2 field doubles as a
+// sub-op selector" idiom riscvpipeline.v:1579 already uses for F-extension's
+// fcvt.w.s/fcvt.wu.s.
 module ALUCtrl (
     input [1:0] ALUOp,
 
@@ -13,10 +20,13 @@ module ALUCtrl (
                             // single bit (inst[30]) to make room for RV32M's
                             // funct7=0000001, see docs/adr/0006-rv32m.md
     input [2:0] funct3_c,
-    output reg [4:0] ALUCtl
+    input [4:0] rs2_c,     // inst[24:20] -- shamt on shift-immediate ops,
+                            // sub-op selector on the clz/ctz/cpop/sext family
+    output reg [5:0] ALUCtl
 );
 wire [2:0] funct3 = funct3_c;
 wire [6:0] funct7 = funct7_c;
+wire [5:0] funct6 = funct7_c[6:1];
 wire [4:0] concat2;
 
 assign concat2 = {ALUOp,funct3};
@@ -39,7 +49,6 @@ else if(ALUOp == `ALUOP_RTYPE)
         {`FUNCT7_ALT,  3'b101}: ALUCtl = `ALUCTL_SRA;
         {`FUNCT7_BASE, 3'b110}: ALUCtl = `ALUCTL_OR;
         {`FUNCT7_BASE, 3'b111}: ALUCtl = `ALUCTL_AND;
-        {`FUNCT7_ALT,  3'b111}: ALUCtl = `ALUCTL_CTZ;    //custom: number of trailing zeroes
         // RV32M (docs/adr/0006-rv32m.md)
         {`FUNCT7_MULDIV, 3'b000}: ALUCtl = `ALUCTL_MUL;
         {`FUNCT7_MULDIV, 3'b001}: ALUCtl = `ALUCTL_MULH;
@@ -49,6 +58,24 @@ else if(ALUOp == `ALUOP_RTYPE)
         {`FUNCT7_MULDIV, 3'b101}: ALUCtl = `ALUCTL_DIVU;
         {`FUNCT7_MULDIV, 3'b110}: ALUCtl = `ALUCTL_REM;
         {`FUNCT7_MULDIV, 3'b111}: ALUCtl = `ALUCTL_REMU;
+        // B extension (docs/adr/0060) -- FUNCT7_ALT+111 is now real `andn`,
+        // not the retired custom ctz (see docs/adr/0060's own findings).
+        {`FUNCT7_ALT, 3'b111}: ALUCtl = `ALUCTL_ANDN;
+        {`FUNCT7_ALT, 3'b110}: ALUCtl = `ALUCTL_ORN;
+        {`FUNCT7_ALT, 3'b100}: ALUCtl = `ALUCTL_XNOR;
+        {`FUNCT7_ZBB_MINMAX, 3'b100}: ALUCtl = `ALUCTL_MIN;
+        {`FUNCT7_ZBB_MINMAX, 3'b101}: ALUCtl = `ALUCTL_MINU;
+        {`FUNCT7_ZBB_MINMAX, 3'b110}: ALUCtl = `ALUCTL_MAX;
+        {`FUNCT7_ZBB_MINMAX, 3'b111}: ALUCtl = `ALUCTL_MAXU;
+        {`FUNCT7_ZBB_ROTATE, 3'b001}: ALUCtl = `ALUCTL_ROL;
+        {`FUNCT7_ZBB_ROTATE, 3'b101}: ALUCtl = `ALUCTL_ROR;
+        {`FUNCT7_ZBA_SHADD, 3'b010}: ALUCtl = `ALUCTL_SH1ADD;
+        {`FUNCT7_ZBA_SHADD, 3'b100}: ALUCtl = `ALUCTL_SH2ADD;
+        {`FUNCT7_ZBA_SHADD, 3'b110}: ALUCtl = `ALUCTL_SH3ADD;
+        {`FUNCT7_ZBS_BCLR_BEXT, 3'b001}: ALUCtl = `ALUCTL_BCLR;
+        {`FUNCT7_ZBS_BCLR_BEXT, 3'b101}: ALUCtl = `ALUCTL_BEXT;
+        {`FUNCT7_ZBS_BINV, 3'b001}: ALUCtl = `ALUCTL_BINV;
+        {`FUNCT7_ZBS_BSET, 3'b001}: ALUCtl = `ALUCTL_BSET;
         default:
         ALUCtl = `ALUCTL_ILLEGAL;  // unrecognized funct7/funct3 combination for this ALUOp
     endcase
@@ -87,27 +114,55 @@ else if(ALUOp == `ALUOP_ITYPE)
     case(concat2)
         5'b11000: // add imm
         ALUCtl = `ALUCTL_ADD;
-        5'b11001://shift left logical imm
-        ALUCtl = `ALUCTL_SLL;
+        5'b11001://shift left logical imm, OR B-ext bclri/binvi/bseti/clz-family (funct6-discriminated)
+        begin
+            if (funct6 == `FUNCT6_ZBS_BCLRI_BEXTI)
+                ALUCtl = `ALUCTL_BCLR;   // bclri shares ALUCTL_BCLR with register-form bclr -- B operand already carries the shamt value via ImmGen either way
+            else if (funct6 == `FUNCT6_ZBS_BINVI)
+                ALUCtl = `ALUCTL_BINV;
+            else if (funct6 == `FUNCT6_ZBS_BSETI)
+                ALUCtl = `ALUCTL_BSET;
+            else if (funct6 == `FUNCT6_ZBB_RORI_CLZFAM)
+            begin
+                case (rs2_c)
+                    `RS2_CLZ:   ALUCtl = `ALUCTL_CLZ;
+                    `RS2_CTZ:   ALUCtl = `ALUCTL_CTZ;
+                    `RS2_CPOP:  ALUCtl = `ALUCTL_CPOP;
+                    `RS2_SEXTB: ALUCtl = `ALUCTL_SEXTB;
+                    `RS2_SEXTH: ALUCtl = `ALUCTL_SEXTH;
+                    default:    ALUCtl = `ALUCTL_ILLEGAL;
+                endcase
+            end
+            else
+                ALUCtl = `ALUCTL_SLL;  // ordinary slli, funct6==0
+        end
         5'b11010://set less than imm
         ALUCtl = `ALUCTL_SLT;
         5'b11011://set less than unsigned imm
         ALUCtl = `ALUCTL_SLTU;
         5'b11100://xor imm
         ALUCtl = `ALUCTL_XOR;
-        5'b11101://srl imm and sra imm
+        5'b11101://srl imm, sra imm, OR B-ext bexti/rori/orc.b/rev8 (funct6-discriminated)
         begin
             // Generation 2 (Phase M): compares only funct7[6:1], not the
-            // full 7-bit funct7 == FUNCT7_ALT this used before. RV64I's
-            // full-width slli/srli/srai widen shamt from 5 bits
-            // (inst[24:20]) to 6 (inst[25:20]) -- bit 25 (funct7's old low
-            // bit) is now part of shamt, not the discriminator. Bit-exact
-            // for every RV32-legal encoding (bit 25 is spec-0 there), see
+            // full 7-bit funct7 == FUNCT7_ALT this used before. See
             // riscv_defs.vh's FUNCT6_ALT comment.
-            if(funct7[6:1] == `FUNCT6_ALT)
-            ALUCtl = `ALUCTL_SRA;
+            if(funct6 == `FUNCT6_ALT)
+                ALUCtl = `ALUCTL_SRA;
+            else if (funct6 == `FUNCT6_ZBS_BCLRI_BEXTI)
+                ALUCtl = `ALUCTL_BEXT;
+            else if (funct6 == `FUNCT6_ZBB_RORI_CLZFAM)
+                ALUCtl = `ALUCTL_ROR;   // rori shares ALUCTL_ROR with register-form ror
+            else if (funct6 == `FUNCT6_ZBB_ORCB && rs2_c == 5'b00111)
+                // FUNCT6_ZBB_ORCB(0x0A) is shared bit-pattern with BSETI's
+                // funct6, disambiguated by funct3 already (this arm is
+                // funct3=101, BSETI is funct3=001) -- orc.b's own rs2-field
+                // is fixed 5'b00111 by spec, checked precisely for clarity.
+                ALUCtl = `ALUCTL_ORCB;
+            else if (funct6 == `FUNCT6_ZBB_REV8 && rs2_c == 5'b11000)
+                ALUCtl = `ALUCTL_REV8;  // rev8's rs2-field(0x18) is fixed by spec regardless of XLEN; only ALU.v's own byte-count differs
             else
-            ALUCtl = `ALUCTL_SRL;
+                ALUCtl = `ALUCTL_SRL;
         end
         5'b11110:
         ALUCtl = `ALUCTL_OR;//OR imm
