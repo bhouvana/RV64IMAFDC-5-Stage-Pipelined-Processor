@@ -139,9 +139,9 @@
 `define ALUCTL_SH2ADD   6'b110100
 `define ALUCTL_SH3ADD   6'b110101
 `define ALUCTL_ADD_UW     6'b110110  // zero-extends A[31:0] before adding -- NOT the same as wordOp (which truncates/sign-extends the RESULT)
-`define ALUCTL_SH1ADD_UW  6'b110111
-`define ALUCTL_SH2ADD_UW  6'b111000
-`define ALUCTL_SH3ADD_UW  6'b111001
+// sh1add.uw/sh2add.uw/sh3add.uw deliberately have NO dedicated code here --
+// they share ALUCTL_SH1ADD/SH2ADD/SH3ADD with their register-width siblings,
+// disambiguated by wordOp in ALU.v (docs/adr/0060, see ALUCtrl.v's comment).
 `define ALUCTL_SLLI_UW    6'b111010  // shift left then zero-extend the low-32-bit result to XLEN
 
 // funct7 for the B-ext R-type groups (funct3 alone distinguishes within each)

@@ -166,14 +166,33 @@ case(ALUCtl)
             // would have examined bit XLEN-1, so this only ever mattered
             // for the all-zero case, where the correct answer is XLEN, not
             // XLEN-1). See docs/adr/0041's own findings section.
+            //
+            // docs/adr/0060 (Gen7-B10 random-test finding): this case had
+            // NO wordOp branch at all until now -- harmless while ctz was
+            // reachable only via the retired custom opcode (no W-suffixed
+            // sibling ever existed), but ctzw (docs/adr/0060) shares this
+            // same ALUCTL code with wordOp=1 and needs the 32-bit-only
+            // count, not the full XLEN count. Found by the constrained-
+            // random harness (ctzw x18,x6 with x6==0 gave 64, not the
+            // correct 32) -- mirrors CLZ's own wordOp split below.
             count = 0;
-            done =0;
-            for(i =0 ; i<XLEN ; i=i+1)
-            begin
-                if(A[i] == 0 && done ==0)
-                    count = count + 1;
-                else
-                done =1;
+            done = 0;
+            if (wordOp) begin
+                for (i = 0; i < 32; i = i + 1)
+                begin
+                    if (A[i] == 0 && done == 0)
+                        count = count + 1;
+                    else
+                    done = 1;
+                end
+            end else begin
+                for (i = 0; i < XLEN; i = i + 1)
+                begin
+                    if (A[i] == 0 && done == 0)
+                        count = count + 1;
+                    else
+                    done = 1;
+                end
             end
             ALUOut = count;
 
@@ -242,13 +261,16 @@ case(ALUCtl)
     `ALUCTL_BEXT: ALUOut = (A >> B[SHAMT_WIDTH-1:0]) & {{(XLEN-1){1'b0}},1'b1};
     `ALUCTL_BINV: ALUOut = A ^ ({{(XLEN-1){1'b0}},1'b1} << B[SHAMT_WIDTH-1:0]);
     `ALUCTL_BSET: ALUOut = A | ({{(XLEN-1){1'b0}},1'b1} << B[SHAMT_WIDTH-1:0]);
-    `ALUCTL_SH1ADD: ALUOut = (A << 1) + B;
-    `ALUCTL_SH2ADD: ALUOut = (A << 2) + B;
-    `ALUCTL_SH3ADD: ALUOut = (A << 3) + B;
-    `ALUCTL_ADD_UW:    ALUOut = {{(XLEN-32){1'b0}}, A[31:0]} + B;
-    `ALUCTL_SH1ADD_UW: ALUOut = ({{(XLEN-32){1'b0}}, A[31:0]} << 1) + B;
-    `ALUCTL_SH2ADD_UW: ALUOut = ({{(XLEN-32){1'b0}}, A[31:0]} << 2) + B;
-    `ALUCTL_SH3ADD_UW: ALUOut = ({{(XLEN-32){1'b0}}, A[31:0]} << 3) + B;
+    // sh1add.uw/sh2add.uw/sh3add.uw share these SAME ALUCtl codes with
+    // sh1add/sh2add/sh3add (ALUCtrl.v deliberately has no separate arm for
+    // them -- see its own comment) -- wordOp supplies the zero-extend-A
+    // behavior, exactly like addw already reuses ALUCTL_ADD (docs/adr/0060,
+    // Gen7-B10 random-test finding: the dedicated _UW codes this used to
+    // have collided with the plain forms and were unreachable).
+    `ALUCTL_SH1ADD: ALUOut = wordOp ? (({{(XLEN-32){1'b0}}, A[31:0]} << 1) + B) : ((A << 1) + B);
+    `ALUCTL_SH2ADD: ALUOut = wordOp ? (({{(XLEN-32){1'b0}}, A[31:0]} << 2) + B) : ((A << 2) + B);
+    `ALUCTL_SH3ADD: ALUOut = wordOp ? (({{(XLEN-32){1'b0}}, A[31:0]} << 3) + B) : ((A << 3) + B);
+    `ALUCTL_ADD_UW: ALUOut = {{(XLEN-32){1'b0}}, A[31:0]} + B;
     `ALUCTL_SLLI_UW:
         begin
             w32 = A[31:0] << B[4:0];

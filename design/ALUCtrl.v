@@ -76,6 +76,19 @@ else if(ALUOp == `ALUOP_RTYPE)
         {`FUNCT7_ZBS_BCLR_BEXT, 3'b101}: ALUCtl = `ALUCTL_BEXT;
         {`FUNCT7_ZBS_BINV, 3'b001}: ALUCtl = `ALUCTL_BINV;
         {`FUNCT7_ZBS_BSET, 3'b001}: ALUCtl = `ALUCTL_BSET;
+        // docs/adr/0060 (Gen7-B10 random-test finding): add.uw's funct7 is
+        // genuinely unique (no collision with anything above -- this arm
+        // was simply missing, causing a real illegal-instruction trap for
+        // every add.uw). sh1add.uw/sh2add.uw/sh3add.uw deliberately have NO
+        // arm here: their funct7/funct3 are bit-identical to sh1add/sh2add/
+        // sh3add by REAL SPEC DESIGN (opcode alone disambiguates OP-32 from
+        // OP, same as addw/add always shared ALUCTL_ADD) -- ALUCtrl has no
+        // opcode visibility to split them, so they deliberately fall through
+        // to the SAME ALUCTL_SH1ADD/SH2ADD/SH3ADD codes as their register-
+        // width siblings, and ALU.v's own wordOp check (not a separate
+        // ALUCtl code) supplies the zero-extend-A behavior, mirroring how
+        // addw already reuses ALUCTL_ADD via wordOp.
+        {`FUNCT7_ZBA_ADD_UW, 3'b000}: ALUCtl = `ALUCTL_ADD_UW;
         default:
         ALUCtl = `ALUCTL_ILLEGAL;  // unrecognized funct7/funct3 combination for this ALUOp
     endcase
@@ -133,6 +146,12 @@ else if(ALUOp == `ALUOP_ITYPE)
                     default:    ALUCtl = `ALUCTL_ILLEGAL;
                 endcase
             end
+            else if (funct6 == `FUNCT6_ZBA_SLLIUW)
+                // docs/adr/0060 (Gen7-B10 random-test finding): this arm was
+                // simply missing -- slli.uw's funct6 is unique (no collision),
+                // it just needed decoding at all instead of falling to plain
+                // SLL below.
+                ALUCtl = `ALUCTL_SLLI_UW;
             else
                 ALUCtl = `ALUCTL_SLL;  // ordinary slli, funct6==0
         end
