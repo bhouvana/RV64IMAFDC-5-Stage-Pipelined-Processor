@@ -41,6 +41,7 @@ generations of work.
 - [SoC integration: bus, UART/CLINT, real interrupts](#soc-integration-bus-uartclint-real-interrupts)
 - [Project status](#project-status)
 - [Verification](#verification)
+- [FPGA Implementation & Vivado Analysis](#fpga-implementation--vivado-analysis)
 - [Research-platform toggles](#research-platform-toggles)
 - [Toolchain & tooling](#toolchain--tooling)
 - [Getting started](#getting-started)
@@ -343,6 +344,121 @@ has found and fixed dozens of real RTL bugs no directed test caught (see `docs/a
   `docs/adr/0059`'s own verification bar (e.g. Pillar K's `clmul`: 7 cycles hardware vs. 12 scalar).
 - **Zero-warning compile** across the whole design (Icarus `-Wall`; Verilator lint for the Verilator-
   specific harness).
+
+## FPGA Implementation & Vivado Analysis
+
+This project has been synthesized and implemented using AMD Vivado 2026.1 — no
+physical FPGA board was required or used. This is an offline, boardless
+implementation study of the internal processor fabric: synthesis, placement,
+routing, static timing analysis, and vectorless power estimation, all driven by
+reproducible batch-mode Tcl (`fpga/vivado/`), targeting a concrete part
+(`xc7k325tffg900-2`, a Kintex-7 325T) that is actually installed in this
+Vivado install, confirmed via `get_parts` before it was chosen. These are
+**FPGA-specific synthesis/implementation results — not ASIC PPA numbers**, and
+nothing here was run on real silicon; that distinction is deliberate, not
+hedging.
+
+```
+RTL  →  Vivado Synthesis  →  Optimization  →  Placement  →  Routing  →  Timing / Utilization / Power  →  Hardware implementation analysis
+```
+
+**Read this before the numbers below:** only the in-order core (`PIPELINED`)
+has real, routed Vivado results. The Gen6 out-of-order core (`OOOCore`, which
+already includes Gen7 B/V/K unconditionally — see below) hangs reproducibly
+during Vivado's RTL elaboration/optimization in this environment — confirmed
+independently twice (once for 7.5 hours overnight, once for ~35 minutes the
+next morning after ruling out disk space, thread count, and synthesis
+strategy as the cause). `HeteroSoC` was never attempted standalone, since it
+instantiates `OOOCore` internally and would hit the same wall. Full diagnostic
+trail: `fpga/vivado/AUDIT.md`, `fpga/vivado/reports/SWEEP_LOG.md`,
+`docs/adr/0068`, `docs/adr/0069`. This is a real, present gap — the OoO core
+and Gen7 extensions are verified thoroughly by simulation (see
+[Verification](#verification) above) but **not** by this Vivado workflow.
+
+### Real Vivado run: `PIPELINED` (in-order RV32), `xc7k325tffg900-2`
+
+Boardless — only the internal clock is constrained (`create_clock -period ...
+[get_ports clk]`; see `fpga/vivado/xdc/constraints_inorder.xdc`), synthesized
+`-mode out_of_context` (no top-level I/O buffers to place, since there's no
+board to give them real package pins). Bisected frequency sweep, capped at 4
+points:
+
+| Target | Period | WNS | TNS | Met? |
+|---|---:|---:|---:|:---:|
+| 100 MHz | 10.000 ns | +3.984 ns | 0.000 ns | ✅ |
+| 150 MHz | 6.667 ns  | +1.428 ns | 0.000 ns | ✅ |
+| 200 MHz | 5.000 ns  | +0.306 ns | 0.000 ns | ✅ |
+| 225 MHz | 4.444 ns  | +0.519 ns | 0.000 ns | ✅ |
+
+All four points met timing — the real Fmax boundary is higher than 225 MHz and
+was not located within this sweep's own 4-point cap (real limitation, stated
+plainly rather than extrapolated). Re-run from a clean project state at 100
+MHz reproduced the identical WNS/TNS/WHS bit-for-bit, confirming the flow is
+deterministic. Post-route (`Design State: Routed`), from
+`fpga/vivado/reports/inorder/100mhz/impl_utilization.rpt`:
+
+| Resource | Used | Available | Util% |
+|---|---:|---:|---:|
+| Slice LUTs | 215 | 203,800 | 0.11% |
+| Slice Registers | 556 | 407,600 | 0.14% |
+| Block RAM | 0 | 890 | 0% |
+| DSP48 | 0 | 840 | 0% |
+
+Vectorless power estimate (Vivado `report_power`, no real switching-activity
+file — labeled as such, not measured physical power): **0.166 W total
+on-chip** at 100 MHz (0.010 W dynamic + 0.156 W static), rising to 0.178 W at
+225 MHz — see `fpga/vivado/reports/inorder/*/power.rpt` for each point.
+
+![timing slack by frequency](docs/images/vivado/timing_slack_by_frequency.png)
+![implied Fmax by sweep point](docs/images/vivado/fmax_by_config.png)
+![power by frequency](docs/images/vivado/power_by_config.png)
+![resource utilization](docs/images/vivado/lut_ff_bram_dsp_by_config.png)
+
+Charts generated from these real reports by
+`fpga/vivado/scripts/generate_graphs.py` (no hand-typed numbers — every value
+plotted is parsed from a checked-in `.rpt`/`summary.txt` and printed to stdout
+for cross-checking).
+
+### Hardware Results
+
+**How large is the in-order core?** 215 LUTs, 556 registers, zero BRAM, zero
+DSP — 0.11%/0.14% of a Kintex-7 325T. Real numbers; this device has enormous
+headroom left over for this specific core.
+
+**How fast is it?** Meets timing at every point tried, up to 225 MHz, on this
+device, in this study. The real ceiling is higher and wasn't found within a
+4-point sweep — see the table above, not a rounder or more impressive number.
+
+**What's the critical path?** `fpga/vivado/reports/inorder/*/critical_path.rpt`
+(one per frequency point) has the real `report_timing` output — startpoint,
+endpoint, logic/routing delay breakdown, straight from Vivado.
+
+**What does OoO cost? What does Vector cost? What does Bit-Manipulation or
+Cryptography cost?** Not answerable from this workflow. `OOOCore` (Gen6 OoO,
+with Gen7 B/V/K unconditionally present — no `` `ifdef `` guards anywhere in
+it) never completes Vivado synthesis in this environment (see the gap called
+out above). Separately, and regardless of whether `OOOCore` had synthesized:
+B and K were never independently isolable in the first place — their logic
+lives as `case` arms inside the one shared scalar `ALU.v`/`ALUCtrl.v`, the
+same block used for every base-ISA integer op, with no build-time flag to
+disable either. `fpga/vivado/reports/COMPONENT_BREAKDOWN.md` has the full,
+honest accounting of what is and isn't measurable here.
+
+**What does the memory subsystem cost?** `impl_utilization_hierarchical.rpt`
+for `PIPELINED` shows `Ptw` (the Sv32 page-table walker) at 92 LUTs/31 FFs —
+the largest named sub-instance after the top-level bucket; `CSR` at 14
+LUTs/65 FFs. Everything else (ALU, ICache, DCache, etc.) is small enough that
+Vivado's optimizer fully absorbed it into the top-level flattened bucket
+rather than keeping it as a separately-reportable instance — expected at this
+design's real scale (215 LUTs total) on a device this large.
+
+Reproduce the whole flow: `vivado -mode batch -source fpga/vivado/create_project.tcl -tclargs inorder`
+then `vivado -mode batch -source fpga/vivado/run_all.tcl -tclargs inorder 10.000 100mhz`
+(`fpga/vivado/create_project.tcl`'s own header comment has the full argument
+reference for `ooo`/`soc` too, which create projects fine — synthesis is what
+hangs for those two). Reports: `fpga/vivado/reports/`. Audit trail and every
+integrity constraint this workflow followed: `fpga/vivado/AUDIT.md`,
+`docs/adr/0068`, `docs/adr/0069`.
 
 ## Research-platform toggles
 

@@ -1,6 +1,16 @@
 # FPGA bring-up
 
-Status, honestly: **scaffolding only.** Everything in this directory has been
+**A real, run Vivado workflow now exists** for the in-order core — see
+`fpga/vivado/` and the top-level README's own
+[FPGA Implementation & Vivado Analysis](../README.md#fpga-implementation--vivado-analysis)
+section for real synthesis/implementation/timing/power results on
+`xc7k325tffg900-2` (boardless, no physical board needed). The Gen6 OoO core
+hangs Vivado synthesis in this environment — documented honestly, not hidden,
+in `fpga/vivado/AUDIT.md` and `docs/adr/0069`. This directory's own files
+below (`top.v`, `build.tcl`, `constraints_template.xdc`) remain what they
+always were: a separate, still-genuinely-unrun, board-targeted bring-up path.
+
+Status, honestly, for *this directory's own files*: **scaffolding only.** Everything in this directory has been
 written to compile cleanly and to follow each tool's documented interface
 correctly, but none of it has been run against a real vendor toolchain or a
 real board -- this repo was developed in an environment with neither
