@@ -144,6 +144,51 @@ is **B and K's lack of isolation** -- documented above, and carried forward
 honestly into every later report/README section that touches `m_ALU`'s
 resource cost, rather than worked around by editing RTL.
 
+## Post-hoc addendum: `OOOCore`/`HeteroSoC` synthesis hangs (not resolved)
+
+Written after real Vivado runs, updating this audit's own scope honestly
+rather than leaving it as written-before-execution only.
+
+`PIPELINED` (in-order, XLEN=32) synthesizes, places, and routes cleanly --
+see `fpga/vivado/reports/inorder/`, 4 real frequency points, all met
+timing. `OOOCore` (the much larger Gen6 OoO + Gen7 B/V/K core) does **not**
+complete synthesis in this environment: `synth_design` reproducibly hangs
+partway through elaboration (CPU pegged near 100% continuously, zero log
+progress for 30+ minutes, confirmed twice independently) at roughly the
+same point, shortly after `Ptw39`'s trimmed-register warnings. Ruled out as
+causes: disk space (first hang coincided with the C: drive filling to
+376MB free, but the hang reproduced identically after moving the Vivado
+build directory to a drive with 354GB free -- see `docs/adr/0068`),
+thread count (reproduced at both 2 and 4 `maxThreads`), and synthesis
+strategy (reproduced at both the default timing-driven strategy and
+Vivado's `Flow_RuntimeOptimized`, its fastest/least-effort option).
+
+The real cause was not further isolated -- doing so would require either
+much more Vivado-internals-specific debugging, or a throwaway RTL edit
+(temporarily stripping the vector unit and/or crypto ALU logic to bisect
+which one triggers it), which needs the user's own sign-off before
+touching `design/*.v` again and was not pursued this session (user's own
+call, given the time already spent: 7+ hours overnight plus ~40 more
+minutes of confirmed reproduction the next morning).
+
+**Working hypothesis, not confirmed:** `OOOCore`'s combination of a
+512-bit vector unit (`VALU.v`/`VLSU.v`, 64 physical vector registers) and
+the shared scalar ALU's wide crypto `case` block (AES/SHA/CLMUL, all in
+one `always` block alongside every base-ISA integer op) may be triggering
+a known class of Vivado optimizer pathological-runtime behavior on very
+wide combinational case-statement logic. Not verified by isolating either
+one independently.
+
+`HeteroSoC` (which instantiates `OOOCore` internally) was never attempted
+standalone, since it would hit the identical `OOOCore` elaboration path.
+
+**This means the Vivado results in this repository cover the in-order
+config only.** The Gen6 OoO core and Gen7 B/V/K extensions are verified
+via simulation (`sim/run_tests.sh`, `--ooo` constrained-random, formal --
+see the relevant ADRs) but not via this Vivado synthesis workflow. That is
+a real, present gap, not a fabricated "it works" claim -- stated plainly
+in the README's own FPGA section too.
+
 ## What Icarus/Verilator accepting this RTL does NOT tell us
 
 Confirmed separately (see `fpga/vivado/reports/`): Icarus Verilog's

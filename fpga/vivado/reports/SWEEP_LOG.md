@@ -30,8 +30,17 @@ failure boundary.
 
 ## ooo (OOOCore)
 
-*(filled in as real runs complete)*
+**Not completed.** `synth_design` hangs reproducibly partway through
+elaboration -- confirmed independently twice (once overnight, ~7.5 hours,
+CPU pegged, zero log progress; once the next morning after moving the
+build directory off a nearly-full C: drive, ~35 min, same pattern). Disk
+space, thread count, and synthesis strategy were each ruled out as the
+cause (see `fpga/vivado/AUDIT.md`'s own addendum for the full diagnostic
+trail). No WNS/TNS/utilization data exists for this config. Real,
+documented failure, not silently dropped.
 
 ## soc (HeteroSoC)
 
-*(filled in as real runs complete)*
+**Not attempted.** `HeteroSoC` instantiates `OOOCore` internally, so it
+would hit the identical elaboration hang; not worth burning more time
+confirming the same failure a third time.
