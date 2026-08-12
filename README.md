@@ -172,7 +172,63 @@ graph LR
 ## The out-of-order core (Generation 6)
 
 `design/OOOCore.v` is a genuinely new top-level module — not a modification of `riscvpipeline.v`, per
-the project's own explicit design constraint. It implements a real dynamically-scheduled machine:
+the project's own explicit design constraint. It implements a real dynamically-scheduled, Tomasulo-style
+machine: instructions dispatch in program order, execute the moment their operands are ready regardless
+of order, and retire in program order again, through a dedicated pipeline of its own:
+
+```mermaid
+graph LR
+    subgraph FE [Fetch]
+        PC2[PC / redirect mux] --> IM2[Instruction Memory]
+        BP[Bht + Btb<br/>shared predictor] --> PC2
+    end
+    subgraph DISP [Dispatch / Rename]
+        IM2 --> DEC[Decode]
+        DEC --> RAT[Register Alias Table<br/>+ Free List]
+        RAT --> ROB[Reorder Buffer<br/>allocate entry]
+        ROB --> RSDISP[Dispatch to<br/>Reservation Stations]
+    end
+    subgraph ISSUE [Issue]
+        RSDISP --> RSALU[RS: ALU]
+        RSDISP --> RSDIV[RS: Divider]
+        RSDISP --> RSFALU[RS: Float ALU]
+        RSDISP --> RSFDIV[RS: Float Divider]
+        RSDISP --> RSVEC["RS: Vector (VALU/VLSU)"]
+        RSDISP --> LSQ[Load/Store Queue]
+    end
+    subgraph EXEC [Execute]
+        RSALU --> ALU2["ALU + B/K extensions"]
+        RSDIV --> DIV2[Divider]
+        RSFALU --> FALU2[Float ALU]
+        RSFDIV --> FDIV2[Float Divider]
+        RSVEC --> VEC2[Vector ALU / LSU]
+        LSQ --> DMEM2[Data Memory]
+        LSQ --> MMU2[Tlb39 / Ptw39]
+    end
+    subgraph CDB [Common Data Bus]
+        ALU2 -.-> BUS2[Broadcast to waiting RS + PRF]
+        DIV2 -.-> BUS2
+        FALU2 -.-> BUS2
+        FDIV2 -.-> BUS2
+        VEC2 -.-> BUS2
+        DMEM2 -.-> BUS2
+    end
+    BUS2 --> PRF2[Physical Reg Files<br/>int + float + vector]
+    BUS2 --> ROB
+    subgraph RETIRE [Retire]
+        ROB --> COMMIT[In-order commit<br/>precise exceptions]
+        COMMIT -.->|free old preg| RAT
+    end
+```
+
+| Stage | Responsibility | Key modules |
+|---|---|---|
+| **Fetch** | Shared branch predictor drives the PC/redirect mux ahead of decode, independent of dispatch stalls | `PC.v`, `InstructionMemory.v`, `Bht.v`, `Btb.v` |
+| **Dispatch / Rename** | Decode, allocate a ROB entry, map architectural → physical registers (separate int/float/vector maps), send operands (or their producing tags) to the matching reservation station | `RegisterAliasTable.v`, `FreeList.v`, `ReorderBuffer.v` |
+| **Issue** | Each reservation station wakes an entry the instant every operand tag has been broadcast on the CDB, independent of program order | `ReservationStation.v` (one per functional unit) |
+| **Execute** | ALU (incl. B bit-manipulation and K cryptography — same shared datapath as the in-order core), integer/float dividers, vector ALU/LSU, load/store queue against the D-side MMU | `ALU.v`, `Divider.v`, `FALU.v`, `FDivider.v`, `VALU.v`, `VLSU.v`, `LoadStoreQueue.v`, `Tlb39.v`/`Ptw39.v` |
+| **Complete (CDB)** | Every functional unit broadcasts its result + destination tag on the Common Data Bus in the same cycle it finishes — every reservation station and the ROB snoop it simultaneously, Tomasulo-style | — |
+| **Retire** | Reorder buffer commits strictly in program order regardless of completion order — the mechanism precise exceptions and misprediction recovery both depend on | `ReorderBuffer.v`, `PhysicalRegisterFile.v` |
 
 - **Register renaming + physical register file**, separate integer and float PRFs, eliminating WAW/WAR
   hazards the classic pipeline handles by stalling instead.
@@ -293,32 +349,27 @@ Linux-compat redesign), and `0035` (supervisor-interrupt path) for the full desi
 
 ## Project status
 
+Both cores carry the full RV64IMAFDC base (RVC, M, A, F/D, real M/S/U privilege with Sv32/Sv39, real
+asynchronous interrupts, a Linux-driver-compatible bus/UART/CLINT, a hand-rolled SBI firmware) — the
+in-order pipeline's own long-closed Gen 1-3 scope, detailed in [Architecture](#architecture--the-in-order-pipeline)
+and [Privilege, MMU, and interrupts](#privilege-mmu-and-interrupts) above. On top of that, the
+out-of-order core adds renaming, a physical register file, reservation stations, a reorder buffer, an
+LSQ, Tomasulo scheduling, speculation, and dual-issue (Gen 6), then all three ratified Gen 7 pillars —
+Bit-Manipulation, Vector, Cryptography — through that same OoO machinery. A heterogeneous dual-core SoC
+(`HeteroSoC.v`) runs both cores together. Every closed item above has its own ADR with the real bugs
+found along the way — see [Generations](#generations) for the full table and [Documentation](#documentation)
+for where each one lives.
+
+What's genuinely still open, honestly:
+
 | Area | Status |
 |---|---|
-| RV64I base ISA + RVC (compressed) | ✅ Complete (both cores) |
-| RV64M (`mul`/`div`/`rem`) | ✅ Complete, real multi-cycle divider |
-| RV64A (atomics: `lr`/`sc`/`amo*`) | ✅ Complete, real 2-phase interlock (both cores) |
-| RV64F/D (single + double precision float) | ✅ Complete, full forwarding, full FMA/div/sqrt |
-| CSRs + M/S/U privilege + synchronous exceptions | ✅ Complete in `riscvpipeline.v`; M/U subset in `OOOCore.v` |
-| Sv32 MMU (RV32) + Sv39 MMU (RV64) | ✅ Complete, independent implementations |
-| Real asynchronous interrupts (timer, UART, software, supervisor-synthesized) | ✅ Complete, spec-mandated priority |
-| On-chip Wishbone-style bus + ns16550a UART + CLINT | ✅ Complete, Linux-driver-compatible |
-| Hand-rolled M-mode SBI firmware (v0.1 + v0.2+) | ✅ Complete |
-| Real Linux kernel boot attempt (Verilator-backed) | 🚧 Deep real-kernel execution (200M+ cycles, zero crashes); reaches a real Sv39 page fault in the kernel's own MMU-enable sequence — see [The Linux boot attempt](#the-linux-boot-attempt) |
-| Out-of-order core: renaming, PRF, RS, ROB, LSQ, Tomasulo, speculation, dual-issue | ✅ Complete (Gen 6, `docs/adr/0058`) |
-| Heterogeneous dual-core SoC (`OOOCore.v` + `riscvpipeline.v` together) | ✅ Complete (`design/HeteroSoC.v`) |
-| Gen 7 Pillar B — Bit-Manipulation | ✅ Complete (`docs/adr/0060`) |
-| Gen 7 Pillar V — Vector Processing | ✅ Complete (`docs/adr/0065`, `0066`) |
-| Gen 7 Pillar K — Cryptography (Zkn) | ✅ Complete (`docs/adr/0067`) |
-| Gen 7 Pillar H — Hypervisor | ⏳ Not started; needs real S-mode wired into `OOOCore.v` first |
-| Gen 7 Pillar P — Packed-SIMD/DSP (draft extension) | ⏳ Not started |
-| Hazard forwarding + stall-only, pipeline depth, branch prediction, caches | ✅ Complete, elaboration-time swappable |
-| Directed + random-cross-check verification (incl. interrupt injection) | ✅ Complete, see below |
-| Interactive pipeline visualizer, independent-ISS step debugger | ✅ Complete |
-| Compiled-C toolchain (real GCC → this core) | ✅ Infrastructure verified end-to-end |
-| FPGA real-hardware validation | 🚧 Scaffolding hardened, not yet run against a real toolchain or board |
-| Signal-naming/port-ordering consistency pass | 🚧 Deliberately deferred |
-| Multicore (general), dual-issue *in-order* | ⏳ Not started / superseded by Gen 6's own OoO dual-issue |
+| Real Linux kernel boot | 🚧 200M+ cycles, zero crashes, reaches a real Sv39 page fault in the kernel's own MMU-enable sequence — see [The Linux boot attempt](#the-linux-boot-attempt) |
+| Gen 7 Pillar H — Hypervisor | ⏳ Needs real S-mode wired into `OOOCore.v` first (currently hardwired off) |
+| Gen 7 Pillar P — Packed-SIMD/DSP | ⏳ Not started (also still a draft, unratified RISC-V extension) |
+| FPGA hardware validation | 🚧 Real Vivado synthesis/timing/power results for the in-order core (see [FPGA Implementation & Vivado Analysis](#fpga-implementation--vivado-analysis)); the OoO core's own synthesis run is a real, open, documented problem, and no design here has touched a physical board yet |
+| Signal-naming/port-ordering consistency pass | 🚧 Deliberately deferred, cosmetic only |
+| General multicore | ⏳ Not started — Gen 6's own dual-issue OoO core supersedes the narrower in-order version of this goal |
 
 ## Verification
 
@@ -493,8 +544,8 @@ cross-compiler (`riscv-none-elf-gcc`) — see `docs/adr/0036` for how this proje
 an existing OSS CAD Suite install with no internet-facing package manager.
 
 ```bash
-git clone <this-repo>
-cd 5-stage-pipelined-processor
+git clone https://github.com/bhouvana/Advanced-RISC-V-Processor.git
+cd Advanced-RISC-V-Processor
 
 make test          # run the full directed suite (both cores, 152/152)
 make viewer         # regenerate the interactive pipeline viewer
