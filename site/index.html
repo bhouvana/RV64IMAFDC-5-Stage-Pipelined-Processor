@@ -1,3 +1,5 @@
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RV64IMAFDC + OoO + BVK · Pipelined & Out-of-Order RISC-V Cores</title>
 <style>
   :root {
@@ -203,6 +205,34 @@
     padding: 2px 6px; color: var(--text-dim);
   }
 
+  /* Generation timeline */
+  .gen-list { display: grid; gap: 1px; background: var(--grid); border: 1px solid var(--grid); border-radius: var(--radius); overflow: hidden; }
+  .gen-row { background: var(--panel); display: grid; grid-template-columns: 108px 1fr 128px; gap: 16px; padding: 14px 18px; align-items: center; }
+  @media (max-width: 700px) { .gen-row { grid-template-columns: 1fr; gap: 6px; } }
+  .gen-row .gname { font-family: var(--mono); font-weight: 700; font-size: 13px; color: var(--text); }
+  .gen-row .gname small { display: block; font-family: var(--sans); font-weight: 500; font-size: 11px; color: var(--text-faint); margin-top: 2px; }
+  .gen-row .gscope { font-size: 12.5px; color: var(--text-dim); }
+  .gen-row .gstatus { text-align: right; }
+  @media (max-width: 700px) { .gen-row .gstatus { text-align: left; } }
+  .gen-row.skipped { opacity: .55; }
+
+  /* Out-of-order flow diagram */
+  .ooo-diagram { border: 1px solid var(--grid); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow); padding: 26px 24px 22px; overflow-x: auto; margin-bottom: 24px; }
+  .ooo-flow { display: grid; gap: 0; min-width: 640px; }
+  .ooo-row-label { font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); margin: 0 0 8px; }
+  .ooo-boxes { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 8px; }
+  .ooo-box { background: var(--panel-2); border: 1px solid var(--grid); border-radius: 6px; padding: 9px 10px; text-align: center; }
+  .ooo-box .t { font-family: var(--mono); font-weight: 700; font-size: 12px; color: var(--text); white-space: nowrap; }
+  .ooo-box .s { font-size: 10px; color: var(--text-dim); margin-top: 3px; line-height: 1.35; }
+  .ooo-box.wide { grid-column: span 1; }
+  .ooo-box.cdb { background: var(--accent-soft); border-color: var(--accent-line); }
+  .ooo-box.cdb .t { color: var(--accent); }
+  .ooo-connector { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 7px 0; color: var(--text-faint); }
+  .ooo-connector .line { flex: 1 1 auto; height: 1px; background: repeating-linear-gradient(90deg, var(--grid) 0 6px, transparent 6px 11px); }
+  .ooo-connector .chev { font-family: var(--mono); font-size: 11px; }
+  .ooo-recycle { margin-top: 10px; display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); }
+  .ooo-recycle .dashline { flex: 0 0 auto; width: 34px; height: 1px; border-top: 1px dashed var(--text-faint); }
+
   /* Verification grid */
   .vgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
   @media (max-width: 860px) { .vgrid { grid-template-columns: repeat(2, 1fr); } }
@@ -372,6 +402,7 @@
     <div class="hero-actions">
       <a class="btn primary" href="#viewer">Watch it execute →</a>
       <a class="btn" href="#ooo">The out-of-order core →</a>
+      <a class="btn" href="#fpga">Real Vivado results →</a>
       <a class="btn" href="#verification">Verification evidence</a>
     </div>
   </div>
@@ -422,13 +453,64 @@
     <div class="stat"><div class="v">152<span class="unit">/152</span></div><div class="l">directed tests passing, both cores</div></div>
     <div class="stat"><div class="v">1000<span class="unit">+</span></div><div class="l">random programs vs. reference ISS</div></div>
     <div class="stat"><div class="v">200<span class="unit">M+</span></div><div class="l">real Linux kernel cycles, zero crashes</div></div>
-    <div class="stat"><div class="v">67</div><div class="l">ADRs — every real bug documented</div></div>
+    <div class="stat"><div class="v">70</div><div class="l">ADRs — every real bug documented</div></div>
     <div class="stat"><div class="v">3<span class="unit">/5</span></div><div class="l">Gen 7 ISA extensions closed (B/V/K)</div></div>
-    <div class="stat"><div class="v">0</div><div class="l">iverilog -Wall warnings</div></div>
+    <div class="stat"><div class="v">225<span class="unit">MHz</span></div><div class="l">real Vivado Fmax lower bound, in-order</div></div>
   </div>
 </div>
 
 <div class="shell">
+
+  <section class="block" id="generations">
+    <h2>Ten generations, tracked honestly</h2>
+    <p class="intro">
+      This project tracks its own long-term roadmap as a numbered sequence of generations
+      (<code>docs/ROADMAP_VISION.md</code>). Closed means closed — every scope item verified, every real
+      bug documented in its own ADR — not aspirational.
+    </p>
+    <div class="gen-list">
+      <div class="gen-row">
+        <div class="gname">Gen 1<small>RV32IMAF</small></div>
+        <div class="gscope">Base pipeline, M-extension, F-extension, Sv32 MMU, caches, branch prediction, formal verification.</div>
+        <div class="gstatus"><span class="status-pill done">closed</span></div>
+      </div>
+      <div class="gen-row">
+        <div class="gname">Gen 2<small>RV64</small></div>
+        <div class="gscope">Full XLEN=64 migration, RV64-only instruction family.</div>
+        <div class="gstatus"><span class="status-pill done">closed</span></div>
+      </div>
+      <div class="gen-row">
+        <div class="gname">Gen 3<small>Linux-capable</small></div>
+        <div class="gscope">Sv39 privilege/MMU, UART/CLINT Linux-compat, SBI firmware, RVC, A-extension, real Linux boot attempt.</div>
+        <div class="gstatus"><span class="status-pill done">closed</span></div>
+      </div>
+      <div class="gen-row skipped">
+        <div class="gname">Gen 4<small>Adv. memory</small></div>
+        <div class="gscope">Multi-level cache hierarchy, prefetching, coherence.</div>
+        <div class="gstatus"><span class="status-pill wip">not started</span></div>
+      </div>
+      <div class="gen-row skipped">
+        <div class="gname">Gen 5<small>Multicore SoC</small></div>
+        <div class="gscope">Explicitly skipped, straight to Gen 6 — revived asymmetrically as <code>HeteroSoC.v</code> (<code>docs/adr/0050</code>).</div>
+        <div class="gstatus"><span class="status-pill wip">skipped</span></div>
+      </div>
+      <div class="gen-row">
+        <div class="gname">Gen 6<small>Out-of-Order</small></div>
+        <div class="gscope">Register renaming, PRF, reservation stations, ROB, LSQ, Tomasulo scheduling, speculative execution, dual-issue.</div>
+        <div class="gstatus"><span class="status-pill done">closed</span></div>
+      </div>
+      <div class="gen-row">
+        <div class="gname">Gen 7<small>ISA extensions</small></div>
+        <div class="gscope">Five pillars on the Gen 6 OoO core: Bit-Manipulation, Vector, Cryptography, Hypervisor, Packed-SIMD.</div>
+        <div class="gstatus"><span class="status-pill done">B/V/K closed</span></div>
+      </div>
+      <div class="gen-row skipped">
+        <div class="gname">Gen 8-10<small>Beyond</small></div>
+        <div class="gscope">Security/reliability, FPGA SoC, configurable research platform — full plan in <code>docs/ROADMAP_VISION.md</code>.</div>
+        <div class="gstatus"><span class="status-pill wip">not started</span></div>
+      </div>
+    </div>
+  </section>
 
   <section class="block" id="architecture">
     <h2>Five stages, real interlocks</h2>
@@ -538,20 +620,118 @@
     <h2>A second core: out-of-order, dynamically scheduled</h2>
     <p class="intro">
       <code>design/OOOCore.v</code> is a genuinely new top-level module, not a modification of
-      <code>riscvpipeline.v</code> — register renaming, a physical register file, per-unit reservation
-      stations, a reorder buffer, a load/store queue, Tomasulo-style Common-Data-Bus scheduling,
-      speculative branch/<code>jalr</code> execution, and dual-issue dispatch. <code>design/HeteroSoC.v</code>
-      runs it alongside <code>riscvpipeline.v</code> at the same time — a real heterogeneous dual-core SoC,
-      two different microarchitectures sharing one bus, not two copies of the same core. Closed as
+      <code>riscvpipeline.v</code> — a real Tomasulo-style machine: instructions dispatch in program
+      order, execute the moment their operands are ready regardless of order, and retire in program
+      order again, through a dedicated pipeline of its own. <code>design/HeteroSoC.v</code> runs it
+      alongside <code>riscvpipeline.v</code> at the same time — a real heterogeneous dual-core SoC, two
+      different microarchitectures sharing one bus, not two copies of the same core. Closed as
       Generation 6 (<code>docs/adr/0058</code>): 135/135 directed suite at closure, every scope item the
       roadmap named (renaming, PRF, reservation stations, ROB, LSQ, Tomasulo, speculation, dual-issue)
       done and verified.
     </p>
-    <div class="vgrid">
-      <div class="vcard"><div class="k">ReservationStation.v</div><div class="d">One per functional unit (ALU/DIV/FALU/FDIV) — operands dispatch the moment they're ready, not in program order.</div></div>
+
+    <div class="ooo-diagram">
+      <div class="ooo-flow" aria-label="Out-of-order pipeline flow diagram">
+        <div class="ooo-row-label">Fetch</div>
+        <div class="ooo-boxes">
+          <div class="ooo-box"><div class="t">PC / redirect mux</div><div class="s">Shared BHT+BTB predictor drives fetch independent of dispatch stalls</div></div>
+          <div class="ooo-box"><div class="t">Instruction Memory</div><div class="s">Bht.v · Btb.v · InstructionMemory.v</div></div>
+        </div>
+
+        <div class="ooo-connector"><div class="line"></div><span class="chev">▼</span><div class="line"></div></div>
+
+        <div class="ooo-row-label">Dispatch / Rename</div>
+        <div class="ooo-boxes">
+          <div class="ooo-box"><div class="t">Decode</div><div class="s">Shared Control.v/ALUCtrl.v path — B/K extensions decode here too</div></div>
+          <div class="ooo-box"><div class="t">Rename</div><div class="s">RegisterAliasTable.v + FreeList.v — separate int/float/vector maps</div></div>
+          <div class="ooo-box"><div class="t">Allocate ROB entry</div><div class="s">ReorderBuffer.v — reserves this instruction's commit slot up front</div></div>
+        </div>
+
+        <div class="ooo-connector"><div class="line"></div><span class="chev">▼</span><div class="line"></div></div>
+
+        <div class="ooo-row-label">Issue — one reservation station per functional unit</div>
+        <div class="ooo-boxes">
+          <div class="ooo-box"><div class="t">RS: ALU</div><div class="s">incl. B/K ops</div></div>
+          <div class="ooo-box"><div class="t">RS: Divider</div><div class="s">mul/div/rem</div></div>
+          <div class="ooo-box"><div class="t">RS: Float ALU</div><div class="s">fadd/fmul/…</div></div>
+          <div class="ooo-box"><div class="t">RS: Float Div</div><div class="s">fdiv/fsqrt</div></div>
+          <div class="ooo-box"><div class="t">RS: Vector</div><div class="s">VALU + VLSU</div></div>
+          <div class="ooo-box"><div class="t">Load/Store Queue</div><div class="s">memory ordering</div></div>
+        </div>
+        <p class="s" style="font-size:11px;color:var(--text-faint);margin:6px 2px 0;">Each entry wakes and issues the instant every operand tag has been broadcast on the CDB — independent of program order, independent of every other reservation station.</p>
+
+        <div class="ooo-connector"><div class="line"></div><span class="chev">▼</span><div class="line"></div></div>
+
+        <div class="ooo-row-label">Execute</div>
+        <div class="ooo-boxes">
+          <div class="ooo-box"><div class="t">ALU.v</div><div class="s">+ B/K datapath</div></div>
+          <div class="ooo-box"><div class="t">Divider.v</div></div>
+          <div class="ooo-box"><div class="t">FALU.v</div></div>
+          <div class="ooo-box"><div class="t">FDivider.v</div></div>
+          <div class="ooo-box"><div class="t">VALU.v / VLSU.v</div></div>
+          <div class="ooo-box"><div class="t">Data Mem + Tlb39/Ptw39</div></div>
+        </div>
+
+        <div class="ooo-connector"><div class="line"></div><span class="chev">▼</span><div class="line"></div></div>
+
+        <div class="ooo-row-label">Complete</div>
+        <div class="ooo-boxes">
+          <div class="ooo-box cdb wide" style="grid-column: 1 / -1;"><div class="t">Common Data Bus — broadcast result + destination tag</div><div class="s">Every reservation station and the ROB snoop the same cycle, Tomasulo-style, regardless of which unit produced it</div></div>
+        </div>
+
+        <div class="ooo-connector"><div class="line"></div><span class="chev">▼</span><div class="line"></div></div>
+
+        <div class="ooo-row-label">Retire</div>
+        <div class="ooo-boxes">
+          <div class="ooo-box"><div class="t">ReorderBuffer.v — in-order commit</div><div class="s">Strictly program order regardless of completion order — precise exceptions, misprediction recovery</div></div>
+          <div class="ooo-box"><div class="t">Physical Reg Files</div><div class="s">int + float + vector, freed preg recycled</div></div>
+        </div>
+        <div class="ooo-recycle"><div class="dashline"></div>freed physical register ↑ back to Free List / Rename<div class="dashline" style="flex:1 1 auto;"></div></div>
+      </div>
+    </div>
+
+    <div class="stage-grid">
+      <div class="stage-card">
+        <div class="num">FETCH</div>
+        <h3>PC</h3>
+        <p>Shared branch predictor drives the PC/redirect mux ahead of decode, independent of dispatch stalls.</p>
+        <div class="modules"><code>PC.v</code><code>Bht.v</code><code>Btb.v</code></div>
+      </div>
+      <div class="stage-card">
+        <div class="num">DISPATCH</div>
+        <h3>Rename</h3>
+        <p>Decode, allocate a ROB entry, map architectural → physical registers, send operands (or tags) to the matching RS.</p>
+        <div class="modules"><code>RegisterAliasTable.v</code><code>FreeList.v</code><code>ReorderBuffer.v</code></div>
+      </div>
+      <div class="stage-card">
+        <div class="num">ISSUE</div>
+        <h3>Wake</h3>
+        <p>Each reservation station wakes an entry the instant every operand tag has been broadcast — independent of program order.</p>
+        <div class="modules"><code>ReservationStation.v</code></div>
+      </div>
+      <div class="stage-card">
+        <div class="num">EXECUTE</div>
+        <h3>Run</h3>
+        <p>ALU (incl. B/K, same shared datapath as the in-order core), dividers, vector ALU/LSU, load/store queue against the D-side MMU.</p>
+        <div class="modules"><code>ALU.v</code><code>VALU.v</code><code>LoadStoreQueue.v</code><code>Tlb39.v</code></div>
+      </div>
+      <div class="stage-card">
+        <div class="num">RETIRE</div>
+        <h3>Commit</h3>
+        <p>Reorder buffer commits strictly in program order regardless of completion order — precise exceptions, misprediction recovery.</p>
+        <div class="modules"><code>ReorderBuffer.v</code><code>PhysicalRegisterFile.v</code></div>
+      </div>
+    </div>
+
+    <div class="vgrid" style="margin-top:16px;">
+      <div class="vcard"><div class="k">RegisterAliasTable.v + FreeList.v</div><div class="d">Register renaming — three independent map/freelist pairs (integer, float, vector), eliminating WAW/WAR hazards the in-order core handles by stalling instead.</div></div>
+      <div class="vcard"><div class="k">PhysicalRegisterFile.v</div><div class="d">Combinational multi-port read, write-first bypassed against all 3 write ports the same cycle — a dependent instruction can wake and issue the exact cycle its producer's CDB write lands.</div></div>
+      <div class="vcard"><div class="k">ReservationStation.v</div><div class="d">One per functional unit (ALU/DIV/FALU/FDIV/Vector) — operands dispatch the moment they're ready via a Tomasulo-style Common Data Bus, not in program order.</div></div>
       <div class="vcard"><div class="k">ReorderBuffer.v</div><div class="d">Multi-ported completion, in-order retirement, precise exceptions.</div></div>
       <div class="vcard"><div class="k">LoadStoreQueue.v</div><div class="d">Memory-ordering enforcement independent of the ALU pipeline's own out-of-order completion.</div></div>
-      <div class="vcard"><div class="k">HeteroSoC.v</div><div class="d">Both cores, one bus — a real heterogeneous dual-core SoC, not a hypothetical.</div></div>
+      <div class="vcard"><div class="k">Speculation + dual-issue</div><div class="d">Branch and <code>jalr</code> prediction with real misprediction recovery (shared BTB for both); two instructions dispatch per cycle when dependencies allow.</div></div>
+      <div class="vcard"><div class="k">Full privilege/MMU/interrupts</div><div class="d"><code>lui</code>/<code>auipc</code>/<code>jal</code>/<code>jalr</code>/<code>csrrX</code>, general AMO-RMW+SC, Sv39 translation (<code>Tlb39.v</code>/<code>Ptw39.v</code> reused unmodified), real M-mode interrupts, <code>fdiv.s</code>/<code>fsqrt.s</code>.</div></div>
+      <div class="vcard"><div class="k">HeteroSoC.v</div><div class="d">Both cores, one bus — a real heterogeneous dual-core SoC (<code>docs/adr/0050</code>), not a hypothetical.</div></div>
     </div>
   </section>
 
@@ -592,6 +772,96 @@
       <div class="vcard"><div class="k">RTL assertions</div><div class="d">4 embedded invariants (forwarding-select legality, stall/flush consistency, x0 hard-wired to zero, store-forwarding correctness) — verified to actually fire by deliberately reintroducing the bug each one guards against.</div></div>
       <div class="vcard"><div class="k">Functional coverage</div><div class="d">Per-opcode / per-branch-direction counters closed a real gap: <code>bne</code> was untested by any directed program until coverage caught it.</div></div>
     </div>
+  </section>
+
+  <section class="block tight" id="fpga">
+    <h2>Real Vivado synthesis, not a rendering</h2>
+    <p class="intro">
+      Synthesized and implemented with AMD Vivado 2026.1 — no physical FPGA board required or used. A
+      boardless, offline study of the internal processor fabric: real synthesis, placement, routing,
+      static timing analysis, and vectorless power estimation, driven by reproducible batch-mode Tcl
+      (<code>fpga/vivado/</code>), targeting <code>xc7k325tffg900-2</code> (a Kintex-7 325T, confirmed
+      installed in this Vivado copy before it was chosen). These are FPGA-specific implementation
+      results — not ASIC PPA numbers, and nothing here ran on real silicon.
+    </p>
+    <p class="intro">
+      <strong>Only the in-order core (<code>PIPELINED</code>) has real, routed results.</strong> The
+      out-of-order core hangs reproducibly during Vivado synthesis in this environment — a real,
+      honestly-investigated limitation, not hidden. See the callout below.
+    </p>
+
+    <div class="vgrid">
+      <div class="vcard"><div class="k">215<span style="color:var(--text-dim);font-weight:500;"> / 203,800 LUTs</span></div><div class="d">0.11% utilization — Slice LUTs, post-route, <code>PIPELINED</code> @ 100 MHz.</div></div>
+      <div class="vcard"><div class="k">556<span style="color:var(--text-dim);font-weight:500;"> / 407,600 FFs</span></div><div class="d">0.14% utilization — Slice Registers, post-route.</div></div>
+      <div class="vcard"><div class="k">0 <span style="color:var(--text-dim);font-weight:500;">BRAM / DSP</span></div><div class="d">This core's memories/multipliers fit entirely in fabric logic at this scale.</div></div>
+      <div class="vcard"><div class="k">0.166–0.178 W</div><div class="d">Vivado <code>report_power</code>, vectorless estimate (no real switching-activity file) — labeled as such, not measured physical power.</div></div>
+    </div>
+
+    <p class="intro" style="margin-top:26px">
+      Bisected frequency sweep, capped at 4 points — all four met timing. Bars show fraction of the
+      clock period actually consumed (period − WNS) / period; the real ceiling is higher than 225 MHz
+      and wasn't located within this sweep's own cap.
+    </p>
+    <div class="hz-compare">
+      <div class="hz-legend"><span><i style="background:var(--forward)"></i>timing met, real WNS shown</span></div>
+      <div class="hz-row">
+        <div class="name">100 MHz</div>
+        <div class="hz-bars"><div class="hz-bar-track"><div class="hz-bar-fill fwd" style="width:60.2%"></div></div></div>
+        <div class="pct" style="color:var(--forward)">+3.98ns</div>
+      </div>
+      <div class="hz-row">
+        <div class="name">150 MHz</div>
+        <div class="hz-bars"><div class="hz-bar-track"><div class="hz-bar-fill fwd" style="width:78.6%"></div></div></div>
+        <div class="pct" style="color:var(--forward)">+1.43ns</div>
+      </div>
+      <div class="hz-row">
+        <div class="name">200 MHz</div>
+        <div class="hz-bars"><div class="hz-bar-track"><div class="hz-bar-fill fwd" style="width:94.1%"></div></div></div>
+        <div class="pct" style="color:var(--forward)">+0.31ns</div>
+      </div>
+      <div class="hz-row">
+        <div class="name">225 MHz</div>
+        <div class="hz-bars"><div class="hz-bar-track"><div class="hz-bar-fill fwd" style="width:88.3%"></div></div></div>
+        <div class="pct" style="color:var(--forward)">+0.52ns</div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:26px; border-color: var(--accent-line);">
+      <h2 style="text-transform:none; letter-spacing:0; font-size:12.5px;">The honest part: the OoO core doesn't synthesize (yet)</h2>
+      <div style="padding:16px;">
+        <p class="intro" style="margin:0 0 10px;">
+          <code>OOOCore</code> (Gen6 OoO + Gen7 B/V/K, unconditionally present) hangs reproducibly during
+          Vivado synthesis — confirmed independently across multiple runs, up to 7.5 hours with zero log
+          progress. Rather than quietly drop it, a dedicated investigation (<code>docs/adr/0070</code>)
+          systematically tested six independent hypotheses, each with a hard wall-clock timeout so no
+          experiment could hang open-ended again:
+        </p>
+        <div class="chips" style="padding:0;">
+          <span class="chip">disk space — ruled out</span>
+          <span class="chip">thread count — ruled out</span>
+          <span class="chip">synthesis strategy — ruled out</span>
+          <span class="chip">hierarchy flattening — ruled out</span>
+          <span class="chip">vector width (512→64) — ruled out</span>
+          <span class="chip">resource sharing — ruled out</span>
+        </div>
+        <p class="intro" style="margin:12px 0 0;">
+          One real RTL refactor (register-file storage replication) was implemented, verified
+          bit-for-bit against both the directed suite and a 100-program constrained-random
+          <code>--ooo</code> cross-check, measured to have zero synthesis benefit, and reverted. The
+          triggering construct was not conclusively isolated — reported honestly rather than papered
+          over. The OoO core and every Gen 7 extension remain thoroughly verified by simulation (see
+          <a href="#verification">Verification</a> above); what's missing here is specifically the
+          hardware-realization evidence.
+        </p>
+      </div>
+    </div>
+
+    <p class="intro" style="margin-top:20px">
+      Reproduce: <code>vivado -mode batch -source fpga/vivado/create_project.tcl -tclargs inorder</code>
+      then <code>vivado -mode batch -source fpga/vivado/run_all.tcl -tclargs inorder 10.000 100mhz</code>.
+      Full reports, audit trail, and every integrity constraint this workflow followed:
+      <code>fpga/vivado/AUDIT.md</code>, <code>docs/adr/0068</code>–<code>0070</code>.
+    </p>
   </section>
 
   <section class="block tight" id="hazards">
@@ -704,7 +974,8 @@
       <div class="tool-item"><span class="dot done"></span><div><span class="t">Compiled-C toolchain infrastructure<span class="status-pill done">shipped</span></span><div class="s">Real <code>riscv-none-elf-gcc</code>, a Harvard-architecture linker script, and an ELF→memory-image converter — verified end-to-end on a known-answer smoke test.</div></div></div>
       <div class="tool-item"><span class="dot done"></span><div><span class="t">Dhrystone port<span class="status-pill done">shipped</span></span><div class="s">Fully verified correct — all 6 documented expected values match exactly (462,126 cycles, <code>Number_Of_Runs=500</code>).</div></div></div>
       <div class="tool-item"><span class="dot wip"></span><div><span class="t">CoreMark port<span class="status-pill wip">in progress</span></span><div class="s">Completes correctly at reduced size (<code>TOTAL_DATA_SIZE=400</code>, 37,323 cycles, no hang) — the standard, citable <code>TOTAL_DATA_SIZE=2000</code> configuration hasn't completed a clean run yet.</div></div></div>
-      <div class="tool-item"><span class="dot wip"></span><div><span class="t">FPGA bring-up<span class="status-pill wip">in progress</span></span><div class="s">Vendor-neutral top level and constraints template exist (<code>fpga/</code>); real hardware validation is the next open milestone.</div></div></div>
+      <div class="tool-item"><span class="dot done"></span><div><span class="t">Vivado synthesis (in-order core)<span class="status-pill done">shipped</span></span><div class="s">Real synthesis/place/route/timing/power on <code>xc7k325tffg900-2</code> — see <a href="#fpga">FPGA results</a> above. Real hardware (a physical board) is still the next open milestone.</div></div></div>
+      <div class="tool-item"><span class="dot wip"></span><div><span class="t">Vivado synthesis (out-of-order core)<span class="status-pill wip">investigating</span></span><div class="s">Hangs reproducibly — six hypotheses ruled out with real data, root cause not yet isolated. <code>docs/adr/0070</code>.</div></div></div>
     </div>
   </section>
 
