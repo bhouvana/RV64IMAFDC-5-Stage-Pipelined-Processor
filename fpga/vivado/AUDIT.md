@@ -171,12 +171,27 @@ touching `design/*.v` again and was not pursued this session (user's own
 call, given the time already spent: 7+ hours overnight plus ~40 more
 minutes of confirmed reproduction the next morning).
 
-**Working hypothesis, not confirmed:** `OOOCore`'s combination of a
-512-bit vector unit (`VALU.v`/`VLSU.v`, 64 physical vector registers) and
-the shared scalar ALU's wide crypto `case` block (AES/SHA/CLMUL, all in
-one `always` block alongside every base-ISA integer op) may be triggering
-a known class of Vivado optimizer pathological-runtime behavior on very
-wide combinational case-statement logic. Not verified by isolating either
+**Update (`docs/adr/0070`): this working hypothesis is retracted.** A
+follow-up investigation directly tested vector width (`VLEN=64` vs. the
+real `512`) on the full `OOOCore` build and got the identical hang at the
+identical point — conclusively ruling out vector-register width as the
+trigger. Six independent hypotheses were tested with real timeout data
+(disk, threads, strategy, hierarchy flattening, vector width, Vivado's
+resource-sharing search) and a real RTL refactor (register-file storage
+replication) was implemented, verified against both the directed suite and
+the constrained-random `--ooo` cross-check, and found to have zero
+measurable effect before being reverted. See `docs/adr/0070` for the full
+trail — the original text below is preserved for its own historical
+record of what was hypothesized before that investigation ran, not because
+it's still believed.
+
+**Original working hypothesis, not confirmed (superseded above):**
+`OOOCore`'s combination of a 512-bit vector unit (`VALU.v`/`VLSU.v`, 64
+physical vector registers) and the shared scalar ALU's wide crypto `case`
+block (AES/SHA/CLMUL, all in one `always` block alongside every base-ISA
+integer op) may be triggering a known class of Vivado optimizer
+pathological-runtime behavior on very wide combinational case-statement
+logic. Not verified by isolating either
 one independently.
 
 `HeteroSoC` (which instantiates `OOOCore` internally) was never attempted

@@ -57,9 +57,11 @@ overnight (~7.5 hours, CPU pegged near 100% continuously, zero `runme.log` progr
 morning (~35 minutes, same pattern) after ruling out disk space (moved the build dir to a drive with
 354GB free — hang reproduced identically), thread count (reproduced at both `maxThreads` 2 and 4), and
 synthesis strategy (reproduced at both the default and Vivado's `Flow_RuntimeOptimized`, its fastest
-option). Working hypothesis, not confirmed: the 512-bit vector unit and/or the wide crypto ALU case-block
-triggering a known class of Vivado optimizer pathological-runtime behavior on very wide combinational
-logic. Root cause not further isolated — doing so would need either deep Vivado-internals debugging or a
+option). Working hypothesis at the time, not confirmed: the 512-bit vector unit and/or the wide crypto
+ALU case-block triggering a known class of Vivado optimizer pathological-runtime behavior on very wide
+combinational logic. **Retracted by `docs/adr/0070`'s follow-up investigation**: `VLEN=64` hangs
+identically to `VLEN=512`, ruling out vector width directly; six hypotheses tested with real timeout data
+and a verified RTL refactor found no fix. Root cause not further isolated — doing so would need either deep Vivado-internals debugging or a
 throwaway RTL edit to bisect which sub-block triggers it, and the user's own call (presented directly via
 `AskUserQuestion`, given 7+ hours already spent) was to stop retrying and close with this documented as a
 real gap rather than keep spending session time chasing it. `HeteroSoC` was never attempted standalone

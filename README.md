@@ -399,13 +399,19 @@ RTL  →  Vivado Synthesis  →  Optimization  →  Placement  →  Routing  →
 **Read this before the numbers below:** only the in-order core (`PIPELINED`)
 has real, routed Vivado results. The Gen6 out-of-order core (`OOOCore`, which
 already includes Gen7 B/V/K unconditionally — see below) hangs reproducibly
-during Vivado's RTL elaboration/optimization in this environment — confirmed
-independently twice (once for 7.5 hours overnight, once for ~35 minutes the
-next morning after ruling out disk space, thread count, and synthesis
-strategy as the cause). `HeteroSoC` was never attempted standalone, since it
-instantiates `OOOCore` internally and would hit the same wall. Full diagnostic
-trail: `fpga/vivado/AUDIT.md`, `fpga/vivado/reports/SWEEP_LOG.md`,
-`docs/adr/0068`, `docs/adr/0069`. This is a real, present gap — the OoO core
+during Vivado's synthesis in this environment. A dedicated follow-up
+investigation (`docs/adr/0070`) systematically ruled out six independent
+hypotheses with real timeout data — disk space, thread count, synthesis
+strategy, hierarchy-flattening control, **vector-register width** (`VLEN=64`
+hangs identically to the real `512`, disproving the original "wide vector
+unit" theory), and Vivado's resource-sharing search — and implemented,
+verified (152/152 directed + 100/100 constrained-random `--ooo`), and then
+reverted one real RTL refactor (register-file storage replication) after it
+showed zero measurable effect. The triggering construct was not conclusively
+isolated. `HeteroSoC` was never attempted standalone, since it instantiates
+`OOOCore` internally and would hit the same wall. Full diagnostic trail:
+`fpga/vivado/AUDIT.md`, `fpga/vivado/reports/SWEEP_LOG.md`, `docs/adr/0068`,
+`docs/adr/0069`, `docs/adr/0070`. This is a real, present gap — the OoO core
 and Gen7 extensions are verified thoroughly by simulation (see
 [Verification](#verification) above) but **not** by this Vivado workflow.
 
@@ -492,7 +498,8 @@ then `vivado -mode batch -source fpga/vivado/run_all.tcl -tclargs inorder 10.000
 reference for `ooo`/`soc` too, which create projects fine — synthesis is what
 hangs for those two). Reports: `fpga/vivado/reports/`. Audit trail and every
 integrity constraint this workflow followed: `fpga/vivado/AUDIT.md`,
-`docs/adr/0068`, `docs/adr/0069`.
+`docs/adr/0068`, `docs/adr/0069`, `docs/adr/0070` (the hang root-cause
+investigation).
 
 ## Research-platform toggles
 
