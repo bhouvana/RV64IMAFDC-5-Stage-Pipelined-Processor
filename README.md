@@ -341,8 +341,7 @@ out-of-order core adds renaming, a physical register file, reservation stations,
 LSQ, Tomasulo scheduling, speculation, and dual-issue (Gen 6), then all three ratified Gen 7 pillars —
 Bit-Manipulation, Vector, Cryptography — through that same OoO machinery. A heterogeneous dual-core SoC
 (`HeteroSoC.v`) runs both cores together. Every closed item above has its own ADR with the real bugs
-found along the way — see [Generations](#generations) for the full table and [Documentation](#documentation)
-for where each one lives.
+found along the way — see [Documentation](#documentation) for where each one lives.
 
 What's genuinely still open, honestly:
 
