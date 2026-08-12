@@ -28,7 +28,8 @@ if {![info exists top_of($config)]} {
 }
 
 set repo_root [file normalize [file dirname [info script]]/../..]
-set build_dir $repo_root/fpga/vivado/build/$config
+source [file dirname [info script]]/build_dir.tcl
+set build_dir [vivado_build_dir $config]
 
 file delete -force $build_dir
 file mkdir $build_dir

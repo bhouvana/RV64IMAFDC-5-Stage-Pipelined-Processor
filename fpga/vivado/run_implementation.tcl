@@ -9,7 +9,8 @@ if {[llength $argv] < 2} { puts "usage: -tclargs <inorder|ooo|soc> <period_ns>";
 set config [lindex $argv 0]
 set period [lindex $argv 1]
 set repo_root [file normalize [file dirname [info script]]/../..]
-set build_dir $repo_root/fpga/vivado/build/$config
+source [file dirname [info script]]/build_dir.tcl
+set build_dir [vivado_build_dir $config]
 open_project $build_dir/$config.xpr
 
 set xdc_file [lindex [get_files -of_objects [get_filesets constrs_1]] 0]

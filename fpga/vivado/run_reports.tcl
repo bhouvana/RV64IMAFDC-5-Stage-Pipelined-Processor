@@ -7,7 +7,8 @@ if {[llength $argv] < 2} { puts "usage: -tclargs <inorder|ooo|soc> <label>"; exi
 set config [lindex $argv 0]
 set label [lindex $argv 1]
 set repo_root [file normalize [file dirname [info script]]/../..]
-set build_dir $repo_root/fpga/vivado/build/$config
+source [file dirname [info script]]/build_dir.tcl
+set build_dir [vivado_build_dir $config]
 set out_dir $repo_root/fpga/vivado/reports/$config/$label
 file mkdir $out_dir
 
