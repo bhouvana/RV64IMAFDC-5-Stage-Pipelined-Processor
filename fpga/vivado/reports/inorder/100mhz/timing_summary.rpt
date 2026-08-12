@@ -1,7 +1,7 @@
 Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
 ------------------------------------------------------------------------------------------------------------------------------------------------------------
 | Tool Version : Vivado v.2026.1 (win64) Build 6511674 Tue Jun 16 11:02:23 MDT 2026
-| Date         : Tue Aug 11 22:42:59 2026
+| Date         : Wed Aug 12 08:10:13 2026
 | Host         : DESKTOP-6U6OFON running 64-bit major release  (build 9200)
 | Command      : report_timing_summary -file C:/Python/5-stage-pipelined-processor-main/fpga/vivado/reports/inorder/100mhz/timing_summary.rpt -max_paths 10
 | Design       : PIPELINED
